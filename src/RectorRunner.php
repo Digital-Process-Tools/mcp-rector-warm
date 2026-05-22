@@ -47,11 +47,24 @@ final class RectorRunner
         $input = new $inputClass($argv);
         $output = new $outputClass();
 
-        $exit = $this->application->run($input, $output);
+        // Rector's JsonOutputFormatter uses raw `echo` (rector/src/ChangesReporting/Output/JsonOutputFormatter.php:40)
+        // bypassing the Symfony OutputInterface. Wrap in ob_*() to capture and prevent it from
+        // leaking into our MCP stdio transport.
+        ob_start();
+        try {
+            $exit = $this->application->run($input, $output);
+        } finally {
+            $echoed = ob_get_clean();
+        }
+
+        $combined = $output->fetch();
+        if (is_string($echoed) && $echoed !== '') {
+            $combined = $combined === '' ? $echoed : $combined . "\n" . $echoed;
+        }
 
         return [
             'exit_code' => (int) $exit,
-            'output' => $output->fetch(),
+            'output' => $combined,
             'warm_boot' => $warmBoot,
         ];
     }

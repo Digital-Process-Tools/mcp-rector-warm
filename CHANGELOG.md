@@ -6,6 +6,12 @@ This project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.1.6] — 2026-05-22
+
+### Fixed
+
+- Capture Rector's `JsonOutputFormatter` raw `echo` via `ob_start()`. Previously the JSON body was lost (silent stdout leak that bypassed Symfony's BufferedOutput), leaving the MCP `output` field empty and adapters unable to parse `changed_files` / errors.
+
 ## [0.1.5] — 2026-05-22
 
 ### Fixed
