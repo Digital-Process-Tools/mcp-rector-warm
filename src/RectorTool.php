@@ -25,8 +25,10 @@ final class RectorTool
     #[McpTool(name: 'rector_process', description: 'Run Rector refactoring on a path. Server-pinned config.')]
     public function process(string $path, bool $dryRun = true): array
     {
-        // --debug disables parallel mode (required: workers can't be re-spawned from our bin).
-        $argv = ['rector', 'process', '--output-format=json', '--debug', '--no-progress-bar'];
+        // Workers can now respawn correctly because RectorRunner spoofs $_SERVER['argv'][0]
+        // to the real rector binary before Application::run. Parallel mode + diff generation
+        // both work.
+        $argv = ['rector', 'process', '--output-format=json', '--no-progress-bar'];
         if ($dryRun) {
             $argv[] = '--dry-run';
         }

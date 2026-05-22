@@ -6,6 +6,19 @@ This project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.2.0] — 2026-05-22
+
+### Changed
+
+- Re-enabled Rector parallel mode. Previous `--debug` workaround disabled both parallel + diff generation; output was just `changed_files: [path]` without `file_diffs` or `applied_rectors`.
+- `RectorRunner` now spoofs `$_SERVER['argv'][0]` to the real rector binary path before `Application::run()`. Rector's parallel workers `proc_open(PHP_BINARY . ' ' . $_SERVER['argv'][0] . ' worker --port=X')`, so they now spawn rector correctly instead of trying to re-launch the MCP server bin.
+- `RectorTool` drops `--debug` from argv — full parallel + diff generation enabled.
+- New private `findRectorBin()` resolves the rector binary via `Composer\InstalledVersions` or vendor/bin fallbacks.
+
+### Result
+
+MCP `output` field now contains `file_diffs[].applied_rectors` + `diff` so consumers can show which rules want to refactor + what would change.
+
 ## [0.1.6] — 2026-05-22
 
 ### Fixed

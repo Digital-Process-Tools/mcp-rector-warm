@@ -47,6 +47,15 @@ final class RectorRunner
         $input = new $inputClass($argv);
         $output = new $outputClass();
 
+        // Rector's parallel mode forks workers via proc_open(PHP_BINARY . ' ' . $_SERVER['argv'][0] . ' worker --port=X ...').
+        // From within an MCP server, argv[0] is our bin (not rector) so workers can't respawn.
+        // Spoof argv[0] to the real rector binary path so workers spawn correctly. Restore after.
+        $origArgv0 = $_SERVER['argv'][0] ?? null;
+        $rectorBin = $this->findRectorBin();
+        if ($rectorBin !== null) {
+            $_SERVER['argv'][0] = $rectorBin;
+        }
+
         // Rector's JsonOutputFormatter uses raw `echo` (rector/src/ChangesReporting/Output/JsonOutputFormatter.php:40)
         // bypassing the Symfony OutputInterface. Wrap in ob_*() to capture and prevent it from
         // leaking into our MCP stdio transport.
@@ -55,6 +64,9 @@ final class RectorRunner
             $exit = $this->application->run($input, $output);
         } finally {
             $echoed = ob_get_clean();
+            if ($origArgv0 !== null) {
+                $_SERVER['argv'][0] = $origArgv0;
+            }
         }
 
         $combined = $output->fetch();
@@ -106,6 +118,39 @@ final class RectorRunner
         $app->setCatchExceptions(true);
 
         $this->application = $app;
+    }
+
+    /**
+     * Locate the real rector binary (the one parallel workers will respawn).
+     * Looks at Composer's installed package dir first, then common vendor/bin paths.
+     */
+    private function findRectorBin(): ?string
+    {
+        if (class_exists(\Composer\InstalledVersions::class, false)) {
+            try {
+                $pkgDir = \Composer\InstalledVersions::getInstallPath('rector/rector');
+                if (is_string($pkgDir)) {
+                    foreach (['bin/rector', 'bin/rector.php'] as $rel) {
+                        $candidate = realpath($pkgDir . '/' . $rel);
+                        if ($candidate !== false && is_file($candidate)) {
+                            return $candidate;
+                        }
+                    }
+                }
+            } catch (\Throwable) {
+                // fall through
+            }
+        }
+        foreach ([
+            __DIR__ . '/../vendor/bin/rector',          // local clone
+            __DIR__ . '/../../../../bin/rector',         // project-dep vendor/bin
+        ] as $candidate) {
+            $resolved = realpath($candidate);
+            if ($resolved !== false && is_file($resolved)) {
+                return $resolved;
+            }
+        }
+        return null;
     }
 
     private function detectRectorPrefix(): ?string
