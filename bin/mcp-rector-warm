@@ -4,7 +4,16 @@
 declare(strict_types=1);
 
 @ini_set('memory_limit', '-1');
-require __DIR__ . '/../vendor/autoload.php';
+// Dual-mode autoload: local clone vs. composer-global install.
+foreach ([
+    __DIR__ . '/../vendor/autoload.php',       // local dev: composer install in this repo
+    __DIR__ . '/../../../autoload.php',         // composer global / project-local require
+] as $autoload) {
+    if (is_file($autoload)) {
+        require $autoload;
+        break;
+    }
+}
 
 use Mcp\Server;
 use Mcp\Server\Transport\StdioTransport;
@@ -38,7 +47,7 @@ if ($config !== null) {
 // not here — to avoid polluting the MCP SDK before the server starts.
 
 $server = Server::builder()
-    ->setServerInfo('mcp-rector-warm', '0.1.0')
+    ->setServerInfo('mcp-rector-warm', '0.1.1')
     ->setDiscovery(dirname(__DIR__), ['src'])
     ->build();
 

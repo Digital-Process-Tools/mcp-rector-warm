@@ -6,6 +6,12 @@ This project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.1.1] — 2026-05-22
+
+### Fixed
+
+- `bin/mcp-rector-warm` now supports both local-clone and composer-global install paths. Previously the bin tried to load `__DIR__/../vendor/autoload.php` only, which fails when the package is installed as a dependency (project-local or global).
+
 ## [0.1.0] — 2026-05-22
 
 ### Added
