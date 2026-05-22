@@ -6,6 +6,12 @@ This project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.1.3] — 2026-05-22
+
+### Fixed
+
+- `bin/mcp-rector-warm` is actually shipped 100755 this time. v0.1.2 still had 100644 in the published tree.
+
 ## [0.1.2] — 2026-05-22
 
 ### Fixed
