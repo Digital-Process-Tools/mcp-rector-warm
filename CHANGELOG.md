@@ -6,6 +6,13 @@ This project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.2.1] — 2026-05-22
+
+### Fixed
+
+- Re-added `--debug` to RectorTool argv. Without it, rector parallel mode scans all configured paths even for single-file analysis (~14s per call on a project with 677 paths). `--debug` forces single-thread, brings warm calls back to ~70ms. The argv[0] spoof + findRectorBin() helper stay so consumers wanting parallel mode can drop `--debug` themselves.
+- Trade-off: `--debug` suppresses rector's `file_diffs[].applied_rectors` in JSON output. Consumers parsing the output get back only `changed_files: [path]` — the supertool adapter (`validators/rector-mcp/`) filters those bare entries client-side now.
+
 ## [0.2.0] — 2026-05-22
 
 ### Changed

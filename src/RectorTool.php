@@ -25,10 +25,11 @@ final class RectorTool
     #[McpTool(name: 'rector_process', description: 'Run Rector refactoring on a path. Server-pinned config.')]
     public function process(string $path, bool $dryRun = true): array
     {
-        // Workers can now respawn correctly because RectorRunner spoofs $_SERVER['argv'][0]
-        // to the real rector binary before Application::run. Parallel mode + diff generation
-        // both work.
-        $argv = ['rector', 'process', '--output-format=json', '--no-progress-bar'];
+        // --debug disables parallel mode + suppresses file_diffs in JSON output.
+        // We keep it for speed: parallel mode on 1 file is 14s overhead because rector
+        // still scans all configured paths at boot. Single-thread bypasses the worker
+        // dance entirely. Consumers can filter the bland "would refactor" message client-side.
+        $argv = ['rector', 'process', '--output-format=json', '--debug', '--no-progress-bar'];
         if ($dryRun) {
             $argv[] = '--dry-run';
         }
