@@ -1,0 +1,45 @@
+#!/usr/bin/env php
+<?php
+
+declare(strict_types=1);
+
+@ini_set('memory_limit', '-1');
+require __DIR__ . '/../vendor/autoload.php';
+
+use Mcp\Server;
+use Mcp\Server\Transport\StdioTransport;
+
+// Parse our own CLI flags BEFORE loading rector — keeps Server lean.
+$workingDir = null;
+$config = null;
+foreach (array_slice($argv, 1) as $arg) {
+    if (str_starts_with($arg, '--working-dir=')) {
+        $workingDir = substr($arg, 14);
+    } elseif (str_starts_with($arg, '--config=')) {
+        $config = $arg;
+    }
+}
+
+if ($workingDir !== null) {
+    if (!is_dir($workingDir)) {
+        fwrite(STDERR, "mcp-rector-warm: --working-dir not a directory: {$workingDir}\n");
+        exit(2);
+    }
+    chdir($workingDir);
+}
+
+// Hand the --config flag to RectorRunner via env var so we don't clobber $_SERVER['argv']
+// before the MCP SDK has a chance to use it.
+if ($config !== null) {
+    putenv('MCP_RECTOR_CONFIG=' . substr($config, 9));
+}
+
+// NOTE: rector's scoper-autoload is loaded lazily inside RectorRunner::boot() —
+// not here — to avoid polluting the MCP SDK before the server starts.
+
+$server = Server::builder()
+    ->setServerInfo('mcp-rector-warm', '0.1.0')
+    ->setDiscovery(dirname(__DIR__), ['src'])
+    ->build();
+
+$server->run(new StdioTransport());

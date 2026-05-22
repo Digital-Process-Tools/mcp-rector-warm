@@ -1,0 +1,26 @@
+{
+    "name": "dpt/mcp-rector-warm",
+    "description": "Warm-process MCP server for Rector. Keeps the Rector container bootstrapped across calls — ~9x faster per-file analysis vs cold CLI invocation. Compatible with any MCP client (Claude Desktop, Cline, Continue, Zed, custom).",
+    "type": "project",
+    "license": "proprietary",
+    "keywords": ["mcp", "model-context-protocol", "rector", "php", "refactoring", "static-analysis", "claude", "ai-tools"],
+    "homepage": "https://github.com/Digital-Process-Tools/mcp-rector-warm",
+    "require": {
+        "php": ">=8.2",
+        "mcp/sdk": "^0.5",
+        "symfony/finder": "^7.4",
+        "rector/rector": "^2.4"
+    },
+    "autoload": {
+        "psr-4": {
+            "Dpt\\McpRectorWarm\\": "src/"
+        }
+    },
+    "bin": ["bin/mcp-rector-warm"],
+    "config": {
+        "sort-packages": true
+    },
+    "require-dev": {
+        "phpunit/phpunit": "^10"
+    }
+}
