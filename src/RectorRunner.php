@@ -58,9 +58,16 @@ final class RectorRunner
 
     private function boot(): void
     {
-        // Load rector's scoped autoload lazily to avoid polluting the SDK at startup.
-        $scoperAutoload = dirname(__DIR__) . '/vendor/rector/rector/vendor/scoper-autoload.php';
+        // Load rector's scoped autoload lazily. Find it by reflecting on a Rector class:
+        // works whether mcp-rector-warm is installed as a local clone (nested vendor) or as
+        // a project/composer-global dep (rector lives parallel under the same vendor dir).
         if (!class_exists(RectorConfigsResolver::class, false)) {
+            // file = .../rector/rector/src/Bootstrap/RectorConfigsResolver.php → 3 levels up = package root
+            $rectorPkgDir = dirname((new \ReflectionClass(RectorConfigsResolver::class))->getFileName(), 3);
+            $scoperAutoload = $rectorPkgDir . '/vendor/scoper-autoload.php';
+            if (!is_file($scoperAutoload)) {
+                throw new \RuntimeException("scoper-autoload.php not found at: {$scoperAutoload}");
+            }
             require_once $scoperAutoload;
         }
         // Resolve Rector configs and build container.

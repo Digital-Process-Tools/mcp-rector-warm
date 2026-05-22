@@ -19,7 +19,8 @@ final class ServerStdioTest extends TestCase
     public static function setUpBeforeClass(): void
     {
         self::$bin = dirname(__DIR__, 2) . '/bin/mcp-rector-warm';
-        self::$fixtureDir = dirname(__DIR__) . '/Fixtures/project';
+        // Absolute paths — server chdirs to working-dir; relative cwd-dependent paths would break.
+        self::$fixtureDir = realpath(dirname(__DIR__) . '/Fixtures/project') ?: '';
         self::$fixtureFile = self::$fixtureDir . '/src/Sample.php';
 
         if (!is_file(self::$bin)) {
