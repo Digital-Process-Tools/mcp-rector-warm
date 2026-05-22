@@ -4,8 +4,8 @@
 
 # mcp-rector-warm
 
-> **Stop paying Rector's cold-start tax on every edit.**
-> A warm-process MCP server that keeps the Rector container hot. ~9× faster per call. Works with every MCP client.
+> **Stop paying [Rector](https://getrector.com/)'s cold-start tax on every edit.**
+> A warm-process [MCP](https://modelcontextprotocol.io/) server that keeps the [Rector](https://github.com/rectorphp/rector) container hot. ~9× faster per call. Works with every MCP client.
 
 [![Tests](https://github.com/Digital-Process-Tools/mcp-rector-warm/actions/workflows/tests.yml/badge.svg)](https://github.com/Digital-Process-Tools/mcp-rector-warm/actions/workflows/tests.yml)
 [![Packagist](https://img.shields.io/packagist/v/dpt/mcp-rector-warm.svg)](https://packagist.org/packages/dpt/mcp-rector-warm)
@@ -18,9 +18,9 @@
 
 ## Why
 
-Rector is one of the most useful tools in modern PHP. It is also one of the slowest to **start**.
+[Rector](https://getrector.com/) is one of the most useful tools in modern PHP — automated refactoring, type fixes, version upgrades. It is also one of the slowest to **start**.
 
-Every `rector process foo.php` pays the same toll: autoloader bootstrap, container build, ruleset compile. **~3-5 seconds before a single rule fires.** For agents and validators that run Rector after every edit, that cold-start cost dominates wall time.
+Every `rector process foo.php` pays the same toll: autoloader bootstrap, [DI container](https://github.com/rectorphp/rector/blob/main/src/DependencyInjection) build, ruleset compile. **~3-5 seconds before a single rule fires.** For agents and validators that run Rector after every edit, that cold-start cost dominates wall time.
 
 `mcp-rector-warm` runs Rector inside a long-lived PHP process. **First call pays the boot once. Every subsequent call reuses the live container.**
 
@@ -139,6 +139,18 @@ Three decisions worth knowing:
 **Memory?** The daemon sets `memory_limit = -1` like Rector's own CLI. Idle daemon ≈ 80MB resident.
 
 **Does it survive Rector version updates?** Probably. The prefix-detection scheme is forward-compatible with new `RectorPrefix<date>` values. Pin a Rector version in your own `composer.json` if you need determinism.
+
+## Credits
+
+- **[Rector](https://github.com/rectorphp/rector)** by [Tomas Votruba](https://github.com/TomasVotruba) and contributors — the engine doing all the real work. If you ship PHP, [sponsor him](https://github.com/sponsors/TomasVotruba).
+- **[Model Context Protocol](https://modelcontextprotocol.io/)** by Anthropic — the protocol that makes this kind of tool integration possible.
+- **[mcp/sdk](https://github.com/modelcontextprotocol/php-sdk)** — official PHP SDK, used here for stdio transport + tool discovery.
+
+## Related
+
+- **[Rector docs](https://getrector.com/documentation)** — config, rules, sets.
+- **[Rector on Packagist](https://packagist.org/packages/rector/rector)** — the upstream package.
+- **[claude-supertool](https://github.com/Digital-Process-Tools/claude-supertool)** — DPT's batched-ops Claude Code companion; integrates this server as a validator.
 
 ## License
 
