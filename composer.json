@@ -8,8 +8,8 @@
     "require": {
         "php": ">=8.2",
         "mcp/sdk": "^0.5",
-        "symfony/finder": "^7.4",
-        "rector/rector": "^2.4"
+        "rector/rector": "2.2.7",
+        "symfony/finder": "^7.4"
     },
     "autoload": {
         "psr-4": {
