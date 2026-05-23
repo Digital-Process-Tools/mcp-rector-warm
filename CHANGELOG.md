@@ -6,6 +6,16 @@ This project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.3.0] — 2026-05-23
+
+### Security
+
+- **Path containment on `rector_process`.** Previously the `$path` argument was forwarded straight to Rector. With `$dryRun=false` (toggleable from MCP), a hostile client could trigger refactor **rewrites** on arbitrary PHP files outside the configured working dir; with `$dryRun=true` the JSON `file_diffs` could leak file contents. `RectorTool::process()` now realpath-canonicalises `$path` against `realpath(getcwd())` (pinned at boot via `--working-dir`) and returns a `SecurityError` for out-of-cwd targets before Rector boots.
+
+### Added
+
+- Unit tests `RectorToolContainmentTest::testRejectsPathOutsideWorkingDir` + `testRejectsNonexistentPath`.
+
 ## [0.2.1] — 2026-05-22
 
 ### Fixed
