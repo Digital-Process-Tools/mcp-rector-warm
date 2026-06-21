@@ -47,7 +47,7 @@ if ($config !== null) {
 // not here — to avoid polluting the MCP SDK before the server starts.
 
 $server = Server::builder()
-    ->setServerInfo('mcp-rector-warm', '0.4.0')
+    ->setServerInfo('mcp-rector-warm', '0.4.1')
     ->setDiscovery(dirname(__DIR__), ['src'])
     ->build();
 
