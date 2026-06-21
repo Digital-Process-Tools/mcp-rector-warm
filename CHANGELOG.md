@@ -6,6 +6,16 @@ This project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.4.0] — 2026-06-21
+
+### Fixed
+
+- **Warm reflection state no longer leaks between files (claude-supertool#273).** The warm container reused one Rector `Application` across every call but reset nothing between them. Rector's `DynamicSourceLocatorProvider` caches its `AggregateSourceLocator` for every non-PHPUnit run, so the second (and every later) file was analysed with a source locator that only knew the *first* file — and Rector emitted `System error: "ClassReflection must be resolved for class X"` on test classes whose hierarchy the stale locator could not resolve. A fresh `rector` CLI process never hit this; the warm daemon did, and the failure was being content-hash-cached and replayed (2100 poisoned entries). `RectorRunner::run()` now resets every service tagged `ResettableInterface` before each warm call — the same flush `AbstractRectorTestCase` performs between fixtures — so the warm daemon matches a cold CLI boot. The expensive bootstrap stays warm; only per-run reflection state is flushed (~no measurable per-call cost). This makes the rector-mcp adapter's `System error:` suppression defense-in-depth rather than load-bearing.
+
+### Added
+
+- **`testWarmReflectionMatchesColdForSequence` regression (env-gated).** Drives a sequence of files through one warm server and asserts no `System error` / stale-reflection failure. Self-contained synthetic classes cannot reproduce #273 (in-process PHPUnit disables the locator cache via `isPHPUnitRun()`, and the trigger needs real framework base classes extended from outside the configured paths), so the test points at a real project via `MCP_RECTOR_WARM_REPRO_DIR` / `MCP_RECTOR_WARM_REPRO_FILES` / `MCP_RECTOR_WARM_REPRO_BIN` and skips otherwise. `tools/repro-273.py` discovers a triggering sequence.
+
 ## [0.3.0] — 2026-05-23
 
 ### Security
