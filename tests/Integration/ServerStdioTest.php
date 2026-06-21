@@ -197,6 +197,84 @@ final class ServerStdioTest extends TestCase
     }
 
     /**
+     * Regression for claude-supertool#273: the warm container must return the same
+     * result as a cold CLI for every file in a sequence — no spurious
+     * "System error: ClassReflection must be resolved for class X".
+     *
+     * Why this is env-gated and not a self-contained fixture:
+     *   1. The bug only manifests when Rector's DynamicSourceLocatorProvider caches
+     *      its AggregateSourceLocator, which it does ONLY for non-PHPUnit runs
+     *      (StaticPHPUnitEnvironment::isPHPUnitRun() === false). An in-process
+     *      PHPUnit test therefore can never reproduce it — the cache is bypassed.
+     *      The subprocess server is non-PHPUnit, which is why it triggers there.
+     *   2. The failing reflection needs real framework base classes (DVSI's
+     *      SiTestCase / SiModuleTestCase) extended from files outside the configured
+     *      paths. Trivial synthetic classes resolve cleanly and never trip it.
+     *
+     * Point this at a project that reproduces it (e.g. a DVSI checkout):
+     *   MCP_RECTOR_WARM_REPRO_DIR=/path/to/project \
+     *   MCP_RECTOR_WARM_REPRO_FILES=relA.php,relB.php \   # >=2 files, B fails warm pre-fix
+     *   MCP_RECTOR_WARM_REPRO_CONFIG=rector.php \         # optional, default rector.php
+     *   vendor/bin/phpunit --filter testWarmReflectionMatchesColdForSequence
+     */
+    public function testWarmReflectionMatchesColdForSequence(): void
+    {
+        $project = getenv('MCP_RECTOR_WARM_REPRO_DIR');
+        $filesEnv = getenv('MCP_RECTOR_WARM_REPRO_FILES');
+        if ($project === false || $filesEnv === false) {
+            self::markTestSkipped(
+                'Set MCP_RECTOR_WARM_REPRO_DIR + MCP_RECTOR_WARM_REPRO_FILES (>=2 comma-separated '
+                . 'paths relative to the dir) to run the #273 warm-reflection regression. '
+                . 'See tools/repro-273.py to discover a triggering sequence.',
+            );
+        }
+
+        $project = realpath($project) ?: $project;
+        $config = getenv('MCP_RECTOR_WARM_REPRO_CONFIG') ?: 'rector.php';
+        // The bundled bin only boots its own rector + autoload; point this at the
+        // project's installed bin (e.g. DVSI's libs/bin/mcp-rector-warm) when the
+        // config references project-specific custom rules.
+        $bin = getenv('MCP_RECTOR_WARM_REPRO_BIN') ?: self::$bin;
+        $files = array_values(array_filter(array_map('trim', explode(',', $filesEnv))));
+        self::assertGreaterThanOrEqual(2, count($files), 'need at least two files to warm then re-use');
+
+        $proc = $this->spawnServer($project, $config, $bin);
+
+        try {
+            $this->send($proc['stdin'], ['jsonrpc' => '2.0', 'id' => 1, 'method' => 'initialize', 'params' => [
+                'protocolVersion' => '2024-11-05',
+                'capabilities'    => new \stdClass(),
+                'clientInfo'      => ['name' => 'phpunit', 'version' => '1.0.0'],
+            ]]);
+            $this->send($proc['stdin'], ['jsonrpc' => '2.0', 'method' => 'notifications/initialized']);
+
+            $id = 1;
+            foreach ($files as $rel) {
+                $id++;
+                $abs = $project . '/' . ltrim($rel, '/');
+                $this->send($proc['stdin'], $this->processCall($id, $abs));
+                $resp = $this->readResponse($proc['stdout'], $id);
+                $blob = (string) json_encode($resp['result']['structuredContent'] ?? []);
+                self::assertStringNotContainsString(
+                    'System error',
+                    $blob,
+                    "warm container emitted a System error on '{$rel}' (#273)" . $this->stderrTail($proc['stderr']),
+                );
+                self::assertStringNotContainsString(
+                    'must be resolved',
+                    $blob,
+                    "warm container served a stale reflection locator on '{$rel}' (#273)" . $this->stderrTail($proc['stderr']),
+                );
+            }
+        } finally {
+            fclose($proc['stdin']);
+            stream_get_contents($proc['stdout']);
+            fclose($proc['stdout']);
+            proc_close($proc['handle']);
+        }
+    }
+
+    /**
      * @param array<string,mixed> $response
      */
     private function changedFiles(array $response): int
@@ -210,14 +288,17 @@ final class ServerStdioTest extends TestCase
     /**
      * @return array{handle: resource, stdin: resource, stdout: resource, stderr: string}
      */
-    private function spawnServer(string $project): array
+    private function spawnServer(string $project, string $config = 'rector.php', ?string $bin = null): array
     {
         // Capture stderr to a file (not /dev/null) so a CI failure has diagnostics.
         $stderr = $project . '/server.stderr';
+        // Absolute config path passes through unchanged; a relative one resolves
+        // against the project (working) dir, matching the production daemon.
+        $configPath = str_starts_with($config, '/') ? $config : $project . '/' . $config;
         $cmd = [
-            self::$bin,
+            $bin ?? self::$bin,
             '--working-dir=' . $project,
-            '--config=' . $project . '/rector.php',
+            '--config=' . $configPath,
         ];
         $proc = proc_open(
             $cmd,

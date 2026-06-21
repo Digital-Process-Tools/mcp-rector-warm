@@ -14,6 +14,7 @@ use Rector\DependencyInjection\RectorContainerFactory;
 final class RectorRunner
 {
     private ?object $application = null;
+    private ?object $container = null;
     private ?string $appClass = null;
     private ?string $inputClass = null;
     private ?string $outputClass = null;
@@ -36,6 +37,16 @@ final class RectorRunner
         $warmBoot = $this->isWarm();
         if (!$warmBoot) {
             $this->boot();
+        } else {
+            // Warm reuse: flush per-run reflection state before analysing the next
+            // file. Rector's DynamicSourceLocatorProvider caches its
+            // AggregateSourceLocator for every non-PHPUnit run, so a second, different
+            // file gets analysed with a locator that only knows the first file and
+            // Rector emits 'System error: ClassReflection must be resolved for class X'
+            // (claude-supertool#273). A fresh CLI process never hits this; the warm
+            // daemon must reset the same services AbstractRectorTestCase resets between
+            // fixtures to behave identically to cold.
+            $this->resetReflectionState();
         }
 
         $inputClass = $this->inputClass;
@@ -118,6 +129,31 @@ final class RectorRunner
         $app->setCatchExceptions(true);
 
         $this->application = $app;
+        $this->container = $container;
+    }
+
+    /**
+     * Reset Rector's per-run reflection state between warm calls. Mirrors
+     * AbstractRectorTestCase::setUp(), which resets every service tagged
+     * ResettableInterface so each fixture analyses with a fresh source locator.
+     * The warm daemon reuses one container across files and needs the same flush;
+     * without it the cached AggregateSourceLocator from the previous file poisons
+     * the next one (claude-supertool#273).
+     */
+    private function resetReflectionState(): void
+    {
+        $container = $this->container;
+        if ($container === null || !method_exists($container, 'tagged')) {
+            return;
+        }
+
+        /** @var iterable<object> $resettables */
+        $resettables = $container->tagged(\Rector\Contract\DependencyInjection\ResettableInterface::class);
+        foreach ($resettables as $resettable) {
+            if (method_exists($resettable, 'reset')) {
+                $resettable->reset();
+            }
+        }
     }
 
     /**
