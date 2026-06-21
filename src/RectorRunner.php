@@ -11,7 +11,7 @@ use Rector\DependencyInjection\RectorContainerFactory;
  * Holds a warm Rector container + Application across multiple analyse calls.
  * Boot happens lazily on first call; subsequent calls reuse the live container.
  */
-final class RectorRunner
+final class RectorRunner implements RunnerInterface
 {
     private ?object $application = null;
     private ?object $container = null;
@@ -23,6 +23,20 @@ final class RectorRunner
     public function isWarm(): bool
     {
         return $this->application !== null;
+    }
+
+    /**
+     * Drop the warm container + application so the next run() boots fresh. Used to
+     * recover from warm-state corruption that resetReflectionState() cannot flush:
+     * PHPStan's NodeScopeResolver/reflection caches are not ResettableInterface
+     * services, so a class whose shape changed on disk between warm calls can yield
+     * a null scope deep in PHPStanNodeScopeResolver ("Call to a member function
+     * toMutatingScope() on null"). A fresh container is the only guaranteed reset.
+     */
+    public function reboot(): void
+    {
+        $this->application = null;
+        $this->container = null;
     }
 
     /**

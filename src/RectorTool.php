@@ -8,11 +8,26 @@ use Mcp\Capability\Attribute\McpTool;
 
 final class RectorTool
 {
-    private RectorRunner $runner;
+    private RunnerInterface $runner;
 
     public function __construct(?RectorRunner $runner = null)
     {
         $this->runner = $runner ?? new RectorRunner();
+    }
+
+    /**
+     * Test seam: build a tool around an arbitrary runner (e.g. a double that
+     * simulates warm-state corruption). Kept separate from __construct so the MCP
+     * SDK's constructor autowiring still sees a concrete RectorRunner type.
+     *
+     * @internal
+     */
+    public static function withRunner(RunnerInterface $runner): self
+    {
+        $tool = new self();
+        $tool->runner = $runner;
+
+        return $tool;
     }
 
     /**
@@ -55,6 +70,21 @@ final class RectorTool
         try {
             return $this->runner->run($argv);
         } catch (\Throwable $e) {
+            // A warm container can corrupt across edits: PHPStan's scope/reflection
+            // caches are not ResettableInterface, so a class whose shape changed on
+            // disk yields a null scope deep in PHPStanNodeScopeResolver
+            // ("toMutatingScope() on null"). It is not a real finding — a cold run on
+            // the same file passes. Reboot the container and retry once so the caller
+            // gets the correct (cold-quality) result instead of a false rector.error.
+            if ($this->runner->isWarm() && self::isRecoverableWarmCorruption($e)) {
+                $this->runner->reboot();
+                try {
+                    return $this->runner->run($argv);
+                } catch (\Throwable $retryError) {
+                    $e = $retryError;
+                }
+            }
+
             return [
                 'exit_code' => -1,
                 'output' => '',
@@ -64,5 +94,23 @@ final class RectorTool
                 'trace' => $e->getTraceAsString(),
             ];
         }
+    }
+
+    /**
+     * True for internal Rector/PHPStan errors that signal corrupted warm state
+     * rather than a genuine problem with the analysed code — recoverable by
+     * rebooting the container. Matched on message because the underlying type is a
+     * plain \Error (null method call) or Rector "System error".
+     */
+    private static function isRecoverableWarmCorruption(\Throwable $error): bool
+    {
+        $message = $error->getMessage();
+        foreach (['toMutatingScope', 'must be resolved', 'System error'] as $needle) {
+            if (str_contains($message, $needle)) {
+                return true;
+            }
+        }
+
+        return false;
     }
 }
