@@ -97,6 +97,11 @@ final class ServerVersionTest extends TestCase
             'branch pseudo-version is rejected' => ['dev-main', null],
             'unreachable-tag pseudo-version is rejected' => ['9999999-dev', null],
             'a dev-flavoured branch-alias is rejected' => ['0.6.0-dev', null],
+            // "dev" only rejects as its own delimited component -- a
+            // pre-release/build token that merely contains those letters
+            // is a real accepted shape, not a branch-derived pseudo-version.
+            'a pre-release token containing "dev" as a substring is accepted' => ['1.0.0-development', '1.0.0-development'],
+            'a build token containing "dev" as a substring is accepted' => ['1.0.0+devteam', '1.0.0+devteam'],
             'trailing garbage after a real triple is rejected' => ['0.5.0 (unstable)', null],
             'two components is not a semver' => ['0.5', null],
         ];

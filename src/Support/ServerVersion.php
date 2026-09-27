@@ -89,7 +89,13 @@ final class ServerVersion
             return null;
         }
 
-        if (stripos($matches[1], 'dev') !== false) {
+        // Reject only when "dev" is a component of its own (delimited by the
+        // string's start, a dot, a hyphen or a plus on both sides) rather
+        // than any substring -- a real pre-release/build token that merely
+        // contains those four letters, e.g. "1.0.0-development" or
+        // "1.0.0+devteam", is not a branch-derived pseudo-version and must
+        // not be rejected alongside "0.6.0-dev".
+        if (preg_match('/(?:^|[.\-+])dev(?:[.\-+]|$)/i', $matches[1]) === 1) {
             return null;
         }
 
