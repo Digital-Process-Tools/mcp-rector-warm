@@ -76,7 +76,13 @@ class RectorRunner implements RunnerInterface
      *  or a withBootstrapFiles() file, composer.json is never required by rector.php, so a
      *  mid-session edit to it went undetected by configFileChanged() and the worker kept
      *  serving the PHP-set selection from the stale constraint (#34). Refreshed the same way
-     *  $configFile is: resolving the path and hashing its bytes never requires the file. */
+     *  $configFile is: resolving the path and hashing its bytes never requires the file.
+     *  Deliberately coarse, same trade-off as the main config file already accepts: whether
+     *  a given rector.php actually calls withPhpSets() with no argument is not knowable
+     *  without executing it, so ANY composer.json edit forces a reboot on the next call, not
+     *  only one that changes require.php -- a project with a composer.json but no bare
+     *  withPhpSets() call reboots on an unrelated composer.json edit (a new dependency, a
+     *  reformat) exactly as an unrelated rector.php edit already forces a reboot today. */
     private ?string $composerFile = null;
 
     /** sha256 of $composerFile's contents as of the last successful boot, or null when
