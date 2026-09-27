@@ -83,7 +83,23 @@ final class StdioLspTransport
             throw new RuntimeException('failed to encode LSP message: ' . json_last_error_msg());
         }
 
-        fwrite($this->out, "Content-Length: " . strlen($body) . "\r\n\r\n" . $body);
+        $frame = "Content-Length: " . strlen($body) . "\r\n\r\n" . $body;
+
+        // fwrite() can return false (stream error) or fewer bytes than asked
+        // for (a partial write, e.g. a full pipe interrupted by a signal).
+        // Either way a silent return here would leave a client unable to
+        // tell "the message never fully went out" from "nothing more to
+        // send" -- the same discipline read() already applies to a short
+        // fread() three lines up in this class.
+        $written = fwrite($this->out, $frame);
+        if ($written !== strlen($frame)) {
+            throw new RuntimeException(sprintf(
+                'LSP frame write failed or was short: expected %d bytes, wrote %s',
+                strlen($frame),
+                $written === false ? 'false (stream error)' : (string) $written,
+            ));
+        }
+
         fflush($this->out);
     }
 }

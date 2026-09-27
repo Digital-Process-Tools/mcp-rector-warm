@@ -25,10 +25,11 @@ point of using it is to run everything -- I/O, timers, concurrent requests --
 on one non-blocking loop.
 
 **This repo's worker model is the opposite of that.** `RectorRunner::boot()`
-and `forkAndExecute()` (`src/RectorRunner.php:187-363`) use `pcntl_fork()` to
-run each Rector call in a forked child, then block the parent on a blocking
-socket read (`readExactly()`, `src/RectorRunner.php:637`) until that child
-answers or times out. There is no event loop today, and introducing Amp's
+(`src/RectorRunner.php:203`) and `forkAndExecute()`
+(`src/RectorRunner.php:350`) use `pcntl_fork()` to run each Rector call in a
+forked child, then block the parent on a blocking socket read
+(`readExactly()`, `src/RectorRunner.php:625`) until that child answers or
+times out. There is no event loop today, and introducing Amp's
 would mean either (a) running two schedulers in one process -- Amp's loop for
 LSP I/O, and PHP's own blocking I/O for the fork/socket pair -- coordinated by
 hand, or (b) rewriting `RectorRunner`'s fork/socket core onto Amp, which is

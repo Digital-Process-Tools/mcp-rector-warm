@@ -99,4 +99,20 @@ final class StdioLspTransportTest extends TestCase
             $transport->read(),
         );
     }
+
+    public function testWriteThrowsWhenTheStreamRejectsTheBytes(): void
+    {
+        // A failed fwrite() must be as loud as the short-read case above
+        // (testReadThrowsOnTruncatedBody) -- a caller that only checks for a
+        // thrown exception on the read side would otherwise never learn a
+        // message was dropped on its way out. A read-only stream makes
+        // fwrite() return false cleanly (no warning, no TypeError), which is
+        // exactly the silent-failure shape this guards against.
+        $out = fopen('php://memory', 'r');
+
+        $transport = new StdioLspTransport(fopen('php://memory', 'r'), $out);
+
+        $this->expectException(\RuntimeException::class);
+        $transport->write(['jsonrpc' => '2.0', 'method' => 'initialized']);
+    }
 }
