@@ -440,36 +440,74 @@ class RectorRunner implements RunnerInterface
      */
     protected function runCold(array $argv): array
     {
-        $descriptors = [0 => ['pipe', 'r'], 1 => ['pipe', 'w'], 2 => ['pipe', 'w']];
-        $command = [\PHP_BINARY, \dirname(__DIR__) . '/bin/rector-cold-call.php'];
-        $process = \proc_open($command, $descriptors, $pipes);
-        if (!\is_resource($process)) {
-            throw new \RuntimeException('Could not spawn a cold rector subprocess (no-pcntl fallback, #31).');
+        // Both the result (#46) and the child's stdout/stderr (#45) travel through
+        // temp files, never through OS pipes. A pipe has a small, fixed OS buffer:
+        // reading two of them one after another (the original code) deadlocks the
+        // moment either pipe fills before the parent gets to it, because the child
+        // then blocks writing while the parent blocks reading the other one (#45).
+        // stream_select() can drain multiple pipes concurrently to avoid that -- but
+        // stream_select() over proc_open() pipes is documented not to work on
+        // Windows at all ("Use of stream_select() on file descriptors returned by
+        // proc_open() will fail and return false under Windows", php.net), and
+        // Windows is this fallback's own stated reason to exist (no pcntl, ever).
+        // A file has no such bounded buffer: proc_open()'s own 'file' descriptor
+        // type lets the child write directly to a file, sidestepping the whole
+        // pipe-buffer-deadlock class rather than working around it, identically on
+        // every platform. Rector's own console writes (SymfonyStyle/ConsoleOutput)
+        // bypass ob_start() and display_errors and land straight on the real fd 1,
+        // so json_decode()ing stdout as the result (the original bug behind #46)
+        // is still wrong even once #45 is fixed -- the result never shares a
+        // channel with anything Rector itself may write.
+        $resultFile = \tempnam(\sys_get_temp_dir(), 'rector-cold-result-');
+        $stdoutFile = \tempnam(\sys_get_temp_dir(), 'rector-cold-stdout-');
+        $stderrFile = \tempnam(\sys_get_temp_dir(), 'rector-cold-stderr-');
+        if ($resultFile === false || $stdoutFile === false || $stderrFile === false) {
+            throw new \RuntimeException('Could not allocate temp files for the cold rector subprocess channels.');
         }
 
-        $request = (string) \json_encode([
-            'daemon_argv' => $_SERVER['argv'] ?? [],
-            'call_argv' => $argv,
-            'cwd' => \getcwd(),
-        ]);
-        \fwrite($pipes[0], $request);
-        \fclose($pipes[0]);
-        $stdout = \stream_get_contents($pipes[1]);
-        $stderr = \stream_get_contents($pipes[2]);
-        \fclose($pipes[1]);
-        \fclose($pipes[2]);
-        $exitCode = \proc_close($process);
+        try {
+            $descriptors = [
+                0 => ['pipe', 'r'],
+                1 => ['file', $stdoutFile, 'w'],
+                2 => ['file', $stderrFile, 'w'],
+            ];
+            $command = [\PHP_BINARY, \dirname(__DIR__) . '/bin/rector-cold-call.php'];
+            $process = \proc_open($command, $descriptors, $pipes);
+            if (!\is_resource($process)) {
+                throw new \RuntimeException('Could not spawn a cold rector subprocess (no-pcntl fallback, #31).');
+            }
 
-        $decoded = $stdout === false || $stdout === '' ? null : \json_decode($stdout, true);
-        if (!\is_array($decoded) || isset($decoded['error'])) {
-            $message = \is_array($decoded) && isset($decoded['error'])
-                ? (string) $decoded['error']
-                : "cold rector subprocess produced no output (exit {$exitCode}): " . \trim((string) $stderr);
-            throw new \RuntimeException($message);
+            $request = (string) \json_encode([
+                'daemon_argv' => $_SERVER['argv'] ?? [],
+                'call_argv' => $argv,
+                'cwd' => \getcwd(),
+                'result_file' => $resultFile,
+            ]);
+            \fwrite($pipes[0], $request);
+            \fclose($pipes[0]);
+            $exitCode = \proc_close($process);
+
+            $resultJson = \is_file($resultFile) ? \file_get_contents($resultFile) : false;
+            $decoded = $resultJson === false || $resultJson === '' ? null : \json_decode($resultJson, true);
+            if (!\is_array($decoded) || isset($decoded['error'])) {
+                $stderr = (string) \file_get_contents($stderrFile);
+                $consoleOutput = (string) \file_get_contents($stdoutFile);
+                $diagnostic = \trim($stderr . ($consoleOutput !== '' ? \PHP_EOL . $consoleOutput : ''));
+                $message = \is_array($decoded) && isset($decoded['error'])
+                    ? (string) $decoded['error']
+                    : "cold rector subprocess produced no output (exit {$exitCode}): " . $diagnostic;
+                throw new \RuntimeException($message);
+            }
+
+            /** @var array{exit_code: int, output: string, warm_boot: bool} $decoded */
+            return $decoded;
+        } finally {
+            foreach ([$resultFile, $stdoutFile, $stderrFile] as $tempFile) {
+                if (\is_string($tempFile) && \is_file($tempFile)) {
+                    @\unlink($tempFile);
+                }
+            }
         }
-
-        /** @var array{exit_code: int, output: string, warm_boot: bool} $decoded */
-        return $decoded;
     }
 
     /**

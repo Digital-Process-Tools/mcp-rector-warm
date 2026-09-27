@@ -10,11 +10,18 @@ declare(strict_types=1);
 // RectorRunner::runCold() only when RectorRunner::canFork() is false (no pcntl
 // at all -- Windows, or #18's disable_functions case), since there is then no
 // other safe way to isolate a reboot from an already-booted process. Reads one
-// JSON request from stdin, writes one JSON result to stdout, then exits.
+// JSON request from stdin, writes one JSON result to the temp file the request
+// names ('result_file' -- #46, never stdout), then exits.
 
-// Every PHP-level notice/deprecation/warning display goes to stderr, never onto
-// this process's stdout, which carries the JSON result and nothing else (mirrors
-// bin/mcp-rector-warm's own hygiene, #15/#26).
+// Every PHP-level notice/deprecation/warning display goes to stderr (mirrors
+// bin/mcp-rector-warm's own hygiene, #15/#26). stdout is NOT the result channel:
+// Rector's own SymfonyStyle/ConsoleOutput can write straight to the real stdout
+// (a deprecated-set warning, an onboarding notice), bypassing ob_start() and any
+// display_errors setting entirely -- so a channel shared with Rector's own console
+// output cannot be trusted to carry clean JSON (#46). The result goes to the temp
+// file named in the request's 'result_file' instead; stdout and stderr are left
+// free for whatever Rector itself chooses to write there, and RectorRunner::runCold()
+// only ever reads them as diagnostics, never as data.
 ini_set('display_errors', 'stderr');
 
 @ini_set('memory_limit', '-1');
@@ -33,11 +40,27 @@ use Dpt\McpRectorWarm\RectorRunner;
 $input = stream_get_contents(STDIN);
 $request = is_string($input) && $input !== '' ? json_decode($input, true) : null;
 if (!is_array($request)) {
-    fwrite(STDOUT, (string) json_encode([
-        'error' => 'rector-cold-call: invalid or missing JSON request on stdin',
-        'error_class' => 'RuntimeException',
-    ]));
+    fwrite(STDERR, 'rector-cold-call: invalid or missing JSON request on stdin');
     exit(1);
+}
+
+$resultFile = isset($request['result_file']) && is_string($request['result_file']) && $request['result_file'] !== ''
+    ? $request['result_file']
+    : null;
+
+/**
+ * Write the cold call's result to its channel: the result_file the parent named in
+ * the request, or stderr as a last resort when the parent never gave one (an old
+ * parent, or a malformed request) -- never stdout, which #46 established Rector
+ * itself may already be writing to.
+ */
+function writeColdResult(?string $resultFile, string $json): void
+{
+    if ($resultFile === null) {
+        fwrite(STDERR, $json);
+        return;
+    }
+    file_put_contents($resultFile, $json);
 }
 
 // RectorConfigsResolver reads --config straight from $_SERVER['argv'] (see
@@ -56,9 +79,9 @@ $runner = new RectorRunner();
 try {
     $result = $runner->runOnceInThisProcess($callArgv);
     $encoded = json_encode($result, JSON_INVALID_UTF8_SUBSTITUTE);
-    fwrite(STDOUT, $encoded !== false ? $encoded : '{"error":"failed to encode the cold-call result","error_class":"JsonException"}');
+    writeColdResult($resultFile, $encoded !== false ? $encoded : '{"error":"failed to encode the cold-call result","error_class":"JsonException"}');
 } catch (\Throwable $e) {
-    fwrite(STDOUT, (string) json_encode([
+    writeColdResult($resultFile, (string) json_encode([
         'error' => $e->getMessage(),
         'error_class' => $e::class,
     ], JSON_INVALID_UTF8_SUBSTITUTE));

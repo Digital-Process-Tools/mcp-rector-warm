@@ -1,0 +1,43 @@
+description: "Without pcntl (#18), a rector.php whose bootstrap floods stderr with more than one pipe buffer's worth of PHP notices must not hang the cold subprocess forever: runCold() used to read stdout and stderr one after another, and once either pipe filled its OS buffer before EOF the parent and the child deadlocked (#45)."
+php_ini:
+  disable_functions: pcntl_fork
+config: |
+  <?php
+
+  declare(strict_types=1);
+
+  use Rector\Config\RectorConfig;
+  use Rector\Php82\Rector\Class_\ReadOnlyClassRector;
+  use Rector\ValueObject\PhpVersion;
+
+  // Floods stderr with well over one pipe buffer's worth of PHP notices (~64 KiB on
+  // Linux, less on macOS) every time this config is required -- which, on the
+  // no-pcntl cold path, is every single call. #45's deadlock needs nothing more
+  // than this: runCold() used to block reading stdout to EOF while this fills the
+  // stderr pipe and blocks the child's own write to it.
+  for ($i = 0; $i < 4000; $i++) {
+      trigger_error(str_repeat('x', 100) . ' ' . $i, E_USER_WARNING);
+  }
+
+  return RectorConfig::configure()
+      ->withPaths([__DIR__ . "/src"])
+      ->withPhpVersion(PhpVersion::PHP_83)
+      ->withRules([ReadOnlyClassRector::class]);
+files:
+  src/Money.php: |
+    <?php
+
+    declare(strict_types=1);
+
+    final class Money
+    {
+        public function __construct(private readonly int $amount)
+        {
+        }
+    }
+steps:
+  - call: src/Money.php
+    expect:
+      is_error: false
+      changed: 1
+      diff_contains: "+final readonly class Money"
