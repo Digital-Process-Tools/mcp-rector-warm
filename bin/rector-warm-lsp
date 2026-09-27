@@ -1,0 +1,72 @@
+#!/usr/bin/env php
+<?php
+
+declare(strict_types=1);
+
+// Same reasoning as bin/mcp-rector-warm: notices/warnings must never land on
+// the JSON-RPC pipe on stdout.
+ini_set('display_errors', 'stderr');
+
+@ini_set('memory_limit', '-1');
+
+// Dual-mode autoload: local clone vs. composer-global install.
+foreach ([
+    __DIR__ . '/../vendor/autoload.php',
+    __DIR__ . '/../../../autoload.php',
+] as $autoload) {
+    if (is_file($autoload)) {
+        require $autoload;
+        break;
+    }
+}
+
+use Dpt\McpRectorWarm\Lsp\LspServer;
+use Dpt\McpRectorWarm\Lsp\StdioLspTransport;
+
+// v1 prototype (#52/#53): the handshake only. --working-dir is parsed here,
+// same flag/behaviour as bin/mcp-rector-warm, since a real client sets it
+// before any didOpen/didSave call lands -- --config is deliberately NOT
+// wired yet: nothing here runs Rector, so there is nothing for it to reach.
+$workingDir = null;
+foreach (array_slice($argv, 1) as $arg) {
+    if (str_starts_with($arg, '--working-dir=')) {
+        $workingDir = substr($arg, 14);
+        break;
+    }
+}
+
+if ($workingDir !== null) {
+    if (!is_dir($workingDir)) {
+        fwrite(STDERR, "rector-warm-lsp: --working-dir not a directory: {$workingDir}\n");
+        exit(2);
+    }
+    chdir($workingDir);
+}
+
+$transport = new StdioLspTransport(STDIN, STDOUT);
+$server = new LspServer('0.1.0-prototype');
+
+while (true) {
+    try {
+        $message = $transport->read();
+    } catch (\RuntimeException $e) {
+        fwrite(STDERR, "rector-warm-lsp: {$e->getMessage()}\n");
+        exit(1);
+    }
+
+    if ($message === null) {
+        // Clean EOF with no `exit` notification: treat as an abrupt
+        // disconnect, same as `exit` without a prior `shutdown` (spec: exit
+        // code should be non-zero in that case).
+        exit($server->isShuttingDown() ? 0 : 1);
+    }
+
+    if (($message['method'] ?? null) === 'exit') {
+        exit($server->isShuttingDown() ? 0 : 1);
+    }
+
+    $response = $server->handle($message);
+    if ($response !== null) {
+        $transport->write($response);
+    }
+}
