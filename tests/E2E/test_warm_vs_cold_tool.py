@@ -9,10 +9,12 @@ a real project (see CONTRIBUTING.md, "Checking against a real project").
 
 from __future__ import annotations
 
+import argparse
 import importlib.util
 import json
 import subprocess
 import sys
+from pathlib import Path
 
 from mcp_harness import FIXTURE_PROJECT, REPO, php_binary
 
@@ -84,6 +86,51 @@ def test_pct_and_timing_on_empty_and_populated():
     assert t["sum"] == 6.0
 
 
+# --------------------------------------------------------------------------- warm_timing_buckets
+
+def test_warm_timing_buckets_splits_restart_boot_from_later():
+    # 3 sessions: [0]=first boot, [1,2]=later same session, [3]=restart boot, [4]=later.
+    warm = [
+        dict(session=1, seconds=1.0),
+        dict(session=1, seconds=0.1),
+        dict(session=1, seconds=0.2),
+        dict(session=2, seconds=0.9),
+        dict(session=2, seconds=0.15),
+    ]
+    buckets = warm_vs_cold.warm_timing_buckets(warm)
+    assert buckets["first"] == [1.0]
+    assert buckets["restart_boot"] == [0.9]
+    assert buckets["later"] == [0.1, 0.2, 0.15]
+
+
+def test_warm_timing_buckets_no_restart():
+    warm = [dict(session=1, seconds=1.0), dict(session=1, seconds=0.1)]
+    buckets = warm_vs_cold.warm_timing_buckets(warm)
+    assert buckets["first"] == [1.0]
+    assert buckets["restart_boot"] == []
+    assert buckets["later"] == [0.1]
+
+
+# --------------------------------------------------------------------------- md_fence
+
+def test_md_fence_lengthens_around_embedded_backtick_runs():
+    assert warm_vs_cold.md_fence("plain diff, no backticks") == "```"
+    assert warm_vs_cold.md_fence("a run of ``` inside the diff itself") == "````"
+    # Longest run across ALL given texts wins, not just the first.
+    assert warm_vs_cold.md_fence("short", "``````") == "```````"
+
+
+# --------------------------------------------------------------------------- run_cold_one
+
+def test_run_cold_one_reports_unspawnable_php_instead_of_raising(tmp_path):
+    args = argparse.Namespace(
+        php="/no/such/php-binary-anywhere", working_dir=tmp_path, timeout=5.0, server_config=tmp_path / "wrapper.php",
+    )
+    result = warm_vs_cold.run_cold_one(args, Path("/no/such/rector"), tmp_path / "F.php", tmp_path / "cache")
+    assert result["exit_code"] is None
+    assert "could not start" in result["stderr"]
+
+
 # --------------------------------------------------------------------------- smoke: the real tool
 
 def test_smoke_run_against_fixture_project(tmp_path):
@@ -105,4 +152,22 @@ def test_smoke_run_against_fixture_project(tmp_path):
     assert report["summary"]["cold_error"] == 0
     assert report["meta"]["mode"] == "checkout"
     assert report["meta"]["sampled"] == 2
+    assert report["timings"]["warm_restart_boot"]["n"] == 0  # one session, no restart
     assert (out / "report.md").is_file()
+
+
+def test_smoke_run_rerun_into_same_out_does_not_reuse_stale_cache(tmp_path):
+    """A second run into the same --out must not silently reuse the first run's
+    Rector cache: re-running immediately still reports the same clean match (the
+    cache is cleared, so this exercises the actual cache path rather than skipping
+    it), and a leftover cache directory from run 1 is gone before run 2 starts."""
+    out = tmp_path / "out"
+    for _ in range(2):
+        done = subprocess.run(
+            [sys.executable, str(TOOL), "--project", str(FIXTURE_PROJECT),
+             "--files", "src/*.php", "--php", php_binary(), "--out", str(out)],
+            capture_output=True, text=True, timeout=120,
+        )
+        assert done.returncode == 0, f"stdout={done.stdout!r} stderr={done.stderr!r}"
+    report = json.loads((out / "report.json").read_text())
+    assert report["summary"]["mismatch"] == 0

@@ -36,6 +36,7 @@ import json
 import os
 import platform
 import random
+import re
 import shutil
 import statistics
 import subprocess
@@ -140,7 +141,7 @@ def select_files(project: Path, specs: list[str], limit: int | None, seed: int) 
     found: dict[Path, None] = dict()  # insertion-ordered set: @LISTFILE order is kept
     for spec in specs:
         if spec.startswith("@"):
-            lines = Path(spec[1:]).read_text().splitlines()
+            lines = Path(spec[1:]).read_text(encoding="utf-8").splitlines()
             candidates = [project / line.strip() for line in lines if line.strip()]
         else:
             candidates = [Path(p) for p in sorted(glob.glob(str(project / spec), recursive=True))]
@@ -235,6 +236,11 @@ def run_cold_one(args: argparse.Namespace, rector: Path, path: Path, cache_dir: 
         return dict(seconds=time.perf_counter() - started, exit_code=done.returncode, output=done.stdout, stderr=done.stderr[-4000:])
     except subprocess.TimeoutExpired:
         return dict(seconds=time.perf_counter() - started, exit_code=None, output="", stderr=f"timeout after {args.timeout}s")
+    except OSError as exc:
+        # args.php could not even be spawned (bad path, PATH not set up the way the
+        # checkout expects). Report it the same shape as a timeout rather than
+        # crashing main() -- a crash here would lose the whole warm phase's results.
+        return dict(seconds=time.perf_counter() - started, exit_code=None, output="", stderr=f"could not start {args.php!r}: {exc!r}")
 
 
 def run_cold(args: argparse.Namespace, rector: Path, files: list[Path], out: Path) -> list[dict[str, Any]]:
@@ -302,6 +308,31 @@ def timing(values: list[float]) -> dict[str, Any]:
     return dict(n=len(values), p50=pct(values, 0.5), p95=pct(values, 0.95), mean=mean, sum=round(sum(values), 3))
 
 
+def warm_timing_buckets(warm: list[dict[str, Any]]) -> dict[str, list[float]]:
+    """warm[0] paid a container boot; so does any later call whose session differs
+    from the call right before it (a mid-run restart). Split those into 'first'
+    (index 0 only, unchanged meaning) and 'restart_boot' (later boots), so neither
+    silently inflates 'later' -- the bucket the docs tell a reader to compare
+    against cold per-call timings."""
+    boot_idx = {0} | {i for i in range(1, len(warm)) if warm[i]["session"] != warm[i - 1]["session"]}
+    return dict(
+        first=[warm[0]["seconds"]],
+        later=[w["seconds"] for i, w in enumerate(warm) if i not in boot_idx],
+        restart_boot=[warm[i]["seconds"] for i in sorted(boot_idx) if i != 0],
+    )
+
+
+def md_fence(*texts: str) -> str:
+    """A fenced-code delimiter longer than any run of backticks already inside the
+    text, so content from the project under test (a Rector diff, a stderr tail) can
+    never close the fence early and let the rest render as raw Markdown."""
+    longest = 0
+    for text in texts:
+        for run in re.findall("`+", text):
+            longest = max(longest, len(run))
+    return "`" * max(3, longest + 1)
+
+
 # --------------------------------------------------------------------------- report
 
 def write_markdown(report: dict[str, Any], dest: Path) -> None:
@@ -321,7 +352,11 @@ def write_markdown(report: dict[str, Any], dest: Path) -> None:
         "## Timings (seconds per call)", "",
         "| side | n | p50 | p95 | mean | sum |", "| --- | ---: | ---: | ---: | ---: | ---: |",
     ]
-    for label, key in (("warm, first call (includes boot)", "warm_first"), ("warm, later calls", "warm_later"), ("cold", "cold")):
+    timing_rows = [("warm, first call (includes boot)", "warm_first"), ("warm, later calls", "warm_later")]
+    if t["warm_restart_boot"]["n"]:
+        timing_rows.append(("warm, right after a restart (boot cost, not in \"later\")", "warm_restart_boot"))
+    timing_rows.append(("cold", "cold"))
+    for label, key in timing_rows:
         v = t[key]
         lines.append(f"| {label} | {v['n']} | {v['p50']} | {v['p95']} | {v['mean']} | {v['sum']} |")
     lines += ["", f"Wall clock: warm phase {t['warm_wall']} s (serial), cold phase {t['cold_wall']} s ({m['jobs']} jobs).", ""]
@@ -340,7 +375,8 @@ def write_markdown(report: dict[str, Any], dest: Path) -> None:
         for side in ("warm", "cold"):
             n = r[side]["normalised"]
             diff = "\n".join(n.get("diffs", dict()).values()) or "(no diff)"
-            out += [f"{side}: exit {n.get('exit_code')}, errors {json.dumps(n.get('errors'))}", "", "```diff", diff.rstrip(), "```", ""]
+            fence = md_fence(diff)
+            out += [f"{side}: exit {n.get('exit_code')}, errors {json.dumps(n.get('errors'))}", "", f"{fence}diff", diff.rstrip(), fence, ""]
         return out
 
     def warm_error_body(r):
@@ -412,6 +448,9 @@ def main() -> int:
     args.working_dir = (args.working_dir or args.project).resolve()
     args.out = args.out.resolve()
     args.out.mkdir(parents=True, exist_ok=True)
+    # A stale cache entry from an earlier run into this same --out must never look
+    # like a fresh match: force both sides' Rector caches to start empty every run.
+    shutil.rmtree(args.out / "cache", ignore_errors=True)
     if args.project_autoload:
         args.project_autoload = args.project_autoload.resolve()
         mode = "project-vendor"
@@ -428,7 +467,9 @@ def main() -> int:
     if not files:
         print("warm-vs-cold: --files matched nothing", file=sys.stderr)
         return 2
-    (args.out / "files.txt").write_text("\n".join(os.path.relpath(p, args.project) for p in files) + "\n")
+    (args.out / "files.txt").write_text(
+        "\n".join(os.path.relpath(p, args.project) for p in files) + "\n", encoding="utf-8",
+    )
 
     # Serial phases, so neither side's timings carry the other's CPU load.
     t0 = time.perf_counter()
@@ -458,9 +499,11 @@ def main() -> int:
         warm_sessions=max(w["session"] for w in warm),
         finished=datetime.now(timezone.utc).isoformat(timespec="seconds"),
     )
+    buckets = warm_timing_buckets(warm)
     timings = dict(
-        warm_first=timing([warm[0]["seconds"]]),
-        warm_later=timing([w["seconds"] for w in warm[1:]]),
+        warm_first=timing(buckets["first"]),
+        warm_later=timing(buckets["later"]),
+        warm_restart_boot=timing(buckets["restart_boot"]),
         cold=timing([c["seconds"] for c in cold]),
         warm_wall=round(warm_wall, 1), cold_wall=round(cold_wall, 1),
     )

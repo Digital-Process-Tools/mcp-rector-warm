@@ -29,7 +29,10 @@ One warm session (official Python `mcp` client, `rector_process` with `dryRun: t
 - `mismatch`: both sides produced a report and they differ. Both diffs and each side's `applied_rectors` are listed. Exit 1.
 - `warm_error` / `cold_error` / `both_error`: that side had no JSON report (tool `isError`, crash, timeout). Exit 2 if there is no mismatch. The cold stderr tail is in the report.
 - "Files with a diff" counts diffs. Rector can list a file under `changed_files` with no diff (totals 0). That list is still compared.
-- Timings: the first warm call includes the boot. Compare "warm, later calls" p50/p95 with cold per call.
+- Timings: the first warm call includes the boot. Any later call right after a restart (a
+  new `session`) pays a boot cost too -- it is split into a separate `warm_restart_boot`
+  bucket (report shows the row only when it happened), never folded into "warm, later
+  calls". Compare "warm, later calls" p50/p95 with cold per call.
 
 **A mismatch means** the warm server answered differently from a fresh process on the same bytes. Reduce it:
 1. Re-run that one file cold and warm-alone (`--files @one.txt`). If warm-alone matches, earlier files in the session are poisoning it: bisect the prefix of `files.txt`.
