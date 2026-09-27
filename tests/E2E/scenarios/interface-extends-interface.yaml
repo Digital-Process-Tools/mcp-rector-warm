@@ -1,0 +1,58 @@
+description: I2 extends I1 and Handler implements I2; I1 gains a method Handler already has, one interface level up.
+config: |
+  <?php
+
+  declare(strict_types=1);
+
+  use Rector\Config\RectorConfig;
+  use Rector\Php83\Rector\ClassMethod\AddOverrideAttributeToOverriddenMethodsRector;
+  use Rector\ValueObject\PhpVersion;
+
+  return RectorConfig::configure()
+      ->withPaths([__DIR__ . '/src'])
+      ->withAutoloadPaths([__DIR__ . '/src'])
+      ->withPhpVersion(PhpVersion::PHP_83)
+      ->withConfiguredRule(AddOverrideAttributeToOverriddenMethodsRector::class, [
+          AddOverrideAttributeToOverriddenMethodsRector::ADD_TO_INTERFACE_METHODS => true,
+      ]);
+files:
+  src/I1.php: |
+    <?php
+
+    declare(strict_types=1);
+
+    interface I1
+    {
+    }
+  src/I2.php: |
+    <?php
+
+    declare(strict_types=1);
+
+    interface I2 extends I1
+    {
+    }
+  src/Handler.php: |
+    <?php
+
+    declare(strict_types=1);
+
+    final class Handler implements I2
+    {
+        public function handle(): void
+        {
+            echo 'handled';
+        }
+    }
+steps:
+  - call: src/Handler.php
+    expect: {changed: 0}
+  - edit:
+      path: src/I1.php
+      old: "interface I1\n{\n}"
+      new: "interface I1\n{\n    public function handle(): void;\n}"
+  # Neither Handler.php nor I2.php changed; only the grand-interface did.
+  - call: src/Handler.php
+    expect:
+      changed: 1
+      diff_contains: '+    #[\Override]'

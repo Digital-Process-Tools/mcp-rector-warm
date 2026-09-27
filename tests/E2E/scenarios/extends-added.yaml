@@ -1,0 +1,37 @@
+description: A child that starts extending a parent with a non-empty foo() mid-session gets #[\Override] on its own foo().
+files:
+  src/Base.php: |
+    <?php
+
+    declare(strict_types=1);
+
+    class Base
+    {
+        public function foo(): void
+        {
+            echo 'base';
+        }
+    }
+  src/Child.php: |
+    <?php
+
+    declare(strict_types=1);
+
+    final class Child
+    {
+        public function foo(): void
+        {
+            echo 'child';
+        }
+    }
+steps:
+  - call: src/Child.php
+    expect: {changed: 0}
+  - edit:
+      path: src/Child.php
+      old: "final class Child\n"
+      new: "final class Child extends Base\n"
+  - call: src/Child.php
+    expect:
+      changed: 1
+      diff_contains: '+    #[\Override]'

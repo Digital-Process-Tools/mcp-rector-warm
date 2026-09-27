@@ -1,0 +1,38 @@
+description: The parent loses foo() mid-session; #[\Override] must no longer be proposed on foo() in the child.
+files:
+  src/Base.php: |
+    <?php
+
+    declare(strict_types=1);
+
+    class Base
+    {
+        public function foo(): void
+        {
+            echo 'base';
+        }
+    }
+  src/Child.php: |
+    <?php
+
+    declare(strict_types=1);
+
+    final class Child extends Base
+    {
+        public function foo(): void
+        {
+            echo 'child';
+        }
+    }
+steps:
+  - call: src/Child.php
+    expect:
+      changed: 1
+      diff_contains: '+    #[\Override]'
+  - edit:
+      path: src/Base.php
+      old: "    public function foo(): void\n    {\n        echo 'base';\n    }\n"
+      new: ""
+  # Only the parent changed on disk; Child.php is byte-identical to the first call.
+  - call: src/Child.php
+    expect: {changed: 0}

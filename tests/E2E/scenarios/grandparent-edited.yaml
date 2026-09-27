@@ -1,0 +1,42 @@
+description: A <- B <- C; the grandparent A gains a non-empty method that C already defines, two levels up from the processed file.
+files:
+  src/A.php: |
+    <?php
+
+    declare(strict_types=1);
+
+    class A
+    {
+    }
+  src/B.php: |
+    <?php
+
+    declare(strict_types=1);
+
+    class B extends A
+    {
+    }
+  src/C.php: |
+    <?php
+
+    declare(strict_types=1);
+
+    final class C extends B
+    {
+        public function run(): void
+        {
+            echo 'c';
+        }
+    }
+steps:
+  - call: src/C.php
+    expect: {changed: 0}
+  - edit:
+      path: src/A.php
+      old: "class A\n{\n}"
+      new: "class A\n{\n    public function run(): void\n    {\n        echo 'a';\n    }\n}"
+  # Neither C.php nor B.php changed; only the grandparent did.
+  - call: src/C.php
+    expect:
+      changed: 1
+      diff_contains: '+    #[\Override]'
