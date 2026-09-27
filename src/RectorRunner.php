@@ -297,9 +297,14 @@ class RectorRunner implements RunnerInterface
                 // silent no-op reported as success, from a call whose console
                 // output we cannot even suppress: SymfonyStyle's ConsoleOutput
                 // writes straight to \STDOUT, bypassing this very ob_*() wrap (it
-                // holds a stream resource, not a userland echo). Never reach any
-                // of that: refuse before the container is even built, as a real,
-                // reported error the caller cannot mistake for a completed run.
+                // holds a stream resource, not a userland echo). Refuse before the
+                // container is even built, as a real, reported error the caller
+                // cannot mistake for a completed run. NB this covers only the "no
+                // config file at all" half of !areSomeRectorsLoaded(): a rector.php
+                // that exists and loads fine but registers zero rules hits the
+                // same SymfonyStyle path later, inside ProcessCommand::execute(),
+                // unguarded by this check -- out of scope for #14 as filed, not
+                // closed by this diff.
                 throw new \RuntimeException(
                     'No rector.php (or rector.dist.php) config found in the working '
                     . 'directory, and no --config was given when the server started. '
