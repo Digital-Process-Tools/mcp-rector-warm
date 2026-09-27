@@ -56,6 +56,29 @@ Edit `~/Library/Application Support/Claude/claude_desktop_config.json` (macOS) o
 
 Restart Claude. Ask: *"Run Rector on src/Foo.php"*.
 
+### VS Code (Copilot chat / agent mode)
+
+VS Code 1.102+ runs MCP servers natively. Add `.vscode/mcp.json` to the project:
+
+```json
+{
+  "servers": {
+    "rector": {
+      "type": "stdio",
+      "command": "${workspaceFolder}/vendor/bin/mcp-rector-warm",
+      "args": [
+        "--working-dir=${workspaceFolder}",
+        "--config=${workspaceFolder}/rector.php"
+      ]
+    }
+  }
+}
+```
+
+With `composer global require`, use `"command": "mcp-rector-warm"` instead. If Composer's `vendor-dir` is not `vendor/`, adjust the path.
+
+This gives Rector to chat and agent mode. It does **not** run Rector on save or underline code in the editor. That needs a language server, tracked in [#51](https://github.com/Digital-Process-Tools/mcp-rector-warm/issues/51).
+
 ### Cline / Continue / Cursor / Zed / any MCP client
 
 Same `command` + `args` shape. The server speaks plain MCP over stdio — no client-specific glue.
@@ -96,6 +119,7 @@ The script needs the Python MCP client from `tests/E2E/requirements.txt`, and wr
 | Client | Status |
 |--------|--------|
 | Claude Desktop | ✅ stdio MCP |
+| VS Code (Copilot chat / agent mode) | ✅ stdio MCP, `.vscode/mcp.json` |
 | Cline (VS Code) | ✅ stdio MCP |
 | Continue (VS Code / JetBrains) | ✅ stdio MCP |
 | Cursor | ✅ stdio MCP |
