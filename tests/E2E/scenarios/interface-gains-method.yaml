@@ -1,0 +1,50 @@
+description: An interface implemented by the processed class gains the method mid-session.
+xfail: "#19: an edit to an implemented interface is not seen by the warm container (stale reflection)"
+config: |
+  <?php
+
+  declare(strict_types=1);
+
+  use Rector\Config\RectorConfig;
+  use Rector\Php83\Rector\ClassMethod\AddOverrideAttributeToOverriddenMethodsRector;
+  use Rector\ValueObject\PhpVersion;
+
+  return RectorConfig::configure()
+      ->withPaths([__DIR__ . '/src'])
+      ->withAutoloadPaths([__DIR__ . '/src'])
+      ->withPhpVersion(PhpVersion::PHP_83)
+      ->withConfiguredRule(AddOverrideAttributeToOverriddenMethodsRector::class, [
+          AddOverrideAttributeToOverriddenMethodsRector::ADD_TO_INTERFACE_METHODS => true,
+      ]);
+files:
+  src/Contract.php: |
+    <?php
+
+    declare(strict_types=1);
+
+    interface Contract
+    {
+    }
+  src/Handler.php: |
+    <?php
+
+    declare(strict_types=1);
+
+    final class Handler implements Contract
+    {
+        public function handle(): void
+        {
+            echo 'handled';
+        }
+    }
+steps:
+  - call: src/Handler.php
+    expect: {changed: 0}
+  - edit:
+      path: src/Contract.php
+      old: "interface Contract\n{\n}"
+      new: "interface Contract\n{\n    public function handle(): void;\n}"
+  - call: src/Handler.php
+    expect:
+      changed: 1
+      diff_contains: '+    #[\Override]'

@@ -1,0 +1,39 @@
+description: Editing the PARENT class of the processed file changes the result; the warm container must not answer from the old parent.
+xfail: "#19: an edit to the parent class is not seen by the warm container (stale reflection)"
+files:
+  src/Base.php: |
+    <?php
+
+    declare(strict_types=1);
+
+    class Base
+    {
+        public function run(): void
+        {
+        }
+    }
+  src/Child.php: |
+    <?php
+
+    declare(strict_types=1);
+
+    final class Child extends Base
+    {
+        public function run(): void
+        {
+            echo 'child';
+        }
+    }
+steps:
+  # An empty parent method is skipped by AddOverrideAttributeToOverriddenMethodsRector.
+  - call: src/Child.php
+    expect: {changed: 0}
+  - edit:
+      path: src/Base.php
+      old: "public function run(): void\n    {\n    }"
+      new: "public function run(): void\n    {\n        echo 'base';\n    }"
+  # Only the parent changed on disk; Child.php is byte-identical to the first call.
+  - call: src/Child.php
+    expect:
+      changed: 1
+      diff_contains: '+    #[\Override]'

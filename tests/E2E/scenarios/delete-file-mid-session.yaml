@@ -1,0 +1,33 @@
+description: A file deleted mid-session drops out of the next directory run.
+files:
+  src/Kept.php: |
+    <?php
+
+    declare(strict_types=1);
+
+    final class Kept
+    {
+        public function __construct(private readonly int $id)
+        {
+        }
+    }
+  src/Doomed.php: |
+    <?php
+
+    declare(strict_types=1);
+
+    final class Doomed
+    {
+        public function __construct(private readonly int $id)
+        {
+        }
+    }
+steps:
+  - call: src
+    expect:
+      changed_files: [src/Doomed.php, src/Kept.php]
+  - delete: src/Doomed.php
+  - call: src
+    expect:
+      changed_files: [src/Kept.php]
+      diff_excludes: "class Doomed"
