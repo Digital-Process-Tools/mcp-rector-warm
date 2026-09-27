@@ -122,18 +122,39 @@ class RectorRunner implements RunnerInterface
             // Child: analyse in isolation, report the result over the socket, then
             // exit. This is a real forked OS process -- it owns a private
             // copy-on-write copy of the parent's memory, including the parent's
-            // stdio file descriptors, but this call is the only thing it ever does
-            // before exiting, so nothing else reaches them.
+            // stdio file descriptors. The MCP daemon's own JSON-RPC transport
+            // writes straight to \STDOUT (not through PHP's output buffer), so a
+            // stray PHP warning/deprecation notice during analysis -- routine for
+            // PHPStan on real-world code -- would otherwise land on the SAME pipe
+            // the client is reading its protocol from and corrupt it. Close and
+            // reopen fd 0/1/2 onto /dev/null before running anything: this
+            // process exits right after this call and never legitimately needs
+            // them, and $childSocket lives on its own fd above 2 so it is
+            // unaffected.
             \fclose($parentSocket);
+            if (\defined('STDIN')) {
+                @\fclose(\STDIN);
+            }
+            if (\defined('STDOUT')) {
+                @\fclose(\STDOUT);
+            }
+            if (\defined('STDERR')) {
+                @\fclose(\STDERR);
+            }
+            @\fopen('/dev/null', 'rb');
+            @\fopen('/dev/null', 'wb');
+            @\fopen('/dev/null', 'wb');
+
             $exitCode = 0;
             try {
                 $result = $this->execute($argv, $warmBoot);
-                \fwrite($childSocket, (string) \json_encode($result, \JSON_THROW_ON_ERROR));
+                $encoded = $this->encodeForkResult($result);
+                \fwrite($childSocket, $encoded);
             } catch (\Throwable $e) {
-                \fwrite($childSocket, (string) \json_encode([
+                \fwrite($childSocket, $this->encodeForkResult([
                     'error' => $e->getMessage(),
                     'error_class' => $e::class,
-                ], \JSON_THROW_ON_ERROR));
+                ]));
                 $exitCode = 1;
             } finally {
                 \fclose($childSocket);
@@ -164,6 +185,35 @@ class RectorRunner implements RunnerInterface
 
         /** @var array{exit_code: int, output: string, warm_boot: bool} $decoded */
         return $decoded;
+    }
+
+    /**
+     * Encode a forked child's result for the socket. Rector's own JSON output
+     * embeds raw source-derived text; a genuinely successful analysis of a file
+     * containing non-UTF-8 byte sequences must not be turned into a spurious
+     * error just because THIS encoding step failed. JSON_INVALID_UTF8_SUBSTITUTE
+     * replaces invalid bytes rather than throwing, so a real result still
+     * reaches the parent as a result. Without this, a thrown JsonException here
+     * would be reported to the caller as a hard error for an analysis that
+     * actually succeeded: RectorTool's reboot-and-retry recovery
+     * (isRecoverableWarmCorruption()) only matches Rector/PHPStan corruption
+     * messages, never an encoding failure, so it would never kick in.
+     *
+     * @param array<string, mixed> $payload
+     */
+    private function encodeForkResult(array $payload): string
+    {
+        $encoded = \json_encode($payload, \JSON_INVALID_UTF8_SUBSTITUTE);
+        if ($encoded !== false) {
+            return $encoded;
+        }
+
+        $fallback = \json_encode([
+            'error' => 'failed to encode the forked call result: ' . \json_last_error_msg(),
+            'error_class' => 'JsonException',
+        ]);
+
+        return $fallback !== false ? $fallback : '{"error":"failed to encode the forked call result","error_class":"JsonException"}';
     }
 
     /**
