@@ -68,6 +68,7 @@ async def open_server(
     record_dir: Path,
     config: Path | None = None,
     php_ini: dict[str, Any] | None = None,
+    call_timeout: int | None = None,
 ) -> AsyncIterator[ServerRun]:
     """Launch bin/mcp-rector-warm over stdio and complete the initialize handshake.
 
@@ -81,6 +82,10 @@ async def open_server(
     args = [str(TAP), str(record_dir), "--", php_binary(), *ini_flags, str(BIN), f"--working-dir={project}"]
     if config is not None:
         args.append(f"--config={config}")
+    # call_timeout: --call-timeout=N on the SERVER only (#58), so a scenario can
+    # pin a small deadline without waiting out the 600s production default.
+    if call_timeout is not None:
+        args.append(f"--call-timeout={call_timeout}")
     params = StdioServerParameters(command=sys.executable, args=args, cwd=str(project))
 
     transport_errors: list[Exception] = []
@@ -131,6 +136,99 @@ def stderr_tail(record_dir: Path, limit: int = 2000) -> str:
     path = record_dir / "server.stderr"
     text = path.read_text(errors="replace") if path.exists() else ""
     return text[-limit:]
+
+
+# ----------------------------------------------------------------- process tree
+
+def daemon_pid(record_dir: Path) -> int:
+    """The PHP daemon's own OS pid -- stdio_tap.py spawns it directly (see
+    stdio_tap.py's own docstring: `command` IS `php ... bin/mcp-rector-warm ...`,
+    not a shell wrapping it), and records it verbatim in started.json the
+    moment it starts. This is the pid every RectorRunner::boot()/forkAndExecute()
+    fork happens underneath -- the root #48's "list the daemon's children"
+    check needs."""
+    data = json.loads((record_dir / "started.json").read_text())
+    return int(data["pid"])
+
+
+def process_descendants(root_pid: int) -> list[tuple[int, int, str]]:
+    """Every OS process descended from root_pid (not including root_pid itself),
+    as (pid, ppid, stat) triples -- `stat` is `ps`'s own state column, e.g. 'S',
+    'R+', or 'Z'/'Z+' for a zombie (#48: "list the daemon's children after the
+    call... a <defunct> entry confirms it"). One `ps -eo pid,ppid,stat` snapshot
+    (not `ps --ppid`, which some `ps` builds refuse for a pid with no children at
+    all rather than returning empty) walked as a tree from root_pid, POSIX `ps`
+    output, portable across the ubuntu-latest runners this repo's CI actually
+    uses; not verified against a BSD/macOS `ps` column layout beyond "this
+    machine's -eo pid,ppid,stat happens to parse the same way", since CI never
+    runs this on anything but ubuntu-latest.
+    """
+    proc = subprocess.run(["ps", "-eo", "pid,ppid,stat"], capture_output=True, text=True, timeout=10)
+    # A failed `ps` invocation (nonzero exit, e.g. a sandboxed/restricted
+    # environment) must never be read as "the daemon has no descendants" --
+    # self-review caught that an unchecked returncode makes exactly that
+    # mistake: empty/header-only stdout parses to an empty list either way, so
+    # "checked and clean" and "couldn't check, said clean anyway" would be
+    # indistinguishable to every caller of assert_no_zombie_descendants().
+    if proc.returncode != 0:
+        raise RuntimeError(
+            f"ps -eo pid,ppid,stat exited {proc.returncode}, cannot determine the daemon's process tree: "
+            f"stderr={proc.stderr!r}"
+        )
+    by_ppid: dict[int, list[tuple[int, int, str]]] = {}
+    for line in proc.stdout.splitlines()[1:]:
+        parts = line.split(None, 2)
+        if len(parts) != 3:
+            continue
+        try:
+            pid, ppid = int(parts[0]), int(parts[1])
+        except ValueError:
+            continue
+        by_ppid.setdefault(ppid, []).append((pid, ppid, parts[2]))
+
+    descendants: list[tuple[int, int, str]] = []
+    seen: set[int] = set()
+    frontier = [root_pid]
+    while frontier:
+        current = frontier.pop()
+        for row in by_ppid.get(current, []):
+            if row[0] in seen:
+                continue
+            seen.add(row[0])
+            descendants.append(row)
+            frontier.append(row[0])
+    return descendants
+
+
+def assert_no_zombie_descendants(record_dir: Path, *, max_live: int | None = None) -> list[tuple[int, int, str]]:
+    """#48's own settling criterion, run for real: snapshot the daemon's process
+    tree and fail if any descendant is a zombie ('Z' anywhere in its `ps` STAT
+    column -- 'Z' alone or 'Z+', a foreground zombie). When max_live is given,
+    also fail if MORE than that many non-zombie descendants remain -- an
+    orphaned-but-still-running grandchild (reparented, not reaped, so it would
+    not show up as a zombie at all) is exactly the narrower gap the #58 trap.d
+    notes describe for the daemon-side backstop path, and a live process count
+    over budget is the only way this harness can see it. Returns the live
+    (non-zombie) descendants for the caller to log or assert further on.
+    """
+    pid = daemon_pid(record_dir)
+    descendants = process_descendants(pid)
+    zombies = [d for d in descendants if "Z" in d[2]]
+    assert not zombies, (
+        f"daemon (pid {pid}) has {len(zombies)} zombie/defunct descendant(s) after the call: {zombies} "
+        f"-- full descendant list: {descendants}"
+    )
+    # The assert above only returns control when zombies == [], so descendants
+    # IS the live list by this point -- no separate filter needed (self-review
+    # caught the earlier version computing this redundantly).
+    live = descendants
+    if max_live is not None:
+        assert len(live) <= max_live, (
+            f"daemon (pid {pid}) has {len(live)} live descendant(s), expected at most {max_live} -- "
+            f"an orphaned grandchild the daemon lost track of would show up here without ever being "
+            f"a zombie: {live}"
+        )
+    return live
 
 
 # --------------------------------------------------------------------------- results

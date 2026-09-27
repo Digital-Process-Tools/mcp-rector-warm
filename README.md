@@ -91,6 +91,14 @@ mcp-rector-warm --working-dir=/path/to/project --config=/path/to/project/rector.
 
 Reads MCP JSON-RPC on stdin, writes responses on stdout.
 
+## Options
+
+| Flag | Default | Meaning |
+|------|---------|---------|
+| `--working-dir=PATH` | current directory | `chdir()`s here before anything else runs; `rector_process` refuses any path outside it. |
+| `--config=PATH` | Rector's own resolution (`rector.php`/`rector.dist.php` in `--working-dir`) | Passed straight through to Rector; not parsed by mcp-rector-warm itself. |
+| `--call-timeout=SECONDS` | `600` | Hard per-call deadline, independent of PHP's `default_socket_timeout` ([#32](https://github.com/Digital-Process-Tools/mcp-rector-warm/issues/32)): a call still working past `default_socket_timeout` keeps going, but one that outruns `--call-timeout` is killed and reported as an error instead of blocking the caller forever ([#58](https://github.com/Digital-Process-Tools/mcp-rector-warm/issues/58)). `0` disables it. Measured on a real project: 0.3-2.4s per warm call, ~10s for the first (container-building) call — 600s never cuts off real work. |
+
 ## Benchmark
 
 Measured with `tools/warm-vs-cold.py` on a real private production codebase (PHP 8.2.0, Apple Silicon, v0.5.0 at `4902c3d`): 20 files sampled across the tree, each run once through one warm server session and once through a fresh `rector process --dry-run`, cold runs serial so neither side shares CPU with the other.
