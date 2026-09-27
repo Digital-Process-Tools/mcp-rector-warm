@@ -15,18 +15,33 @@ use PHPUnit\Framework\TestCase;
  * use a repo-relative form (e.g. `<repo>/...`) instead.
  *
  * Regression for #44: trap.d/22.supertool-worktree-config-boundary.md line 6
- * spelled out `/Users/floriandavid/Documents/mcp-rector-warm/.supertool.json`
- * verbatim.
+ * spelled out the maintainer's absolute local home path verbatim (a
+ * `/Users/<name>/...` path). It is deliberately not reproduced here: this
+ * test file itself ships in the same dist archive as trap.d/, so quoting
+ * the real offending path in a fixture would reintroduce the exact
+ * disclosure this guard exists to catch.
  */
 final class TrapDNoHostPathsTest extends TestCase
 {
-    private const HOST_PATH_PATTERN = '/\/(Users|home)\/[A-Za-z0-9_.-]+\//';
+    // No trailing "/" required after the username segment -- a path that ends
+    // the string/sentence right after the username (`` `/Users/name` ``, or
+    // "cd /Users/name.") must still be caught, not just one followed by a
+    // further path component.
+    private const HOST_PATH_PATTERN = '/\/(Users|home)\/[A-Za-z0-9_.-]+/';
 
     public function testTrapDFragmentsContainNoAbsoluteHomePaths(): void
     {
+        $files = $this->trapDFragmentFiles();
+
+        // Without this, a moved/renamed trap.d/ or a glob() that silently
+        // returns nothing would leave $offenders == [] for the wrong reason
+        // -- "nothing scanned" and "scanned everything, found nothing" must
+        // not read as the same pass.
+        self::assertNotEmpty($files, 'expected to find at least one trap.d/*.md fragment to scan');
+
         $offenders = [];
 
-        foreach ($this->trapDFragmentFiles() as $file) {
+        foreach ($files as $file) {
             $contents = (string) file_get_contents($file);
             if (preg_match(self::HOST_PATH_PATTERN, $contents, $match) === 1) {
                 $offenders[] = sprintf('%s (matched "%s")', $file, $match[0]);
@@ -49,9 +64,23 @@ final class TrapDNoHostPathsTest extends TestCase
      */
     public function testDetectionPatternMatchesAKnownOffendingPath(): void
     {
-        $offendingLine = 'found `/Users/floriandavid/Documents/mcp-rector-warm/.supertool.json`';
+        // Synthetic username -- deliberately not the maintainer's real one, so
+        // this fixture cannot itself become an instance of the leak it tests
+        // for once this file ships in a dist archive.
+        $offendingLine = 'found `/Users/exampleuser/Documents/mcp-rector-warm/.supertool.json`';
 
         self::assertSame(1, preg_match(self::HOST_PATH_PATTERN, $offendingLine));
+    }
+
+    /**
+     * Positive control for the no-trailing-slash case: a home path that ends
+     * the sentence right after the username, with no further path component,
+     * must still be caught -- not just one followed by another "/segment".
+     */
+    public function testDetectionPatternMatchesAPathWithNoTrailingSegment(): void
+    {
+        self::assertSame(1, preg_match(self::HOST_PATH_PATTERN, 'run from `/Users/exampleuser`.'));
+        self::assertSame(1, preg_match(self::HOST_PATH_PATTERN, 'cd /home/exampleuser'));
     }
 
     /**
