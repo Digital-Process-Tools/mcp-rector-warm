@@ -219,4 +219,68 @@ final class RectorRunnerTest extends TestCase
         self::assertFalse($third['warm_boot'], 'a config change must force a fresh boot even though canFork() is true');
         self::assertSame(['config-check', 'reboot', 'boot', 'execute:cold'], $runner->log);
     }
+
+    /**
+     * #27, follow-up to #14: a rector.php that exists and loads fine, but
+     * registers zero rules (and zero sets), takes a DIFFERENT route through
+     * Rector's own ProcessCommand than a missing config file -- it is not
+     * caught by boot()'s own getMainConfigFile() guard, which never fires
+     * here (the file exists). Left unguarded, ProcessCommand::execute() hits
+     * its own "!areSomeRectorsLoaded()" branch and prints onboarding text via
+     * a SymfonyStyle bound to the real \STDOUT, bypassing ob_*() entirely,
+     * then reports Command::SUCCESS for a no-op. execute() must refuse before
+     * $application->run() is ever called -- a real, reported error. Unlike
+     * boot()'s own no-config-file guard, this one fires one call later --
+     * after boot() has already built a perfectly valid container from a
+     * config that genuinely loads -- so isWarm() is expected to be TRUE
+     * afterwards, and a second call against the same still-empty config
+     * refuses identically rather than silently reusing a "warm" state that
+     * can never do anything.
+     */
+    public function testRunThrowsWhenZeroRulesRegistered(): void
+    {
+        $tmp = sys_get_temp_dir() . '/rector-runner-test-' . bin2hex(random_bytes(8));
+        mkdir($tmp);
+        file_put_contents(
+            $tmp . '/rector.php',
+            "<?php\n\ndeclare(strict_types=1);\n\nuse Rector\\Config\\RectorConfig;\n\nreturn RectorConfig::configure();\n",
+        );
+        $previousCwd = getcwd();
+        $previousArgv = $_SERVER['argv'] ?? ['rector'];
+
+        try {
+            chdir($tmp);
+            $_SERVER['argv'] = ['rector'];
+
+            $runner = new RectorRunner();
+            self::assertFalse($runner->isWarm());
+
+            try {
+                $runner->run(['rector', 'process']);
+                self::fail('expected a RuntimeException for a config with zero registered rules');
+            } catch (\RuntimeException $e) {
+                self::assertStringContainsString('registers no rules', $e->getMessage());
+            }
+
+            self::assertTrue(
+                $runner->isWarm(),
+                'boot() built a real container from a config that genuinely loaded; only execute() refused',
+            );
+
+            // The refusal is not a one-off: the same still-empty config refuses
+            // identically on a warm reuse of the same container, never silently
+            // succeeding once "warm".
+            try {
+                $runner->run(['rector', 'process']);
+                self::fail('expected the second call to refuse identically');
+            } catch (\RuntimeException $e) {
+                self::assertStringContainsString('registers no rules', $e->getMessage());
+            }
+        } finally {
+            chdir($previousCwd);
+            $_SERVER['argv'] = $previousArgv;
+            unlink($tmp . '/rector.php');
+            rmdir($tmp);
+        }
+    }
 }

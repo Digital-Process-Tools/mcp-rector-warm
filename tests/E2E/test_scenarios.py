@@ -44,6 +44,7 @@ Scenario format (YAML) -- see CONTRIBUTING.md for a worked example:
         diff_excludes: '...'       # str or list
         is_error: false            # the MCP isError flag
         error_class: SecurityError # the tool's error_class
+        error_contains: 'no rules' # substring of the tool's 'error' message
     - call: /abs/path              # an absolute path is outside the tree: no oracle
 
 Checked on every scenario, whatever its steps: every call after the first in-tree one
@@ -108,7 +109,7 @@ return RectorConfig::configure()
 TOP_KEYS = {"description", "xfail", "fixture", "config", "oracle", "php_ini", "files", "steps"}
 STEP_KINDS = {"write", "edit", "delete", "rename", "call"}
 CALL_KEYS = {"call", "dry_run", "expect"}
-EXPECT_KEYS = {"changed", "changed_files", "diff_contains", "diff_excludes", "is_error", "error_class"}
+EXPECT_KEYS = {"changed", "changed_files", "diff_contains", "diff_excludes", "is_error", "error_class", "error_contains"}
 
 
 def load(path: Path) -> dict[str, Any]:
@@ -286,6 +287,8 @@ async def call_step(
         assert needle not in diffs, f"{where}: diff carries {needle!r}; diffs: {diffs!r}"
     if "error_class" in expect:
         assert payload.get("error_class") == expect["error_class"], f"{where}: {payload}"
+    if "error_contains" in expect:
+        assert expect["error_contains"] in (payload.get("error") or ""), f"{where}: {payload}"
     if "is_error" in expect:
         assert bool(result.is_error) is expect["is_error"], f"{where}: isError={result.is_error}, payload {payload}"
 
