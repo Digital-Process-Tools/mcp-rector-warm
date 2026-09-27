@@ -1,0 +1,11 @@
+description: Applying a directory twice is idempotent, and a dry run afterwards reports nothing, matching cold at every step.
+fixture: tests/Fixtures/project
+steps:
+  - call: src
+    dry_run: false
+    expect: {changed: 1}
+  - call: src
+    dry_run: false
+    expect: {changed: 0}
+  - call: src
+    expect: {changed: 0}

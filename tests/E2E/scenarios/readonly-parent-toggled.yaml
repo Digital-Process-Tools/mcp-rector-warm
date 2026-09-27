@@ -1,0 +1,38 @@
+description: A readonly parent class loses its readonly modifier mid-session and gets it back; ReadOnlyClassRector on the child must follow the parent.
+files:
+  src/Base.php: |
+    <?php
+
+    declare(strict_types=1);
+
+    abstract readonly class Base
+    {
+    }
+  src/Child.php: |
+    <?php
+
+    declare(strict_types=1);
+
+    final class Child extends Base
+    {
+        public function __construct(private readonly int $id)
+        {
+        }
+    }
+steps:
+  - call: src/Child.php
+    expect:
+      changed: 1
+      diff_contains: "+final readonly class Child"
+  - edit:
+      path: src/Base.php
+      old: "abstract readonly class Base"
+      new: "abstract class Base"
+  - call: src/Child.php
+    expect: {changed: 0}
+  - edit:
+      path: src/Base.php
+      old: "abstract class Base"
+      new: "abstract readonly class Base"
+  - call: src/Child.php
+    expect: {changed: 1}

@@ -1,0 +1,59 @@
+description: The project vendor/autoload.php (no withAutoloadPaths) is how a single-file run sees the parent class; cold Rector loads it from the working dir.
+config: |
+  <?php
+
+  declare(strict_types=1);
+
+  use Rector\Config\RectorConfig;
+  use Rector\Php83\Rector\ClassMethod\AddOverrideAttributeToOverriddenMethodsRector;
+  use Rector\ValueObject\PhpVersion;
+
+  // No withAutoloadPaths: the project composer autoloader is the only way to find Base.
+  return RectorConfig::configure()
+      ->withPaths([__DIR__ . "/src"])
+      ->withPhpVersion(PhpVersion::PHP_83)
+      ->withRules([AddOverrideAttributeToOverriddenMethodsRector::class]);
+files:
+  # Stands in for a composer-generated classmap autoloader (vendor/autoload.php).
+  vendor/autoload.php: |
+    <?php
+
+    $map = ["App\\Base" => __DIR__ . "/../src/Base.php", "App\\Child" => __DIR__ . "/../src/Child.php"];
+    spl_autoload_register(static function (string $class) use ($map): void {
+        if (isset($map[$class])) {
+            require $map[$class];
+        }
+    });
+  src/Base.php: |
+    <?php
+
+    declare(strict_types=1);
+
+    namespace App;
+
+    class Base
+    {
+        public function run(): void
+        {
+            echo "base";
+        }
+    }
+  src/Child.php: |
+    <?php
+
+    declare(strict_types=1);
+
+    namespace App;
+
+    final class Child extends Base
+    {
+        public function run(): void
+        {
+            echo "child";
+        }
+    }
+steps:
+  - call: src/Child.php
+    expect:
+      changed: 1
+      diff_contains: "+    #[\\Override]"

@@ -1,0 +1,37 @@
+description: A file outside withPaths and withAutoloadPaths (lib/) is processed by an explicit call, and its parent in src/ is still found.
+files:
+  src/Base.php: |
+    <?php
+
+    declare(strict_types=1);
+
+    class Base
+    {
+        public function run(): void
+        {
+            echo "base";
+        }
+    }
+  lib/Tool.php: |
+    <?php
+
+    declare(strict_types=1);
+
+    final class Tool extends Base
+    {
+        public function run(): void
+        {
+            echo "tool";
+        }
+    }
+steps:
+  - call: lib/Tool.php
+    expect:
+      changed: 1
+      diff_contains: "+    #[\\Override]"
+  - edit:
+      path: src/Base.php
+      old: "        echo \"base\";\n"
+      new: ""
+  - call: lib/Tool.php
+    expect: {changed: 0}
