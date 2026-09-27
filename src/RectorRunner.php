@@ -9,7 +9,9 @@ use Rector\DependencyInjection\RectorContainerFactory;
 
 /**
  * Holds a warm Rector container + Application across multiple analyse calls.
- * Boot happens lazily on first call; subsequent calls reuse the live container.
+ * Boot happens lazily on first call; subsequent calls reuse the live container until the
+ * resolved rector.php (or --config file) changes on disk, which forces a reboot before the
+ * next call (#20) -- see configFileChanged().
  */
 class RectorRunner implements RunnerInterface
 {
@@ -19,6 +21,15 @@ class RectorRunner implements RunnerInterface
     private ?string $inputClass = null;
     private ?string $outputClass = null;
     private ?string $prefix = null;
+
+    /** Absolute path of the main config file (--config, or rector.php/rector.dist.php) as
+     *  resolved the last time boot() ran; null if none was found. */
+    private ?string $configFile = null;
+
+    /** sha256 of $configFile's contents as of the last boot(), or null when $configFile is
+     *  null. Compared against the file's CURRENT bytes before every call so an edit to
+     *  rector.php between calls is picked up (#20) instead of staying pinned until restart. */
+    private ?string $configFileHash = null;
 
     public function isWarm(): bool
     {
@@ -50,6 +61,14 @@ class RectorRunner implements RunnerInterface
     public function run(array $argv): array
     {
         $warmBoot = $this->isWarm();
+        if ($warmBoot && $this->configFileChanged()) {
+            // The parent's booted container still holds the rules it read at boot() time;
+            // forking below would run them forever, even though rector.php now says
+            // something else (#20). Reboot so the next boot() re-resolves and re-requires
+            // whatever is on disk right now, then fall through to the normal boot path.
+            $this->reboot();
+            $warmBoot = false;
+        }
         if (!$warmBoot) {
             $this->boot();
         }
@@ -100,7 +119,7 @@ class RectorRunner implements RunnerInterface
      * @param list<string> $argv
      * @return array{exit_code: int, output: string, warm_boot: bool}
      */
-    private function runForked(array $argv, bool $warmBoot): array
+    protected function runForked(array $argv, bool $warmBoot): array
     {
         $sockets = \stream_socket_pair(\STREAM_PF_UNIX, \STREAM_SOCK_STREAM, \STREAM_IPPROTO_IP);
         if ($sockets === false) {
@@ -264,32 +283,35 @@ class RectorRunner implements RunnerInterface
 
     protected function boot(): void
     {
-        // Load rector's scoped autoload lazily. Find it by reflecting on a Rector class:
-        // works whether mcp-rector-warm is installed as a local clone (nested vendor) or as
-        // a project/composer-global dep (rector lives parallel under the same vendor dir).
-        if (!class_exists(RectorConfigsResolver::class, false)) {
-            // file = .../rector/rector/src/Bootstrap/RectorConfigsResolver.php → 3 levels up = package root
-            $rectorPkgDir = dirname((new \ReflectionClass(RectorConfigsResolver::class))->getFileName(), 3);
-            $scoperAutoload = $rectorPkgDir . '/vendor/scoper-autoload.php';
-            if (!is_file($scoperAutoload)) {
-                throw new \RuntimeException("scoper-autoload.php not found at: {$scoperAutoload}");
-            }
-            require_once $scoperAutoload;
-        }
-        // Resolve Rector configs and build the container. rector.php is a plain
-        // PHP file `require`d while resolving/building -- a project's own config
-        // (or a dependency it pulls in) can `echo` while it loads (#15), and that
-        // must never reach the MCP transport's stdout. Wrap the whole step the
-        // same way execute() already wraps $application->run() for Rector's own
-        // raw-echo JSON formatter: ob_start()/ob_get_clean() catches an explicit
-        // echo/print at PHP's output-buffer layer, before it ever becomes a raw
-        // write(1, ...); it does NOT catch a notice/deprecation/warning display
-        // (that bypasses the buffer stack entirely) -- display_errors=stderr,
-        // set in bin/mcp-rector-warm before any of this runs, covers that half.
+        $this->ensureRectorAutoloaded();
+
+        // Resolve Rector configs and build the container. rector.php is a plain PHP file
+        // `require`d while resolving/building -- a project's own config (or a dependency it
+        // pulls in) can `echo` while it loads (#15), and that must never reach the MCP
+        // transport's stdout. Wrap the whole step the same way execute() already wraps
+        // $application->run() for Rector's own raw-echo JSON formatter: ob_start()/
+        // ob_get_clean() catches an explicit echo/print at PHP's output-buffer layer, before
+        // it ever becomes a raw write(1, ...); it does NOT catch a notice/deprecation/warning
+        // display (that bypasses the buffer stack entirely) -- display_errors=stderr, set in
+        // bin/mcp-rector-warm before any of this runs, covers that half.
+        //
+        // Nothing here catches a failure of provide() or createFromBootstrapConfigs():
+        // provide() itself throws when an explicit --config path no longer exists on disk
+        // (RectorConfigsResolver::resolveFromInput() -> Assert::fileExists()) -- a failure mode
+        // that used to be a vanishingly narrow startup-only race, and is now reachable every
+        // call, since configFileChanged() (below) also calls provide() before every warm call
+        // for the life of a long-running daemon -- and createFromBootstrapConfigs() throws on
+        // e.g. an unknown rule class. Both, like the "no config file at all" refusal just
+        // below, are left to escape run() uncaught, so RectorTool's own catch reports them as
+        // an MCP tool error (isError: true, #16) with the real exception's class and message,
+        // exactly like every other boot()-time failure -- there is no separate, CLI-shaped
+        // "fatal_errors JSON" reporting path here; #25/#26 already established isError: true
+        // + structuredContent as this server's one error shape.
         ob_start();
         try {
             $resolver = new RectorConfigsResolver();
             $bootstrapConfigs = $resolver->provide();
+
             if ($bootstrapConfigs->getMainConfigFile() === null) {
                 // Rector's own CLI treats this as friendly onboarding: ProcessCommand
                 // sees !areSomeRectorsLoaded(), offers to generate a rector.php via
@@ -312,11 +334,15 @@ class RectorRunner implements RunnerInterface
                     . 'mcp-rector-warm, or add a rector.php to the project.'
                 );
             }
+
             $factory = new RectorContainerFactory();
             $container = $factory->createFromBootstrapConfigs($bootstrapConfigs);
         } finally {
             ob_end_clean();
         }
+
+        $this->configFile = $bootstrapConfigs->getMainConfigFile();
+        $this->configFileHash = $this->hashConfigFile($this->configFile);
 
         $this->prefix = $this->detectRectorPrefix();
         if ($this->prefix === null) {
@@ -336,6 +362,78 @@ class RectorRunner implements RunnerInterface
 
         $this->application = $app;
         $this->container = $container;
+    }
+
+    /**
+     * Load rector's scoped autoload lazily. Find it by reflecting on a Rector class: works
+     * whether mcp-rector-warm is installed as a local clone (nested vendor) or as a
+     * project/composer-global dep (rector lives parallel under the same vendor dir).
+     * Idempotent -- safe to call before boot() has ever run, e.g. from configFileChanged().
+     */
+    private function ensureRectorAutoloaded(): void
+    {
+        if (class_exists(RectorConfigsResolver::class, false)) {
+            return;
+        }
+        // file = .../rector/rector/src/Bootstrap/RectorConfigsResolver.php → 3 levels up = package root
+        $rectorPkgDir = dirname((new \ReflectionClass(RectorConfigsResolver::class))->getFileName(), 3);
+        $scoperAutoload = $rectorPkgDir . '/vendor/scoper-autoload.php';
+        if (!is_file($scoperAutoload)) {
+            throw new \RuntimeException("scoper-autoload.php not found at: {$scoperAutoload}");
+        }
+        require_once $scoperAutoload;
+    }
+
+    /**
+     * True when the resolved main config file (--config, or rector.php/rector.dist.php --
+     * exactly what RectorConfigsResolver::provide() would hand boot()) no longer matches what
+     * boot() last read. Compared by content hash rather than mtime+size: mtime has
+     * whole-second resolution on common filesystems (two edits inside the same second are
+     * indistinguishable), and some save strategies (an editor's atomic-rename-back, a git
+     * checkout that restores the original bytes) can leave mtime and size unchanged, or both
+     * changed with identical content -- either way mtime+size alone can miss or mis-detect a
+     * real change. A hash of the actual bytes about to be require()'d has neither failure
+     * mode, and the file is a handful of KB: cheap to hash before every call next to the
+     * reboot it may trigger.
+     *
+     * Only the resolved main config file is tracked. A rector.php that itself
+     * requires/includes a shared file is a known limitation, not silently ignored: building
+     * the DI container in boot() autoloads hundreds of unrelated classes through the same
+     * require/include machinery, so there is no reliable way to isolate "a file rector.php
+     * chose to include" from that noise without parsing rector.php's own source for
+     * require/include statements -- which would still miss a dynamically computed path.
+     * Editing (even a no-op touch of) the main config file itself is the reliable way to
+     * force a reboot after changing a file it includes.
+     */
+    protected function configFileChanged(): bool
+    {
+        $this->ensureRectorAutoloaded();
+        $resolver = new RectorConfigsResolver();
+        try {
+            $mainConfigFile = $resolver->provide()->getMainConfigFile();
+        } catch (\Throwable) {
+            // provide() itself can throw (e.g. an explicit --config path deleted since the
+            // last boot). Don't let this check crash run() with an opaque exception -- report
+            // "changed" so the reboot below runs boot() again, which hits the exact same
+            // failure and reports it properly (isError: true, via RectorTool's own catch)
+            // instead of this pre-call check crashing first.
+            return true;
+        }
+
+        if ($mainConfigFile !== $this->configFile) {
+            return true;
+        }
+
+        return $this->hashConfigFile($mainConfigFile) !== $this->configFileHash;
+    }
+
+    private function hashConfigFile(?string $path): ?string
+    {
+        if ($path === null || !is_file($path)) {
+            return null;
+        }
+        $hash = hash_file('sha256', $path);
+        return $hash !== false ? $hash : null;
     }
 
     /**

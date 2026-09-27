@@ -42,7 +42,7 @@ final class RectorTool
      */
     #[McpTool(
         name: 'rector_process',
-        description: 'Run Rector refactoring on a path. Server-pinned config.',
+        description: 'Run Rector refactoring on a path, using the rector.php resolved at server start (reloaded automatically when that file changes).',
         annotations: new ToolAnnotations(
             readOnlyHint: false,
             destructiveHint: true,

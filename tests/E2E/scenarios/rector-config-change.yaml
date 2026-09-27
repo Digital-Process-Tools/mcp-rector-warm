@@ -1,5 +1,4 @@
 description: rector.php changes mid-session (a rule is dropped); a cold run obeys the new rule set.
-xfail: "#20: rector.php is read once at server start, so an edit mid-session is ignored until restart"
 files:
   src/Probe.php: |
     <?php

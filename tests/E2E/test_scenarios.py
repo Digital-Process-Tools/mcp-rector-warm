@@ -43,8 +43,11 @@ Scenario format (YAML) -- see CONTRIBUTING.md for a worked example:
     - call: /abs/path              # an absolute path is outside the tree: no oracle
 
 Checked on every scenario, whatever its steps: every call after the first in-tree one
-reports warm_boot = true (so the oracle compares a warm container, not a reboot),
-stdout carries nothing but JSON-RPC, and the server exits 0 when the client closes.
+reports warm_boot = true (so the oracle compares a warm container, not a reboot) --
+UNLESS a write/edit/delete/rename on rector.php/rector.dist.php happened since the
+previous call, in which case that one call must report warm_boot = false (a forced
+reboot, #20) and warm_boot returns to true from the call after. stdout carries nothing
+but JSON-RPC, and the server exits 0 when the client closes.
 """
 
 from __future__ import annotations
@@ -211,7 +214,33 @@ def as_list(value: Any) -> list[str]:
     return [value] if isinstance(value, str) else list(value)
 
 
-async def call_step(server: Any, step: dict[str, Any], cold_tree: Path | None, warm_root: Path, first_call: bool, where: str) -> None:
+# A write/edit/delete/rename on the resolved main config file (#20) forces the NEXT
+# in-tree call to reboot: warm_boot must be False for that one call, then True again
+# from the call after, once the parent has re-booted from the new config.
+CONFIG_FILE_NAMES = {"rector.php", "rector.dist.php"}
+
+
+def step_touches_config(step: dict[str, Any]) -> bool:
+    if "write" in step:
+        return step["write"]["path"] in CONFIG_FILE_NAMES
+    if "edit" in step:
+        return step["edit"]["path"] in CONFIG_FILE_NAMES
+    if "delete" in step:
+        return step["delete"] in CONFIG_FILE_NAMES
+    if "rename" in step:
+        return step["rename"]["from"] in CONFIG_FILE_NAMES or step["rename"]["to"] in CONFIG_FILE_NAMES
+    return False
+
+
+async def call_step(
+    server: Any,
+    step: dict[str, Any],
+    cold_tree: Path | None,
+    warm_root: Path,
+    first_call: bool,
+    where: str,
+    expect_reboot: bool = False,
+) -> None:
     """One rector_process call, checked against the cold oracle and the step's 'expect'."""
     rel = step["call"]
     dry_run = step.get("dry_run", True)
@@ -222,7 +251,13 @@ async def call_step(server: Any, step: dict[str, Any], cold_tree: Path | None, w
 
     if cold_tree is not None:
         if not first_call:
-            assert payload.get("warm_boot") is True, f"{where}: expected a warm container, got a cold boot: {payload}"
+            if expect_reboot:
+                assert payload.get("warm_boot") is False, (
+                    f"{where}: the resolved config changed since the last call, so this call must "
+                    f"reboot (warm_boot=False) rather than reuse the container the old config built: {payload}"
+                )
+            else:
+                assert payload.get("warm_boot") is True, f"{where}: expected a warm container, got a cold boot: {payload}"
         cold = normalise(run_cold(cold_tree, rel, dry_run), cold_tree)
         assert warm == cold, (
             f"{where}: warm MCP result differs from a cold 'rector process' on the same tree\n"
@@ -260,17 +295,22 @@ def test_scenario(scenario_file: Path, data: dict[str, Any], tmp_path: Path) -> 
     async def run() -> tuple[int, list[Exception]]:
         calls_made = 0
         in_tree_calls = 0
+        config_touched_since_last_call = False
         async with open_server(tree.root, record, config if config.exists() else None) as server:
             for i, step in enumerate(data["steps"]):
                 where = f"{scenario_file.name} step {i}"
                 if "write" in step:
                     tree.write(step["write"]["path"], step["write"]["content"])
+                    config_touched_since_last_call = config_touched_since_last_call or step_touches_config(step)
                 elif "edit" in step:
                     tree.edit(step["edit"]["path"], step["edit"]["old"], step["edit"]["new"])
+                    config_touched_since_last_call = config_touched_since_last_call or step_touches_config(step)
                 elif "delete" in step:
                     tree.delete(step["delete"])
+                    config_touched_since_last_call = config_touched_since_last_call or step_touches_config(step)
                 elif "rename" in step:
                     tree.rename(step["rename"]["from"], step["rename"]["to"])
+                    config_touched_since_last_call = config_touched_since_last_call or step_touches_config(step)
                 else:
                     in_tree_call = not os.path.isabs(step["call"])
                     cold_tree = None
@@ -279,7 +319,11 @@ def test_scenario(scenario_file: Path, data: dict[str, Any], tmp_path: Path) -> 
                         cold_tree = tmp_path / f"cold-{i}"
                         shutil.copytree(tree.root, cold_tree)
                         cold_tree = cold_tree.resolve()
-                    await call_step(server, step, cold_tree, tree.root, in_tree_calls == 0, where)
+                    await call_step(
+                        server, step, cold_tree, tree.root, in_tree_calls == 0, where,
+                        expect_reboot=config_touched_since_last_call,
+                    )
+                    config_touched_since_last_call = False
                     calls_made += 1
                     in_tree_calls += in_tree_call
             return calls_made, server.transport_errors
