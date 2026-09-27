@@ -59,19 +59,41 @@ final class ServerVersion
             return null;
         }
 
+        return self::normalizeComposerVersion($pretty);
+    }
+
+    /**
+     * The "does this actually look like a released semantic version" gate,
+     * extracted so it can be unit-tested directly against fixture strings
+     * rather than only through whatever Composer\InstalledVersions reports
+     * in the process actually running the test (that ambient value depends
+     * on how *this* checkout was obtained, not on anything the test
+     * controls).
+     *
+     * Anchored at both ends and requires the whole string to be a bare
+     * x.y.z (with an optional leading "v" and an optional semver
+     * pre-release/build suffix like "-beta.1" or "+build5") -- not merely
+     * to *start* with three numeric components. A branch-derived pseudo
+     * version such as "dev-main" or "9999999-dev" is rejected outright by
+     * the anchored digit match; a hypothetical branch-alias shaped like
+     * "0.6.0-dev" would otherwise pass a three-numbers-then-anything check,
+     * so any pre-release/build suffix containing "dev" is rejected too.
+     */
+    public static function normalizeComposerVersion(?string $pretty): ?string
+    {
         if ($pretty === null) {
             return null;
         }
 
-        // Only trust a shape that actually looks like a released semantic
-        // version. A dev checkout with no reachable tag reports something
-        // like "dev-main" or "9999999-dev", which fails this check and
-        // falls through to the changelog instead.
-        if (preg_match('/^v?\d+\.\d+\.\d+/', $pretty) !== 1) {
+        if (preg_match('/^v?(\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.]+)?)$/', $pretty, $matches) !== 1) {
             return null;
         }
 
-        return ltrim($pretty, 'v');
+        if (stripos($matches[1], 'dev') !== false) {
+            return null;
+        }
+
+        return $matches[1];
     }
 
     /**

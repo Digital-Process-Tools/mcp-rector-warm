@@ -52,7 +52,7 @@ def latest_released_version() -> str:
     # newest "## [x.y.z]" heading (never "## [Unreleased]") is what
     # ServerVersion.resolve() itself falls back to for a git checkout with no
     # reachable release tag, which is exactly this test's own environment.
-    changelog = (REPO / "CHANGELOG.md").read_text()
+    changelog = (REPO / "CHANGELOG.md").read_text(encoding="utf-8")
     match = re.search(r"^## \[(\d+\.\d+\.\d+)\]", changelog, re.MULTILINE)
     assert match, "could not find a released version heading in CHANGELOG.md"
     return match.group(1)

@@ -66,17 +66,39 @@ final class ServerVersionTest extends TestCase
         self::assertNull(ServerVersion::versionFromChangelog($this->changelog . '-does-not-exist'));
     }
 
-    public function testResolveFallsBackToTheChangelogWhenGivenAnExplicitPath(): void
+    /**
+     * Composer's real "install this, resolve()'s preferred source" plumbing
+     * (fromInstalledVersions()) is not exercised directly here -- it depends
+     * on how this package itself got installed (an ambient fact resolve()'s
+     * own docblock explains), which a unit test controls only by mocking
+     * Composer\InstalledVersions itself. The decision logic it delegates to
+     * -- "does this pretty_version string actually look like a released
+     * semver" -- is the part worth pinning, and normalizeComposerVersion()
+     * is pure and takes the string directly, so these fixtures exercise it
+     * deterministically instead of depending on this checkout's ambient
+     * Composer state (which the removed predecessor of this test did, and
+     * which made it pass or fail for reasons unrelated to the logic under
+     * test -- see #59 review).
+     */
+    #[\PHPUnit\Framework\Attributes\DataProvider('composerVersionShapes')]
+    public function testNormalizeComposerVersionAcceptsOnlyARealReleasedSemver(?string $pretty, ?string $expected): void
     {
-        file_put_contents($this->changelog, "# Changelog\n\n## [1.2.3] - 2026-01-01\n");
+        self::assertSame($expected, ServerVersion::normalizeComposerVersion($pretty));
+    }
 
-        $resolved = ServerVersion::resolve($this->changelog);
-
-        // Whatever Composer\InstalledVersions reports for this package in
-        // the process actually running the test suite (typically a
-        // "dev-*" branch pseudo-version for this checkout) is rejected by
-        // ServerVersion's own semver check, so resolve() falls through to
-        // the changelog path given here.
-        self::assertSame('1.2.3', $resolved);
+    public static function composerVersionShapes(): array
+    {
+        return [
+            'plain release' => ['0.5.0', '0.5.0'],
+            'leading v is stripped' => ['v0.5.0', '0.5.0'],
+            'pre-release suffix kept' => ['1.0.0-beta.1', '1.0.0-beta.1'],
+            'build metadata kept' => ['1.0.0+build5', '1.0.0+build5'],
+            'null is rejected' => [null, null],
+            'branch pseudo-version is rejected' => ['dev-main', null],
+            'unreachable-tag pseudo-version is rejected' => ['9999999-dev', null],
+            'a dev-flavoured branch-alias is rejected' => ['0.6.0-dev', null],
+            'trailing garbage after a real triple is rejected' => ['0.5.0 (unstable)', null],
+            'two components is not a semver' => ['0.5', null],
+        ];
     }
 }
