@@ -34,14 +34,22 @@ foreach ([
 use Mcp\Server;
 use Mcp\Server\Transport\StdioTransport;
 
-// Parse our own --working-dir flag BEFORE loading rector — keeps Server lean.
-// --config is deliberately NOT parsed out here: RectorConfigsResolver reads it
-// straight from $_SERVER['argv'] later, so it is left exactly where it is.
+// Parse our own --working-dir and --call-timeout flags BEFORE loading rector —
+// keeps Server lean. --config is deliberately NOT parsed out here:
+// RectorConfigsResolver reads it straight from $_SERVER['argv'] later, so it is
+// left exactly where it is.
 $workingDir = null;
+$callTimeoutSeconds = 600;
 foreach (array_slice($argv, 1) as $arg) {
     if (str_starts_with($arg, '--working-dir=')) {
         $workingDir = substr($arg, 14);
-        break;
+    } elseif (str_starts_with($arg, '--call-timeout=')) {
+        $value = substr($arg, 15);
+        if (!ctype_digit($value)) {
+            fwrite(STDERR, "mcp-rector-warm: --call-timeout must be a non-negative integer of seconds (0 = unlimited): {$value}\n");
+            exit(2);
+        }
+        $callTimeoutSeconds = (int) $value;
     }
 }
 
@@ -52,6 +60,16 @@ if ($workingDir !== null) {
     }
     chdir($workingDir);
 }
+
+// A hard per-call deadline (#58), separate from default_socket_timeout (#32):
+// a call that outruns the socket timeout but is still working must keep
+// going (#32 stays fixed), while a genuinely wedged worker must not block a
+// caller forever. Default 600s (measured: 0.3-2.4s warm, ~10s for a heavy
+// first call on a real project) never cuts off real work; 0 disables it,
+// matching pre-#58 behaviour. Every RectorRunner this process builds (via
+// RectorTool's own MCP-SDK-autowired constructor, which cannot take this as
+// an argument -- see RectorRunner::__construct()) resolves it from here.
+\Dpt\McpRectorWarm\RectorRunner::setDefaultCallTimeoutSeconds($callTimeoutSeconds);
 
 // NOTE: rector's scoper-autoload is loaded lazily inside RectorRunner::boot() —
 // not here — to avoid polluting the MCP SDK before the server starts.

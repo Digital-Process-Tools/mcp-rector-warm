@@ -1,0 +1,107 @@
+description: >
+  A call-timeout puts a hard upper bound back on a genuinely wedged call (#58,
+  the regression #57's #32 fix introduced), while an analysis merely slower than
+  the internal per-read poll interval -- but still under the deadline -- keeps
+  succeeding (#32 stays fixed), and the worker self-heals into serving the very
+  next call normally, without a fresh boot.
+oracle: false  # the wedged call deliberately diverges from a cold 'rector process',
+               # which has no such deadline and would simply finish it -- see the
+               # 'call_timeout' key's own doc comment in test_scenarios.py.
+call_timeout: 8
+config: |
+  <?php
+
+  declare(strict_types=1);
+
+  use PhpParser\Node;
+  use PhpParser\Node\Stmt\Class_;
+  use Rector\Config\RectorConfig;
+  use Rector\Php82\Rector\Class_\ReadOnlyClassRector;
+  use Rector\Rector\AbstractRector;
+  use Rector\ValueObject\PhpVersion;
+
+  // Sleep duration keyed off the class name, so one config exercises all three
+  // cases (wedged / patient-but-under-deadline / fast) inside one warm session.
+  final class VariableSlowRector extends AbstractRector
+  {
+      public function getNodeTypes(): array
+      {
+          return [Class_::class];
+      }
+
+      public function refactor(Node $node): ?Node
+      {
+          $name = $node->name?->toString() ?? '';
+          if (str_starts_with($name, 'Wedged')) {
+              // Longer than call_timeout could ever plausibly take to detect and
+              // kill; the assertion is that the CALL returns in seconds, not that
+              // this sleep ever completes.
+              sleep(30);
+          } elseif (str_starts_with($name, 'Patient')) {
+              // Longer than the ~1s per-read poll interval a configured
+              // call_timeout forces (RectorRunner::forkAndExecute()/runForked()),
+              // so this call rides out more than one 'timed_out' read -- exactly
+              // the #32 mechanism -- while staying comfortably under the 8s
+              // call_timeout deadline (a wide margin over the sleep itself,
+              // since the rest of a real call -- container reuse, AST diffing --
+              // is not free either, and this must not be a flaky race).
+              sleep(2);
+          }
+
+          return null;
+      }
+  }
+
+  return RectorConfig::configure()
+      ->withPaths([__DIR__ . "/src"])
+      ->withPhpVersion(PhpVersion::PHP_83)
+      ->withRules([VariableSlowRector::class, ReadOnlyClassRector::class]);
+files:
+  src/Wedged.php: |
+    <?php
+
+    declare(strict_types=1);
+
+    final class Wedged
+    {
+        public function __construct(private readonly int $amount)
+        {
+        }
+    }
+  src/Fast.php: |
+    <?php
+
+    declare(strict_types=1);
+
+    final class Fast
+    {
+        public function __construct(private readonly int $amount)
+        {
+        }
+    }
+  src/Patient.php: |
+    <?php
+
+    declare(strict_types=1);
+
+    final class Patient
+    {
+        public function __construct(private readonly int $amount)
+        {
+        }
+    }
+steps:
+  - call: src/Wedged.php
+    expect:
+      is_error: true
+      error_contains: "--call-timeout"
+  - call: src/Fast.php
+    expect:
+      is_error: false
+      changed: 1
+      diff_contains: "+final readonly class Fast"
+  - call: src/Patient.php
+    expect:
+      is_error: false
+      changed: 1
+      diff_contains: "+final readonly class Patient"

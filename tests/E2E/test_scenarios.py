@@ -29,6 +29,12 @@ Scenario format (YAML) -- see CONTRIBUTING.md for a worked example:
                                    #   (e.g. default_socket_timeout: 3 so a 60s
                                    #   timeout reproduces in seconds, #32); the cold
                                    #   oracle keeps PHP defaults.
+  call_timeout: 2                  # optional: --call-timeout=N (seconds) on the
+                                   #   SERVER only (#58) -- a hard per-call deadline,
+                                   #   separate from php_ini's socket timeout; the
+                                   #   cold oracle has no such deadline, so a
+                                   #   scenario using this needs oracle: false for
+                                   #   any call step it deliberately times out.
   files: {rel/path.php: source}    # optional: files written on top
   bootstrap_files: [rel/path.php]  # optional: paths the config registers via
                                    #   withBootstrapFiles() -- like rector.php itself
@@ -112,7 +118,7 @@ return RectorConfig::configure()
     ]);
 """
 
-TOP_KEYS = {"description", "xfail", "fixture", "config", "oracle", "php_ini", "files", "bootstrap_files", "steps"}
+TOP_KEYS = {"description", "xfail", "fixture", "config", "oracle", "php_ini", "call_timeout", "files", "bootstrap_files", "steps"}
 STEP_KINDS = {"write", "edit", "delete", "rename", "call"}
 CALL_KEYS = {"call", "dry_run", "expect"}
 EXPECT_KEYS = {"changed", "changed_files", "diff_contains", "diff_excludes", "is_error", "error_class", "error_contains"}
@@ -132,6 +138,8 @@ def load(path: Path) -> dict[str, Any]:
         raise ValueError(f"{where}: 'description' is required")
     if "php_ini" in data and not isinstance(data["php_ini"], dict):
         raise ValueError(f"{where}: 'php_ini' must be a mapping of ini key to value")
+    if "call_timeout" in data and not isinstance(data["call_timeout"], int):
+        raise ValueError(f"{where}: 'call_timeout' must be an integer number of seconds")
     if not isinstance(data.get("steps"), list) or not data["steps"]:
         raise ValueError(f"{where}: 'steps' must be a non-empty list")
     for i, step in enumerate(data["steps"]):
@@ -319,7 +327,9 @@ def test_scenario(scenario_file: Path, data: dict[str, Any], tmp_path: Path) -> 
         calls_made = 0
         in_tree_calls = 0
         config_touched_since_last_call = False
-        async with open_server(tree.root, record, config if config.exists() else None, data.get("php_ini")) as server:
+        async with open_server(
+            tree.root, record, config if config.exists() else None, data.get("php_ini"), data.get("call_timeout"),
+        ) as server:
             for i, step in enumerate(data["steps"]):
                 where = f"{scenario_file.name} step {i}"
                 if "write" in step:

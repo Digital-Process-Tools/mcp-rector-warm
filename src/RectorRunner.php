@@ -89,6 +89,38 @@ class RectorRunner implements RunnerInterface
      *  $composerFile is null. Same rationale and comparison method as $configFileHash. */
     private ?string $composerFileHash = null;
 
+    /** Hard per-call deadline in seconds, independent of the socket read timeout
+     *  (#32/#58): 0 means unlimited (today's pre-#58 behaviour). Defaults to
+     *  self::$defaultCallTimeoutSeconds so every RectorRunner built by the MCP SDK's
+     *  own autowiring (RectorTool's constructor -- see there for why it cannot take
+     *  this as its own constructor argument) still gets the value bin/mcp-rector-warm
+     *  set from --call-timeout, without needing a constructor argument only tests
+     *  actually pass. */
+    private int $callTimeoutSeconds;
+
+    /** Set once, at process start, by bin/mcp-rector-warm's --call-timeout parsing
+     *  (or bin/rector-cold-call.php's, for the no-pcntl one-shot subprocess) --
+     *  before any RectorTool/RectorRunner is constructed. Never read directly:
+     *  every RectorRunner instance resolves its OWN $callTimeoutSeconds once, in
+     *  its constructor, so a later call to this setter cannot change the timeout
+     *  an already-built instance enforces mid-call. */
+    private static ?int $defaultCallTimeoutSeconds = null;
+
+    public static function setDefaultCallTimeoutSeconds(int $seconds): void
+    {
+        self::$defaultCallTimeoutSeconds = $seconds;
+    }
+
+    /**
+     * @param int|null $callTimeoutSeconds 0 = unlimited; null = use whatever
+     *   setDefaultCallTimeoutSeconds() set, or 600 if that was never called
+     *   (matches bin/mcp-rector-warm's own --call-timeout default, #58).
+     */
+    public function __construct(?int $callTimeoutSeconds = null)
+    {
+        $this->callTimeoutSeconds = $callTimeoutSeconds ?? self::$defaultCallTimeoutSeconds ?? 600;
+    }
+
     public function isWarm(): bool
     {
         return $this->workerPid !== null;
@@ -212,6 +244,32 @@ class RectorRunner implements RunnerInterface
             && \function_exists('stream_socket_pair');
     }
 
+    /** Extra seconds runForked()'s own (daemon-side) deadline gets on top of
+     *  $callTimeoutSeconds, so forkAndExecute()'s deadline (inside the worker,
+     *  same $callTimeoutSeconds, no grace) reliably fires FIRST and gets the
+     *  chance to SIGKILL the grandchild, reap it, and write a clean error frame
+     *  back before the daemon-side backstop would also expire. Without this, the
+     *  two independent deadlines racing on the identical instant means the
+     *  daemon-side one can fire concurrently with -- not only after -- the
+     *  worker's own, defeating "only a genuinely unresponsive WORKER trips the
+     *  daemon-side kill" (#58): SIGKILL + pcntl_waitpid + one writeFrame() is not
+     *  free, and none of it happens before the worker's own deadline is reached. */
+    private const RUN_FORKED_DEADLINE_GRACE_SECONDS = 5;
+
+    /**
+     * Monotonic deadline (hrtime(true) nanoseconds) for the call this instance is
+     * about to make, or null when $callTimeoutSeconds is 0 (unlimited, #58). Read
+     * once per call at the point the call starts, never cached across calls: each
+     * call gets its own fresh deadline. hrtime(true), not time()/microtime(), so a
+     * system clock adjustment mid-call can never shorten or extend it.
+     */
+    private function callDeadlineNs(int $graceSeconds = 0): ?int
+    {
+        return $this->callTimeoutSeconds > 0
+            ? \hrtime(true) + ($this->callTimeoutSeconds + $graceSeconds) * 1_000_000_000
+            : null;
+    }
+
     /**
      * Boot: fork a brand-new "warm worker" child and wait for it to either confirm it
      * booted (a real container built inside that fresh process) or report why it could
@@ -328,9 +386,44 @@ class RectorRunner implements RunnerInterface
     {
         \assert($this->workerSocket !== null);
         $payload = (string) \json_encode(['argv' => $argv, 'warm_boot' => $warmBoot]);
+        // Same short-per-read-timeout rationale as forkAndExecute()'s wait loop
+        // (#58): only touched when a deadline is actually in play, so the
+        // unlimited case ($callTimeoutSeconds == 0) keeps relying on whatever
+        // default_socket_timeout already governs, unchanged from before #58.
+        // The grace period (see RUN_FORKED_DEADLINE_GRACE_SECONDS) is what makes
+        // this a genuine backstop rather than a coin flip against
+        // forkAndExecute()'s own, identically-timed deadline.
+        $deadline = $this->callDeadlineNs(self::RUN_FORKED_DEADLINE_GRACE_SECONDS);
+        if ($deadline !== null) {
+            \stream_set_timeout($this->workerSocket, 1);
+        }
         try {
             $this->writeFrame($this->workerSocket, $payload);
-            $raw = $this->readFrame($this->workerSocket);
+            $raw = $this->readFrame($this->workerSocket, $deadline);
+        } catch (RectorCallTimeoutException $e) {
+            // Defense in depth: forkAndExecute()'s OWN deadline (same budget,
+            // checked inside the worker) should normally have already reported a
+            // clean timeout error by now -- this only fires when the WORKER
+            // ITSELF has gone unresponsive, not merely its forked grandchild.
+            // Force it down so the next call self-heals into a fresh worker
+            // (#43) instead of waiting on a read that may never arrive. This
+            // process only ever learns the worker's own pid (boot()'s
+            // pcntl_fork() return) -- never its grandchild's, which is forked
+            // and reaped entirely inside the worker's own forkAndExecute() -- so
+            // an in-flight grandchild here is orphaned (reparented, not left a
+            // zombie under THIS process) rather than reaped directly; a real,
+            // narrower gap than the zombie-under-us case #48 described, and one
+            // that should be rare given forkAndExecute()'s own deadline already
+            // covers the common "grandchild alone is wedged" case.
+            if ($this->workerPid !== null) {
+                if (\function_exists('posix_kill')) {
+                    @\posix_kill($this->workerPid, \SIGKILL);
+                }
+                $status = 0;
+                \pcntl_waitpid($this->workerPid, $status);
+            }
+            $this->forgetDeadWorker();
+            throw new \RuntimeException($e->getMessage());
         } catch (\RuntimeException $e) {
             // The worker died mid-call (crash, OOM-kill) rather than between calls, so
             // workerIsDead()'s WNOHANG check in run() never got a chance to catch it
@@ -440,12 +533,40 @@ class RectorRunner implements RunnerInterface
         // produced no output" while it is, in fact, still running (and, with
         // dryRun: false, may already have written files to disk).
         \fclose($childSocket);
+        // A short per-read timeout, independent of default_socket_timeout (#32),
+        // so the deadline check below runs promptly -- default_socket_timeout can
+        // be minutes; this loop must not wait a whole one of those just to notice
+        // the deadline already passed. Only set when a deadline is actually in
+        // play: with $callTimeoutSeconds == 0 (unlimited), leave the socket on
+        // whatever default_socket_timeout already governs, unchanged from before
+        // #58.
+        $deadline = $this->callDeadlineNs();
+        if ($deadline !== null) {
+            \stream_set_timeout($parentSocket, 1);
+        }
         $raw = '';
         while (!\feof($parentSocket)) {
             $chunk = \fread($parentSocket, 65536);
             if ($chunk === false || $chunk === '') {
                 $meta = \stream_get_meta_data($parentSocket);
                 if ($meta['timed_out'] ?? false) {
+                    if ($deadline !== null && \hrtime(true) >= $deadline) {
+                        // The grandchild is genuinely wedged, not merely slow
+                        // (#58): default_socket_timeout retrying forever (the #32
+                        // fix) has no upper bound of its own, so this is the one.
+                        // Force it down and reap it so it never lingers as this
+                        // worker's own zombie (the very failure #48 described).
+                        if (\function_exists('posix_kill')) {
+                            @\posix_kill($pid, \SIGKILL);
+                        }
+                        \pcntl_waitpid($pid, $status);
+                        \fclose($parentSocket);
+
+                        throw new \RuntimeException(
+                            "rector call exceeded {$this->callTimeoutSeconds}s (--call-timeout); "
+                            . 'the analysis was killed',
+                        );
+                    }
                     continue;
                 }
                 break;
@@ -542,7 +663,44 @@ class RectorRunner implements RunnerInterface
             ]);
             \fwrite($pipes[0], $request);
             \fclose($pipes[0]);
-            $exitCode = \proc_close($process);
+
+            // #58: the no-pcntl fallback (this whole method) had no deadline at
+            // all -- proc_close() blocks unconditionally until the subprocess
+            // exits, so a genuinely wedged cold call hung the daemon forever,
+            // same class of regression as the two pcntl-path wait loops above,
+            // just with no retry-on-timeout to even add a check to: a single
+            // blocking call. Poll proc_get_status() against the same deadline
+            // instead when one is configured; proc_close() alone (today's
+            // pre-#58 behaviour) when $callTimeoutSeconds == 0.
+            $deadline = $this->callDeadlineNs();
+            if ($deadline === null) {
+                $exitCode = \proc_close($process);
+            } else {
+                $exitCode = null;
+                while (true) {
+                    $procStatus = \proc_get_status($process);
+                    if ($procStatus === false || !$procStatus['running']) {
+                        $exitCode = \proc_close($process);
+                        break;
+                    }
+                    if (\hrtime(true) >= $deadline) {
+                        // SIGKILL, not the proc_terminate() default (SIGTERM): a
+                        // wedged process (the reason this branch exists) is, by
+                        // definition, not responding to signals it could choose
+                        // to handle -- consistent with the pcntl paths above,
+                        // which also go straight to SIGKILL rather than asking
+                        // nicely first.
+                        \proc_terminate($process, \SIGKILL);
+                        \proc_close($process);
+
+                        throw new \RuntimeException(
+                            "rector call exceeded {$this->callTimeoutSeconds}s (--call-timeout); "
+                            . 'the cold rector subprocess was killed',
+                        );
+                    }
+                    \usleep(100_000);
+                }
+            }
 
             $resultJson = \is_file($resultFile) ? \file_get_contents($resultFile) : false;
             $decoded = $resultJson === false || $resultJson === '' ? null : \json_decode($resultJson, true);
@@ -625,9 +783,9 @@ class RectorRunner implements RunnerInterface
      *
      * @param resource $socket
      */
-    private function readFrame($socket): ?string
+    private function readFrame($socket, ?int $deadlineNs = null): ?string
     {
-        $header = $this->readExactly($socket, 4);
+        $header = $this->readExactly($socket, 4, $deadlineNs);
         if ($header === null) {
             return null;
         }
@@ -637,13 +795,21 @@ class RectorRunner implements RunnerInterface
             return '';
         }
 
-        return $this->readExactly($socket, $length);
+        return $this->readExactly($socket, $length, $deadlineNs);
     }
 
     /**
      * @param resource $socket
+     * @param int|null $deadlineNs When given (callDeadlineNs(), #58), a read still
+     *   timing out past this point throws RectorCallTimeoutException instead of
+     *   looping forever -- distinct from returning null (a real EOF), so the
+     *   caller (runForked()) can tell "the worker is genuinely gone" apart from
+     *   "the worker has gone quiet past its deadline" and react differently.
+     *   null (the default -- every caller except runForked()'s own call-response
+     *   read, e.g. boot()'s handshake) preserves the pre-#58 behaviour: loop on a
+     *   timeout forever, distinguishing only real EOF from a live peer.
      */
-    private function readExactly($socket, int $length): ?string
+    private function readExactly($socket, int $length, ?int $deadlineNs = null): ?string
     {
         $buffer = '';
         while (\strlen($buffer) < $length) {
@@ -656,6 +822,12 @@ class RectorRunner implements RunnerInterface
                 // the connection here either.
                 $meta = \stream_get_meta_data($socket);
                 if ($meta['timed_out'] ?? false) {
+                    if ($deadlineNs !== null && \hrtime(true) >= $deadlineNs) {
+                        throw new RectorCallTimeoutException(
+                            "rector call exceeded {$this->callTimeoutSeconds}s (--call-timeout) "
+                            . 'waiting on the warm worker',
+                        );
+                    }
                     continue;
                 }
                 return null;
@@ -877,9 +1049,15 @@ class RectorRunner implements RunnerInterface
      * runs, inside the very container build this is called right after (bootInPlace()).
      * Fails open (returns []) rather than throwing: a defensive fallback if the
      * SimpleParameterProvider class or its Option::BOOTSTRAP_FILES key ever moves
-     * upstream, exactly like execute()'s ConfigInitializer check just below in this file
-     * -- missing this file-list must never break a boot that otherwise succeeded, only
-     * quietly lose the "picked up a bootstrap edit" behaviour this method exists for.
+     * upstream -- missing this file-list must never break a boot that otherwise
+     * succeeded, only quietly lose the "picked up a bootstrap edit" behaviour this
+     * method exists for. Unlike execute()'s ConfigInitializer check further down in
+     * this file (deliberately left UNCAUGHT -- see the comment there), this one is a
+     * genuine try/catch, so the catch branch writes one line to stderr (#63):
+     * display_errors=stderr is already set (bin/mcp-rector-warm), so this lands in
+     * the same server logs a boot failure would, instead of a silent, permanent
+     * return to pre-#33 behaviour indistinguishable from "this config simply
+     * registers no bootstrap files".
      *
      * @return array<string, string|null>
      */
@@ -887,7 +1065,13 @@ class RectorRunner implements RunnerInterface
     {
         try {
             $bootstrapFiles = \Rector\Configuration\Parameter\SimpleParameterProvider::provideArrayParameter('bootstrap_files');
-        } catch (\Throwable) {
+        } catch (\Throwable $e) {
+            \fwrite(
+                \STDERR,
+                "mcp-rector-warm: could not resolve withBootstrapFiles() paths ({$e->getMessage()}); "
+                . "bootstrap-file edits will not force a reboot until the next boot (#63)\n",
+            );
+
             return [];
         }
 

@@ -68,6 +68,7 @@ async def open_server(
     record_dir: Path,
     config: Path | None = None,
     php_ini: dict[str, Any] | None = None,
+    call_timeout: int | None = None,
 ) -> AsyncIterator[ServerRun]:
     """Launch bin/mcp-rector-warm over stdio and complete the initialize handshake.
 
@@ -81,6 +82,10 @@ async def open_server(
     args = [str(TAP), str(record_dir), "--", php_binary(), *ini_flags, str(BIN), f"--working-dir={project}"]
     if config is not None:
         args.append(f"--config={config}")
+    # call_timeout: --call-timeout=N on the SERVER only (#58), so a scenario can
+    # pin a small deadline without waiting out the 600s production default.
+    if call_timeout is not None:
+        args.append(f"--call-timeout={call_timeout}")
     params = StdioServerParameters(command=sys.executable, args=args, cwd=str(project))
 
     transport_errors: list[Exception] = []

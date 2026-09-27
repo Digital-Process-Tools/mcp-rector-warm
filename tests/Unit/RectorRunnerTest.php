@@ -380,4 +380,177 @@ final class RectorRunnerTest extends TestCase
             rmdir($tmp);
         }
     }
+
+    /**
+     * #58: PR #57 fixed #32 (a socket-read timeout during a slow-but-successful
+     * call must not be mistaken for the worker dying) by retrying forever on
+     * stream_get_meta_data()['timed_out'], with no cap of its own -- so a
+     * genuinely WEDGED grandchild (not merely slow) blocked the caller forever
+     * instead of erroring out the way the pre-#57 code accidentally did via
+     * default_socket_timeout. A --call-timeout deadline must put a real upper
+     * bound back: the call must fail within roughly its configured timeout
+     * (never hang), name the timeout in its error message, and the worker must
+     * come out the other side still usable -- not left wedged, not left with an
+     * unreaped grandchild the caller can never account for again.
+     *
+     * The grandchild here never touches a real Rector container: execute() is
+     * overridden to sleep() directly, so this pins forkAndExecute()'s OWN
+     * deadline handling (the wait loop reading the worker<->grandchild socket)
+     * in isolation from Rector's boot cost -- the E2E scenario for #58 is what
+     * exercises the real SlowRector-over-MCP path end to end.
+     */
+    public function testWedgedCallIsKilledAtTheDeadlineAndTheWorkerStaysUsable(): void
+    {
+        if (!\function_exists('posix_kill') || !\function_exists('pcntl_fork')) {
+            self::markTestSkipped('posix_kill/pcntl_fork unavailable in this environment');
+        }
+
+        $tmp = sys_get_temp_dir() . '/rector-runner-call-timeout-test-' . bin2hex(random_bytes(8));
+        mkdir($tmp);
+        file_put_contents(
+            $tmp . '/rector.php',
+            "<?php\n\ndeclare(strict_types=1);\n\nuse Rector\\Config\\RectorConfig;\n\nreturn RectorConfig::configure();\n",
+        );
+        $previousCwd = getcwd();
+        $previousArgv = $_SERVER['argv'] ?? ['rector'];
+
+        try {
+            chdir($tmp);
+            $_SERVER['argv'] = ['rector'];
+
+            // 1s deadline: long enough that the worker's own boot (a real,
+            // zero-rule Rector container) reliably finishes well before it, short
+            // enough that this test does not itself become the next slow test in
+            // the suite.
+            // Whether THIS call sleeps travels in $argv, not in object state: the
+            // worker forked once, at boot(), and keeps running its OWN copy of
+            // $this from that instant on (serveWorker()'s loop) -- a later
+            // mutation of $runner in THIS (daemon) process can never reach back
+            // into an already-forked child. $argv, by contrast, is decoded fresh
+            // by the worker on every request (serveWorker()'s readFrame() loop),
+            // so it is the only per-call signal available here.
+            $runner = new class(1) extends RectorRunner {
+                protected function execute(array $argv, bool $warmBoot): array
+                {
+                    if (($argv[1] ?? null) === 'wedge') {
+                        // Longer than any plausible deadline-detection latency; the
+                        // assertion below is that run() returns in seconds, not that
+                        // this sleep ever completes -- SIGKILL cuts it short.
+                        sleep(30);
+                    }
+
+                    return ['exit_code' => 0, 'output' => '', 'warm_boot' => $warmBoot];
+                }
+            };
+
+            $start = microtime(true);
+            try {
+                $runner->run(['rector', 'wedge']);
+                self::fail('expected the wedged call to throw a timeout error');
+            } catch (\RuntimeException $e) {
+                self::assertStringContainsString('exceeded 1s', $e->getMessage());
+                self::assertStringContainsString('--call-timeout', $e->getMessage());
+            }
+            $elapsed = microtime(true) - $start;
+            self::assertLessThan(
+                15.0,
+                $elapsed,
+                "the call must be killed at roughly its 1s deadline, not left to hang -- took {$elapsed}s "
+                . '(this is the exact regression #58 reports: PR #57 removed the old upper bound)',
+            );
+
+            self::assertTrue(
+                $runner->isWarm(),
+                'only the wedged GRANDCHILD should be killed -- the worker itself must survive a single '
+                . 'timed-out call so the very next one does not need a fresh boot',
+            );
+
+            // The worker must still be genuinely usable, not merely "isWarm()
+            // reports true" -- a real call through it must succeed.
+            $result = $runner->run(['rector', 'process']);
+            self::assertSame(0, $result['exit_code']);
+            self::assertTrue($result['warm_boot'], 'the SAME worker must have served this call, not a fresh boot');
+        } finally {
+            chdir($previousCwd);
+            $_SERVER['argv'] = $previousArgv;
+            unlink($tmp . '/rector.php');
+            rmdir($tmp);
+        }
+    }
+
+    /**
+     * #63: resolveBootstrapFileHashes() fails open (returns []) when
+     * SimpleParameterProvider::provideArrayParameter() throws, so a boot with a
+     * genuinely broken bootstrap-file resolution looks identical -- from the
+     * return value alone -- to a config that registers none. That is deliberate
+     * (a broken file-list must never break an otherwise-successful boot), but it
+     * must not also be SILENT: the catch branch must write one line to stderr so
+     * the failure is visible in server logs instead of vanishing.
+     *
+     * Exercised directly against the private method via Reflection: forcing
+     * SimpleParameterProvider itself to throw would need a real Rector container
+     * boot with something upstream deliberately broken, which is what the E2E
+     * scenario for #33 already covers for the success path -- this pins the
+     * catch branch's own side effect (the stderr line) in isolation, the one
+     * thing a green #33 scenario cannot tell apart from "no bootstrap files".
+     */
+    public function testBootstrapFileHashResolutionFailureIsLoggedNotSilent(): void
+    {
+        $runner = new RectorRunner();
+        $method = new \ReflectionMethod(RectorRunner::class, 'resolveBootstrapFileHashes');
+        $method->setAccessible(true);
+
+        // provideArrayParameter() only throws when the stored value is not an
+        // array (Webmozart\Assert::isArray()) -- an unset key defaults to [] and
+        // never throws at all. Forcing the SAME failure a real upstream rename of
+        // Option::BOOTSTRAP_FILES or a SimpleParameterProvider internals change
+        // would produce (provideArrayParameter() asked for something that is not
+        // an array) needs setting the parameter to a non-array value directly;
+        // this is the static registry the real boot path populates, reset after.
+        \Rector\Configuration\Parameter\SimpleParameterProvider::setParameter('bootstrap_files', 'not-an-array');
+
+        // fwrite(STDERR, ...) writes straight to the real fd, independent of the
+        // display_errors ini setting (that one only governs PHP's own
+        // notice/warning display) -- a stream filter appended to the STDERR
+        // resource captures every byte written to it without touching the real
+        // fd or needing a subprocess.
+        stream_filter_register('rrt63capture', RectorRunnerTest63CaptureFilter::class);
+        RectorRunnerTest63CaptureFilter::$captured = '';
+        $filter = stream_filter_append(STDERR, 'rrt63capture', STREAM_FILTER_WRITE);
+        self::assertNotFalse($filter);
+
+        try {
+            $result = $method->invoke($runner);
+        } finally {
+            stream_filter_remove($filter);
+            \Rector\Configuration\Parameter\SimpleParameterProvider::setParameter('bootstrap_files', []);
+        }
+
+        self::assertSame([], $result, 'must still fail OPEN: a resolution failure returns [], never throws');
+        self::assertStringContainsString(
+            '#63',
+            RectorRunnerTest63CaptureFilter::$captured,
+            'the catch branch must write a diagnostic line to stderr instead of failing silently: got ' . var_export(RectorRunnerTest63CaptureFilter::$captured, true),
+        );
+    }
+}
+
+/**
+ * @internal test-only stream filter: captures every byte written to STDERR while
+ * appended, without touching the real fd -- see testBootstrapFileHashResolutionFailureIsLoggedNotSilent().
+ */
+final class RectorRunnerTest63CaptureFilter extends \php_user_filter
+{
+    public static string $captured = '';
+
+    public function filter($in, $out, &$consumed, bool $closing): int
+    {
+        while ($bucket = stream_bucket_make_writeable($in)) {
+            self::$captured .= $bucket->data;
+            $consumed += $bucket->datalen;
+            stream_bucket_append($out, $bucket);
+        }
+
+        return PSFS_PASS_ON;
+    }
 }
