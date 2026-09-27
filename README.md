@@ -182,6 +182,12 @@ A missing config reports `error_class: "RuntimeException"` with a message naming
 `rector.php` and call again, and it boots normally, since a failed boot never
 marks the container warm.
 
+A `dryRun: false` call refused because a `--call-timeout` deadline is active
+([#72](https://github.com/Digital-Process-Tools/mcp-rector-warm/issues/72))
+reports `error_class: "UnsafeCallTimeoutError"`, with the same `isError: true`
+/ `structuredContent` shape as above -- see the `dryRun` row and the
+`--call-timeout` row in the Options table.
+
 The tool also declares its behavior via MCP tool annotations: `readOnlyHint:
 false` (a non-dry-run call writes files), `destructiveHint: true`,
 `idempotentHint: false`, `openWorldHint: false`.
@@ -202,7 +208,7 @@ Three decisions worth knowing:
 
 **Does this replace `vendor/bin/rector`?** No. Use it from MCP clients (Claude Desktop, agents). For one-off CLI calls the regular binary is still simpler.
 
-**Can it apply changes?** Yes — pass `dryRun: false`. (Rector itself has no `--fix` flag: it writes by default and only previews with `--dry-run`.)
+**Can it apply changes?** Yes — pass `dryRun: false`. (Rector itself has no `--fix` flag: it writes by default and only previews with `--dry-run`.) Not while the default `--call-timeout` deadline is active, though ([#72](https://github.com/Digital-Process-Tools/mcp-rector-warm/issues/72)): a killed call can leave a file truncated mid-write with no backup, so `rector_process` refuses `dryRun: false` outright until you restart the server with `--call-timeout=0`.
 
 **Why not a phar?** Rector ships as a real Composer library. Phar packaging would just add a runtime cost without a benefit here.
 
