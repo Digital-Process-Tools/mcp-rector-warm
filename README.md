@@ -76,11 +76,12 @@ Measured with `tools/warm-vs-cold.py` on a real private production codebase (PHP
 |-------|--------|-----|-------|
 | Cold `rector process`, one file | 7.02s | 9.00s | autoloader + container + ruleset each time |
 | **mcp-rector-warm, later calls** | **0.68s** | **2.40s** | container reused |
-| mcp-rector-warm, first call | 10.1s | | one sample: this file's own work plus whatever boot is left after the MCP handshake |
+| mcp-rector-warm, start + handshake | 0.1s | | the container is not built yet |
+| mcp-rector-warm, first call | 6.4s | | builds the container: costs about one cold run, paid **once** per session |
 
-**~10× faster per call at the median.** 20 files: **144s cold → 30s warm**, both slow first calls included. All 20 warm answers matched the cold ones.
+**~10× faster per call at the median.** 20 files: **144s cold → 30s warm**, first call included. All 20 warm answers matched the cold ones.
 
-The boot cost is not isolated here. The timer starts after the MCP handshake, so process start is not counted at all, and warm-up runs past the first call (the second took 4.0s). The warm phase also ran first, before the OS file cache was warm.
+The start and first-call rows come from a separate probe: 3 fresh sessions, each starting with the same small file, which takes 5.9-7.3s cold. The first call took 6.37-6.42s each time, and a second, different file then took 0.28-0.31s. The server builds the container on the first call, not at start, so an idle server costs nothing. The first call costs about the same as running Rector once without the server.
 
 Numbers vary with project size and rule set. The win is the cold-start amortization, not magic. Reproduce on your own project:
 
