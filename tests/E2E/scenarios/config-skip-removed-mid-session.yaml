@@ -1,0 +1,47 @@
+description: "A withSkip() entry removed mid-session (#41): an in-process reboot used to leave Rector's SimpleParameterProvider statics (Option::SKIP) merged from the earlier boot, so a removed skip kept skipping. #31's fresh-process boot means every reboot starts a genuinely clean process, so removing a skip takes effect on the very next call, matching cold."
+config: |
+  <?php
+
+  declare(strict_types=1);
+
+  use Rector\Config\RectorConfig;
+  use Rector\Php82\Rector\Class_\ReadOnlyClassRector;
+  use Rector\ValueObject\PhpVersion;
+
+  return RectorConfig::configure()
+      ->withPaths([__DIR__ . "/src"])
+      ->withPhpVersion(PhpVersion::PHP_83)
+      ->withSkip([__DIR__ . "/src/Money.php"])
+      ->withRules([ReadOnlyClassRector::class]);
+files:
+  src/Money.php: |
+    <?php
+
+    declare(strict_types=1);
+
+    final class Money
+    {
+        public function __construct(private readonly int $amount)
+        {
+        }
+    }
+steps:
+  # Skipped: the rule would apply (promoted property -> readonly class) but
+  # withSkip() excludes this exact file.
+  - call: src/Money.php
+    expect:
+      changed: 0
+  - edit:
+      path: rector.php
+      old: '->withSkip([__DIR__ . "/src/Money.php"])'
+      new: ""
+  # The skip is gone: the rule must now apply, on the very next call, matching a
+  # cold run exactly (the harness's own default oracle already asserts warm ==
+  # cold for every call; this expect{} pins the same claim explicitly). Before
+  # #31, an in-process reboot left Rector's SimpleParameterProvider Option::SKIP
+  # static merged from the earlier boot, so this call kept skipping (#41).
+  - call: src/Money.php
+    expect:
+      is_error: false
+      changed: 1
+      diff_contains: "+final readonly class Money"

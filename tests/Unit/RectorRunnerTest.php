@@ -16,78 +16,67 @@ final class RectorRunnerTest extends TestCase
     }
 
     /**
-     * Control-flow pin for the no-pcntl fallback (claude-supertool#8): no CI
-     * leg in this repo runs without pcntl (single ubuntu-latest job), so this
-     * exercises the branch mechanically by forcing canFork() to report
-     * unavailable. A warm call must then reboot + reboot the container and
-     * report warm_boot=false -- never silently reuse the old container or
-     * silently take the fork path.
+     * Control-flow pin for the no-pcntl fallback (#31, formerly #8): CI does not run
+     * without pcntl (single ubuntu-latest job), so this exercises the branch
+     * mechanically by forcing canFork() to report unavailable. Before #31, a warm
+     * call rebooted the SAME process's container in place -- which crashed for real
+     * whenever rector.php (or a withBootstrapFiles file) declared a class or
+     * function, since that process had already required it once. Without pcntl there
+     * is no OS-process boundary to isolate a reboot in at all, so run() must never
+     * boot()/reboot() this instance in place any more: every call, including the
+     * first, goes through runCold() (a genuinely fresh `php` subprocess per call) and
+     * reports warm_boot=false. isWarm() must stay false throughout -- nothing here is
+     * ever warm.
      */
-    public function testRunWithoutForkSupportRebootsAndReportsColdOnWarmCalls(): void
+    public function testRunWithoutForkSupportAlwaysRunsColdAndNeverBootsInPlace(): void
     {
         $runner = new class extends RectorRunner {
             /** @var list<string> */
             public array $log = [];
-            private bool $booted = false;
 
             protected function canFork(): bool
             {
                 return false;
             }
 
-            public function isWarm(): bool
-            {
-                return $this->booted;
-            }
-
             public function reboot(): void
             {
                 $this->log[] = 'reboot';
-                $this->booted = false;
             }
 
             protected function boot(): void
             {
                 $this->log[] = 'boot';
-                $this->booted = true;
-            }
-
-            /**
-             * Fixed to false, never the real filesystem-backed check: this test pins the
-             * no-pcntl fallback (every warm call fully reboots, #8), which already forces a
-             * reboot on every warm call regardless of any config change, so the two must not
-             * be conflated. Without this override, run() would consult the REAL
-             * configFileChanged() (a real RectorConfigsResolver + a real is_file()/hash_file()
-             * against getcwd()) and the log below would happen to still match today only
-             * because no rector.php exists at the repo root -- an assertion that stops meaning
-             * what it says the moment that stops being true.
-             */
-            protected function configFileChanged(): bool
-            {
-                return false;
             }
 
             /**
              * @param list<string> $argv
              * @return array{exit_code: int, output: string, warm_boot: bool}
              */
-            protected function execute(array $argv, bool $warmBoot): array
+            protected function runCold(array $argv): array
             {
-                $this->log[] = 'execute:' . ($warmBoot ? 'warm' : 'cold');
+                $this->log[] = 'runCold';
 
-                return ['exit_code' => 0, 'output' => '', 'warm_boot' => $warmBoot];
+                return ['exit_code' => 0, 'output' => '', 'warm_boot' => false];
             }
         };
 
         $first = $runner->run(['rector']);
         self::assertFalse($first['warm_boot'], 'the very first call is never warm');
+        self::assertFalse($runner->isWarm(), 'without pcntl, nothing is ever warm');
 
         $second = $runner->run(['rector']);
         self::assertFalse(
             $second['warm_boot'],
-            'without pcntl, a warm call must fully reboot rather than silently report warm reuse',
+            'without pcntl, every call is a fresh cold subprocess -- never a reused container',
         );
-        self::assertSame(['boot', 'execute:cold', 'reboot', 'boot', 'execute:cold'], $runner->log);
+        self::assertFalse($runner->isWarm());
+        self::assertSame(
+            ['runCold', 'runCold'],
+            $runner->log,
+            'boot()/reboot() must never run in place without pcntl (#31): there is no process '
+            . 'boundary available to isolate a reboot in, so run() must not call them at all',
+        );
     }
 
     /**
@@ -236,6 +225,16 @@ final class RectorRunnerTest extends TestCase
      * afterwards, and a second call against the same still-empty config
      * refuses identically rather than silently reusing a "warm" state that
      * can never do anything.
+     *
+     * isWarm() afterwards depends on whether THIS environment can fork (#31): with
+     * pcntl, boot() still builds a real container in a worker before execute()
+     * refuses it, so isWarm() is true; without pcntl, run() never boots or forks
+     * anything any more -- every call, including this one, goes through the
+     * disposable-subprocess fallback (runCold()) -- so isWarm() stays false, exactly
+     * as testRunWithoutForkSupportAlwaysRunsColdAndNeverBootsInPlace pins for the
+     * stubbed case. Asserting a hardcoded `true` here would fail on this repo's own
+     * `no-pcntl` CI job (#31 follow-up: caught by actually running this test with
+     * pcntl disabled, not by reading the assertion).
      */
     public function testRunThrowsWhenZeroRulesRegistered(): void
     {
@@ -247,6 +246,9 @@ final class RectorRunnerTest extends TestCase
         );
         $previousCwd = getcwd();
         $previousArgv = $_SERVER['argv'] ?? ['rector'];
+        $canFork = \function_exists('pcntl_fork')
+            && \function_exists('pcntl_waitpid')
+            && \function_exists('stream_socket_pair');
 
         try {
             chdir($tmp);
@@ -262,9 +264,12 @@ final class RectorRunnerTest extends TestCase
                 self::assertStringContainsString('registers no rules', $e->getMessage());
             }
 
-            self::assertTrue(
+            self::assertSame(
+                $canFork,
                 $runner->isWarm(),
-                'boot() built a real container from a config that genuinely loaded; only execute() refused',
+                $canFork
+                    ? 'boot() built a real container from a config that genuinely loaded; only execute() refused'
+                    : 'without pcntl every call is a disposable cold subprocess (#31); nothing is ever warm',
             );
 
             // The refusal is not a one-off: the same still-empty config refuses
@@ -276,6 +281,98 @@ final class RectorRunnerTest extends TestCase
             } catch (\RuntimeException $e) {
                 self::assertStringContainsString('registers no rules', $e->getMessage());
             }
+        } finally {
+            chdir($previousCwd);
+            $_SERVER['argv'] = $previousArgv;
+            unlink($tmp . '/rector.php');
+            rmdir($tmp);
+        }
+    }
+
+    /**
+     * #31 follow-up: a worker killed (crashed, OOM-killed) between calls used to leave
+     * isWarm() reporting true forever, since only an explicit reboot() ever cleared it.
+     * Every subsequent call then threw "Failed writing a frame to the warm-worker
+     * socket." -- a message RectorTool::isRecoverableWarmCorruption() never matches,
+     * so the daemon stayed wedged until restarted externally. workerIsDead() (a
+     * non-blocking pcntl_waitpid(..., WNOHANG) liveness check, run from run() before
+     * trusting isWarm()) must reap the dead worker and boot a genuinely fresh one on
+     * the very next call instead.
+     */
+    public function testDeadWorkerSelfHealsOnNextCall(): void
+    {
+        if (!\function_exists('posix_kill') || !\function_exists('pcntl_fork')) {
+            self::markTestSkipped('posix_kill/pcntl_fork unavailable in this environment');
+        }
+
+        // A zero-rule config, same as testRunThrowsWhenZeroRulesRegistered above: boots
+        // a real worker and refuses via execute()'s own guard BEFORE $application->run()
+        // is ever called, so it never reaches Rector's/Symfony Console's real formatting
+        // pipeline (which needs a real stdout tty and does not tolerate running twice,
+        // once per real fork, inside a shared PHPUnit process). All this test needs is a
+        // real worker to kill; which exact error it refuses each call with is incidental.
+        $tmp = sys_get_temp_dir() . '/rector-runner-dead-worker-test-' . bin2hex(random_bytes(8));
+        mkdir($tmp);
+        file_put_contents(
+            $tmp . '/rector.php',
+            "<?php\n\ndeclare(strict_types=1);\n\nuse Rector\\Config\\RectorConfig;\n\nreturn RectorConfig::configure();\n",
+        );
+        $previousCwd = getcwd();
+        $previousArgv = $_SERVER['argv'] ?? ['rector'];
+
+        try {
+            chdir($tmp);
+            $_SERVER['argv'] = ['rector'];
+
+            $runner = new RectorRunner();
+            try {
+                $runner->run(['rector', 'process']);
+                self::fail('expected the zero-rule config to refuse');
+            } catch (\RuntimeException $e) {
+                self::assertStringContainsString('registers no rules', $e->getMessage());
+            }
+            self::assertTrue($runner->isWarm(), 'a real worker should have booted');
+
+            $pidProperty = new \ReflectionProperty(RectorRunner::class, 'workerPid');
+            $pidProperty->setAccessible(true);
+            $firstPid = $pidProperty->getValue($runner);
+            self::assertIsInt($firstPid);
+
+            \posix_kill($firstPid, \SIGKILL);
+            // Reap it ourselves too so it never lingers as this test process's own
+            // zombie regardless of what workerIsDead() does -- WNOHANG makes this safe
+            // even if workerIsDead() already reaped it first.
+            $status = 0;
+            \pcntl_waitpid($firstPid, $status, \WNOHANG);
+
+            // SIGKILL delivery/reaping is not instantaneous: the very next call can
+            // legitimately race the kernel and hit runForked()'s own "worker closed its
+            // connection unexpectedly" (or "Failed writing a frame...") path instead of
+            // a clean fresh boot -- forgetDeadWorker() runs on THAT path too, so the
+            // call after THAT is guaranteed a fresh boot. The bug this pins is a wedge
+            // that repeats forever, never a single racy call; retry a bounded number of
+            // times for exactly the same reason production code self-heals over
+            // several calls rather than promising the very next one recovers.
+            $recovered = false;
+            for ($attempt = 0; $attempt < 5; $attempt++) {
+                try {
+                    $runner->run(['rector', 'process']);
+                    self::fail('expected the zero-rule refusal, from a freshly booted worker');
+                } catch (\RuntimeException $e) {
+                    if (str_contains($e->getMessage(), 'registers no rules')) {
+                        $recovered = true;
+                        break;
+                    }
+                }
+            }
+            self::assertTrue(
+                $recovered,
+                'a killed worker must self-heal into a fresh boot within a few calls, never wedge every later call identically',
+            );
+            self::assertTrue($runner->isWarm(), 'a fresh worker must have booted to replace the killed one');
+
+            $secondPid = $pidProperty->getValue($runner);
+            self::assertNotSame($firstPid, $secondPid, 'the NEW worker must be a different process, not the killed one');
         } finally {
             chdir($previousCwd);
             $_SERVER['argv'] = $previousArgv;
