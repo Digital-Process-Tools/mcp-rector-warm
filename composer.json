@@ -16,7 +16,7 @@
             "Dpt\\McpRectorWarm\\": "src/"
         }
     },
-    "bin": ["bin/mcp-rector-warm", "bin/rector-warm-lsp"],
+    "bin": ["bin/mcp-rector-warm"],
     "config": {
         "sort-packages": true
     },
