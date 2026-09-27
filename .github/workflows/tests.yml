@@ -39,6 +39,52 @@ jobs:
       - name: Run tests
         run: ./vendor/bin/phpunit --no-coverage
 
+  # No-pcntl fallback: the ubuntu-latest matrix above always has pcntl, so
+  # RectorRunner::canFork() is always true there and the reboot-before-each-call
+  # fallback (#8) only ever runs through a stubbed unit test. This job disables
+  # pcntl_fork/pcntl_waitpid/stream_socket_pair via php.ini so the real
+  # boot()/reboot()/execute() sequence in tests/Integration/ServerStdioTest.php
+  # runs the fallback path for real, over a real subprocess. One PHP version:
+  # it exercises the fallback branch, not PHP compatibility, which the matrix
+  # above already covers.
+  no-pcntl:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Setup PHP (pcntl disabled)
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.3'
+          coverage: none
+          tools: composer:v2
+          ini-values: 'disable_functions="pcntl_fork,pcntl_waitpid,stream_socket_pair"'
+
+      - name: Cache composer
+        uses: actions/cache@v6
+        with:
+          path: ~/.composer/cache
+          key: composer-no-pcntl-${{ hashFiles('composer.json') }}
+
+      - name: Install dependencies
+        run: composer install --no-progress --prefer-dist
+
+      - name: Confirm pcntl is actually disabled
+        run: |
+          php -r '
+            foreach (["pcntl_fork", "pcntl_waitpid", "stream_socket_pair"] as $f) {
+              if (function_exists($f)) {
+                fwrite(STDERR, "$f is still callable — the no-pcntl leg is not testing what it claims\n");
+                exit(1);
+              }
+            }
+            echo "pcntl_fork, pcntl_waitpid and stream_socket_pair are all disabled\n";
+          '
+
+      - name: Run tests without pcntl
+        run: ./vendor/bin/phpunit --no-coverage --testsuite unit,integration
+
   # End-to-end: the official Python MCP client drives bin/mcp-rector-warm over
   # stdio as a host would, plus the warm-vs-cold scenario harness. One PHP version:
   # it tests the protocol and the warm container, not PHP compatibility, which the
