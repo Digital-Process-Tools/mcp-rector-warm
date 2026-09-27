@@ -6,7 +6,7 @@ mode: once
 
 One warm session (official Python `mcp` client, `rector_process` with `dryRun: true`, files in sample order) against a fresh `rector process --dry-run` per file (`--jobs` in parallel). Both sides use `RECTOR_FLAGS`, the flags `RectorTool::process()` builds.
 
-**Run** (Python needs `tests/E2E/requirements.txt` installed; `php` is often an alias, so pass `--php`):
+**Run** (`php` is often an alias, so pass `--php`). System `python3` has no `mcp` module (`ModuleNotFoundError: No module named 'mcp'`, nothing measured). Make a venv first, outside the repo: `python3 -m venv V && V/bin/pip install -r tests/E2E/requirements.txt`, then run the script with `V/bin/python`.
 
 | want | command |
 | --- | --- |
@@ -17,6 +17,7 @@ One warm session (official Python `mcp` client, `rector_process` with `dryRun: t
 - `--files` takes a glob relative to `--project` or `@LISTFILE`. Under `--limit`, `select_files` shuffles directories with `--seed` and takes one file per directory per round. Put `*Test.php` in the list: the old warm-state bugs showed up on test files.
 - Without `--project-autoload` the mode is `checkout`: this repo's `bin/` + `vendor/`. With it, the mode is `project-vendor`: `build_project_vendor_shim` loads the project's Composer autoloader and puts this checkout's `src/` in front of it. `meta.shim_loaded` in the report shows the file each class came from. Check it.
 - Env vars reach both sides (e.g. a config that switches rule sets on `RECTOR_MODE`).
+- `--project-autoload` is `<composer.json dir>/<config.vendor-dir>/autoload.php`. A project can move `vendor-dir`, so read `composer.json` before assuming `vendor/`.
 
 **Real-project rules:**
 - Dry run only, on both sides. There is no flag to apply anything; do not add one.
@@ -33,6 +34,21 @@ One warm session (official Python `mcp` client, `rector_process` with `dryRun: t
   new `session`) pays a boot cost too -- it is split into a separate `warm_restart_boot`
   bucket (report shows the row only when it happened), never folded into "warm, later
   calls". Compare "warm, later calls" p50/p95 with cold per call.
+- **For a speed number, run `--jobs 1`.** Parallel cold runs share CPU, which makes each cold call slower and inflates the ratio.
+
+**Speed baseline** (v0.5.0 `4902c3d`, real production project, PHP 8.2.0, Darwin arm64, 20 files, `--jobs 1`, 20/20 match). This is the number behind the README Benchmark table:
+
+| side | p50 | p95 |
+| --- | --- | --- |
+| cold, per file | 7.02s | 9.00s |
+| warm, later calls | 0.68s | 2.40s |
+| warm, start + handshake | 0.09-0.12s | 3 sessions |
+| warm, first call, small file | 6.37-6.42s | 3 sessions; same file cold 5.9-7.3s |
+| warm, next call, other file | 0.28-0.31s | 3 sessions |
+
+- The container is built **lazily, on the first `rector_process` call**, not at start. First call ≈ one cold run.
+- `warm_first` in `report.json` is **not the boot cost**. The timer (`started` in `run_warm`) starts after `session.initialize()`, and the first file's own work is included. With a heavy first file it read 10.1s. To measure boot, start each session on a small file, repeat over fresh sessions, and time spawn-to-initialize separately.
+- Only the `warm_later` p50 against the `cold` p50 is a like-for-like comparison. If warm later-call p50 goes well above ~1s on a similar project, treat it as a regression. Update the README table and this baseline together.
 
 **A mismatch means** the warm server answered differently from a fresh process on the same bytes. Reduce it:
 1. Re-run that one file cold and warm-alone (`--files @one.txt`). If warm-alone matches, earlier files in the session are poisoning it: bisect the prefix of `files.txt`.
