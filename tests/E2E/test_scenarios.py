@@ -56,6 +56,13 @@ Scenario format (YAML) -- see CONTRIBUTING.md for a worked example:
         is_error: false            # the MCP isError flag
         error_class: SecurityError # the tool's error_class
         error_contains: 'no rules' # substring of the tool's 'error' message
+        no_zombie_children: true   # #48: right after THIS call, snapshot the daemon's
+                                    #   process tree (`ps -eo pid,ppid,stat`) and fail if any
+                                    #   descendant is a zombie, or if more than one live
+                                    #   descendant remains (this daemon keeps exactly one
+                                    #   persistent worker for its whole life) -- the actual
+                                    #   check #48 asked for, not a proxy via error message
+                                    #   and self-heal alone.
     - call: /abs/path              # an absolute path is outside the tree: no oracle
 
 Checked on every scenario, whatever its steps: every call after the first in-tree one
@@ -81,6 +88,7 @@ import yaml
 
 from mcp_harness import (
     REPO,
+    assert_no_zombie_descendants,
     exit_record,
     non_jsonrpc_lines,
     normalise,
@@ -121,7 +129,10 @@ return RectorConfig::configure()
 TOP_KEYS = {"description", "xfail", "fixture", "config", "oracle", "php_ini", "call_timeout", "files", "bootstrap_files", "steps"}
 STEP_KINDS = {"write", "edit", "delete", "rename", "call"}
 CALL_KEYS = {"call", "dry_run", "expect"}
-EXPECT_KEYS = {"changed", "changed_files", "diff_contains", "diff_excludes", "is_error", "error_class", "error_contains"}
+EXPECT_KEYS = {
+    "changed", "changed_files", "diff_contains", "diff_excludes", "is_error", "error_class", "error_contains",
+    "no_zombie_children",
+}
 
 
 def load(path: Path) -> dict[str, Any]:
@@ -312,6 +323,16 @@ async def call_step(
         assert expect["error_contains"] in (payload.get("error") or ""), f"{where}: {payload}"
     if "is_error" in expect:
         assert bool(result.is_error) is expect["is_error"], f"{where}: isError={result.is_error}, payload {payload}"
+    if "no_zombie_children" in expect:
+        # #48: "list the daemon's children after the call" run for real, right
+        # after THIS call (not only at the end of the scenario) -- a lingering
+        # zombie or an orphaned grandchild from a call earlier in the session
+        # would otherwise be masked by whatever the LAST call in the scenario
+        # happens to leave behind. max_live=1: this daemon keeps exactly one
+        # persistent worker for its whole life (RectorRunner's own class
+        # docblock), so more than one live descendant here is itself a finding,
+        # not only a zombie one.
+        assert_no_zombie_descendants(server.record_dir, max_live=1)
 
 
 @pytest.mark.parametrize(("scenario_file", "data"), collect())

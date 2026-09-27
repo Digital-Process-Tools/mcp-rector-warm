@@ -307,7 +307,35 @@ class RectorRunner implements RunnerInterface
         }
 
         \fclose($childSocket);
-        $handshake = $this->readFrame($parentSocket);
+        // #58 follow-up: a worker that wedges DURING its own container build
+        // (bootInPlace(), inside serveWorker(), before it ever writes the
+        // handshake frame) used to block this read forever -- the very first
+        // call a caller makes, with --call-timeout doing nothing, even though
+        // this is exactly the class of unbounded wait --call-timeout exists to
+        // close. No inner/outer grace period needed here (unlike runForked()'s
+        // backstop over forkAndExecute()'s own deadline): this read is the ONLY
+        // deadline layer over the boot handshake, there is no separate
+        // worker-side sub-process boundary underneath it to give a head start
+        // to, so the bare callDeadlineNs() (no grace) is the right one.
+        $bootDeadline = $this->callDeadlineNs();
+        if ($bootDeadline !== null) {
+            \stream_set_timeout($parentSocket, 1);
+        }
+        try {
+            $handshake = $this->readFrame($parentSocket, $bootDeadline);
+        } catch (RectorCallTimeoutException $e) {
+            // The worker pid is known (pcntl_fork() just returned it) even
+            // though it never finished booting -- SIGKILL + reap it here so it
+            // never lingers as a zombie under THIS process, same as every other
+            // deadline-expiry path in this file.
+            if (\function_exists('posix_kill')) {
+                @\posix_kill($pid, \SIGKILL);
+            }
+            $status = 0;
+            \pcntl_waitpid($pid, $status);
+            \fclose($parentSocket);
+            throw new \RuntimeException($e->getMessage());
+        }
         $decoded = $handshake === null ? null : \json_decode($handshake, true);
         if (!\is_array($decoded) || ($decoded['ok'] ?? false) !== true) {
             \fclose($parentSocket);

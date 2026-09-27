@@ -95,6 +95,10 @@ steps:
     expect:
       is_error: true
       error_contains: "--call-timeout"
+      # #48: the actual "list the daemon's children" check, not a proxy --
+      # right after the kill+reap this call triggers, the daemon must have no
+      # zombie descendant and no more than its one persistent worker left.
+      no_zombie_children: true
   - call: src/Fast.php
     expect:
       is_error: false

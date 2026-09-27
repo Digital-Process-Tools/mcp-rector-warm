@@ -479,6 +479,79 @@ final class RectorRunnerTest extends TestCase
     }
 
     /**
+     * #58 follow-up: a worker that wedges DURING its own container build --
+     * before it ever answers boot()'s handshake -- used to block the very first
+     * run() call forever, with --call-timeout doing nothing (maintainer ruling:
+     * this is in scope for #58, the same hang class the caller sees either way).
+     * The wedge here is a real rector.php that sleep()s before returning its
+     * config -- boot()'s handshake read genuinely has nothing to read until
+     * that sleep finishes, so this is not a stand-in: it is the exact
+     * mechanism a slow/hanging bootstrap file or a pathological rector.php
+     * would trigger in production.
+     */
+    public function testWedgedBootIsKilledAtTheDeadline(): void
+    {
+        if (!\function_exists('posix_kill') || !\function_exists('pcntl_fork')) {
+            self::markTestSkipped('posix_kill/pcntl_fork unavailable in this environment');
+        }
+
+        $tmp = sys_get_temp_dir() . '/rector-runner-boot-timeout-test-' . bin2hex(random_bytes(8));
+        mkdir($tmp);
+        $wedgedConfig = "<?php\n\ndeclare(strict_types=1);\n\nuse Rector\\Config\\RectorConfig;\n\n"
+            . "sleep(30);\n\nreturn RectorConfig::configure();\n";
+        $fastConfig = "<?php\n\ndeclare(strict_types=1);\n\nuse Rector\\Config\\RectorConfig;\n\n"
+            . "return RectorConfig::configure();\n";
+        file_put_contents($tmp . '/rector.php', $wedgedConfig);
+        $previousCwd = getcwd();
+        $previousArgv = $_SERVER['argv'] ?? ['rector'];
+
+        try {
+            chdir($tmp);
+            $_SERVER['argv'] = ['rector'];
+
+            $runner = new RectorRunner(1);
+
+            $start = microtime(true);
+            try {
+                $runner->run(['rector', 'process']);
+                self::fail('expected the wedged boot to throw a timeout error');
+            } catch (\RuntimeException $e) {
+                self::assertStringContainsString('--call-timeout', $e->getMessage());
+            }
+            $elapsed = microtime(true) - $start;
+            self::assertLessThan(
+                15.0,
+                $elapsed,
+                "a boot wedged in its own container build must be killed at roughly its 1s deadline, "
+                . "not left to hang -- took {$elapsed}s",
+            );
+            self::assertFalse($runner->isWarm(), 'a boot that never finished must never leave the runner warm');
+
+            // "the next call works once the sleep is removed" -- same $runner
+            // instance, same 1s deadline, but nothing left to wedge on this time.
+            // A zero-rule RectorConfig still boots a real container successfully
+            // (same as testRunThrowsWhenZeroRulesRegistered elsewhere in this
+            // file); it only refuses one step later, in execute(), which is not
+            // what this test is pinning -- the assertion here is that BOOT no
+            // longer wedges, so isWarm() is what matters, not whether the call
+            // that follows a successful boot happens to also succeed.
+            file_put_contents($tmp . '/rector.php', $fastConfig);
+            try {
+                $runner->run(['rector', 'process']);
+                self::fail('expected the zero-rule config to refuse, same as any other call against it');
+            } catch (\RuntimeException $e) {
+                self::assertStringContainsString('registers no rules', $e->getMessage());
+            }
+            self::assertTrue($runner->isWarm(), 'a fresh boot against a config that no longer wedges must succeed');
+        } finally {
+            chdir($previousCwd);
+            $_SERVER['argv'] = $previousArgv;
+            unlink($tmp . '/rector.php');
+            rmdir($tmp);
+        }
+    }
+
+    /**
      * #58, no-pcntl fallback: runCold()'s own deadline enforcement
      * (proc_get_status()/proc_terminate() polling, added because proc_close()
      * used to block unconditionally) has a DIFFERENT kill mechanism than the two
