@@ -59,7 +59,7 @@ jobs:
           php-version: '8.3'
           coverage: none
           tools: composer:v2
-          ini-values: disable_functions=pcntl_fork,pcntl_waitpid,stream_socket_pair
+          ini-values: 'disable_functions="pcntl_fork,pcntl_waitpid,stream_socket_pair"'
 
       - name: Cache composer
         uses: actions/cache@v6
