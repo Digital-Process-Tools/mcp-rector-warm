@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Dpt\McpRectorWarm\Tests\Unit;
 
 use Dpt\McpRectorWarm\RectorTool;
+use Mcp\Schema\Result\CallToolResult;
 use PHPUnit\Framework\TestCase;
 
 /**
@@ -45,11 +46,17 @@ final class RectorToolContainmentTest extends TestCase
         $tool = new RectorTool();
         $result = $tool->process($leak, true);
 
-        self::assertSame(-1, $result['exit_code']);
-        self::assertSame('SecurityError', $result['error_class'] ?? null);
-        self::assertStringContainsString('outside', $result['error'] ?? '');
+        // A refusal must be flagged as an MCP tool error (isError: true), not
+        // returned as an ordinary successful result — #16.
+        self::assertInstanceOf(CallToolResult::class, $result);
+        self::assertTrue($result->isError);
+        $details = $result->structuredContent ?? [];
+
+        self::assertSame(-1, $details['exit_code']);
+        self::assertSame('SecurityError', $details['error_class'] ?? null);
+        self::assertStringContainsString('outside', $details['error'] ?? '');
         // Crucial: ensure rector was NOT booted (would dirty the daemon).
-        self::assertFalse($result['warm_boot']);
+        self::assertFalse($details['warm_boot']);
     }
 
     public function testRejectsNonexistentPath(): void
@@ -57,7 +64,11 @@ final class RectorToolContainmentTest extends TestCase
         $tool = new RectorTool();
         $result = $tool->process($this->workDir . '/does-not-exist.php', true);
 
-        self::assertSame(-1, $result['exit_code']);
-        self::assertSame('SecurityError', $result['error_class'] ?? null);
+        self::assertInstanceOf(CallToolResult::class, $result);
+        self::assertTrue($result->isError);
+        $details = $result->structuredContent ?? [];
+
+        self::assertSame(-1, $details['exit_code']);
+        self::assertSame('SecurityError', $details['error_class'] ?? null);
     }
 }

@@ -6,6 +6,7 @@ namespace Dpt\McpRectorWarm\Tests\Unit;
 
 use Dpt\McpRectorWarm\RectorTool;
 use Dpt\McpRectorWarm\RunnerInterface;
+use Mcp\Schema\Result\CallToolResult;
 use PHPUnit\Framework\TestCase;
 
 /**
@@ -103,10 +104,14 @@ final class RectorToolRecoveryTest extends TestCase
         $tool = RectorTool::withRunner($fake);
         $result = $tool->process($this->insideFile(), true);
 
-        self::assertSame(-1, $result['exit_code']);
+        self::assertInstanceOf(CallToolResult::class, $result);
+        self::assertTrue($result->isError);
+        $details = $result->structuredContent ?? [];
+
+        self::assertSame(-1, $details['exit_code']);
         self::assertSame(1, $fake->runs, 'unrelated error must not be retried');
         self::assertSame(0, $fake->reboots);
-        self::assertSame('disk full', $result['error'] ?? null);
+        self::assertSame('disk full', $details['error'] ?? null);
     }
 
     public function testSurfacesErrorWhenRetryAlsoFails(): void
@@ -135,9 +140,13 @@ final class RectorToolRecoveryTest extends TestCase
         $tool = RectorTool::withRunner($fake);
         $result = $tool->process($this->insideFile(), true);
 
-        self::assertSame(-1, $result['exit_code']);
+        self::assertInstanceOf(CallToolResult::class, $result);
+        self::assertTrue($result->isError);
+        $details = $result->structuredContent ?? [];
+
+        self::assertSame(-1, $details['exit_code']);
         self::assertSame(2, $fake->runs, 'recoverable error retried once then gives up');
         self::assertSame(1, $fake->reboots);
-        self::assertStringContainsString('toMutatingScope', $result['error'] ?? '');
+        self::assertStringContainsString('toMutatingScope', $details['error'] ?? '');
     }
 }

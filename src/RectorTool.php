@@ -5,6 +5,9 @@ declare(strict_types=1);
 namespace Dpt\McpRectorWarm;
 
 use Mcp\Capability\Attribute\McpTool;
+use Mcp\Schema\Content\TextContent;
+use Mcp\Schema\Result\CallToolResult;
+use Mcp\Schema\ToolAnnotations;
 
 final class RectorTool
 {
@@ -35,10 +38,19 @@ final class RectorTool
      *
      * @param string $path Absolute path to file or directory under the server's working dir
      * @param bool $dryRun true = preview changes only (default), false = apply
-     * @return array{exit_code: int, output: string, warm_boot: bool, error?: string, error_class?: string, trace?: string}
+     * @return array{exit_code: int, output: string, warm_boot: bool, error?: string, error_class?: string, trace?: string}|CallToolResult
      */
-    #[McpTool(name: 'rector_process', description: 'Run Rector refactoring on a path. Server-pinned config.')]
-    public function process(string $path, bool $dryRun = true): array
+    #[McpTool(
+        name: 'rector_process',
+        description: 'Run Rector refactoring on a path. Server-pinned config.',
+        annotations: new ToolAnnotations(
+            readOnlyHint: false,
+            destructiveHint: true,
+            idempotentHint: false,
+            openWorldHint: false,
+        ),
+    )]
+    public function process(string $path, bool $dryRun = true): array|CallToolResult
     {
         // Containment: rector reads (dry-run) or rewrites (non-dry) PHP files at
         // $path. Reject paths outside realpath(cwd) — set at boot via --working-dir.
@@ -47,14 +59,14 @@ final class RectorTool
         $cwd = realpath(getcwd() ?: '.');
         $real = realpath($path);
         if ($cwd === false || $real === false || ($real !== $cwd && !str_starts_with($real, $cwd . DIRECTORY_SEPARATOR))) {
-            return [
+            return self::errorResult([
                 'exit_code'   => -1,
                 'output'      => '',
                 'warm_boot'   => $this->runner->isWarm(),
                 'error'       => 'rector_process: path is outside the configured working directory.',
                 'error_class' => 'SecurityError',
                 'trace'       => '',
-            ];
+            ]);
         }
 
         // --debug disables parallel mode + suppresses file_diffs in JSON output.
@@ -65,6 +77,9 @@ final class RectorTool
         if ($dryRun) {
             $argv[] = '--dry-run';
         }
+        // '--' marks the end of options so a path that happens to start with '-'
+        // (e.g. a file named "-rf") is never parsed as a Rector CLI flag.
+        $argv[] = '--';
         $argv[] = $path;
 
         try {
@@ -85,15 +100,32 @@ final class RectorTool
                 }
             }
 
-            return [
+            return self::errorResult([
                 'exit_code' => -1,
                 'output' => '',
                 'warm_boot' => $this->runner->isWarm(),
                 'error' => $e->getMessage(),
                 'error_class' => $e::class,
                 'trace' => $e->getTraceAsString(),
-            ];
+            ]);
         }
+    }
+
+    /**
+     * A failed rector_process call must come back as an MCP tool error
+     * (isError: true) so a host can see the failure and self-correct, per the
+     * SDK's own CallToolResult contract, while keeping the structured details
+     * (exit_code, error, error_class, trace) available via structuredContent.
+     *
+     * @param array{exit_code: int, output: string, warm_boot: bool, error?: string, error_class?: string, trace?: string} $details
+     */
+    private static function errorResult(array $details): CallToolResult
+    {
+        return new CallToolResult(
+            content: [new TextContent($details['error'] ?? 'rector_process failed.')],
+            isError: true,
+            structuredContent: $details,
+        );
     }
 
     /**

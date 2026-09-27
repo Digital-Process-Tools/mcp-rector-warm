@@ -86,10 +86,13 @@ def test_tools_list_describes_rector_process(project: Path, record: Path) -> Non
     assert set(schema["properties"]) == {"path", "dryRun"}
 
     # The tool rewrites files when dryRun is false, so it must never claim to be
-    # read-only. It declares no annotations today; if it starts to, they must be honest.
-    if tool.annotations is not None:
-        assert tool.annotations.read_only_hint is not True
-        assert tool.annotations.destructive_hint is not False
+    # read-only, and the destructive/idempotent/open-world hints must be honest
+    # (#21) rather than left to whatever the SDK defaults to.
+    assert tool.annotations is not None
+    assert tool.annotations.read_only_hint is False
+    assert tool.annotations.destructive_hint is True
+    assert tool.annotations.idempotent_hint is False
+    assert tool.annotations.open_world_hint is False
 
 
 def test_dry_run_returns_a_diff_and_leaves_the_file_alone(project: Path, record: Path) -> None:
@@ -182,7 +185,6 @@ def test_path_outside_the_working_dir_is_refused(project: Path, record: Path, tm
     assert normalise(allowed, project)["changed_files"] == ["src/Money.php"]
 
 
-@pytest.mark.xfail(strict=True, reason="#16: failed calls come back with isError false")
 def test_a_failed_call_is_flagged_is_error(project: Path, record: Path) -> None:
     async def scenario():
         async with open_server(project, record, project / "rector.php") as server:
