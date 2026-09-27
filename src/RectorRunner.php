@@ -11,7 +11,7 @@ use Rector\DependencyInjection\RectorContainerFactory;
  * Holds a warm Rector container + Application across multiple analyse calls.
  * Boot happens lazily on first call; subsequent calls reuse the live container.
  */
-final class RectorRunner implements RunnerInterface
+class RectorRunner implements RunnerInterface
 {
     private ?object $application = null;
     private ?object $container = null;
@@ -26,12 +26,13 @@ final class RectorRunner implements RunnerInterface
     }
 
     /**
-     * Drop the warm container + application so the next run() boots fresh. Used to
-     * recover from warm-state corruption that resetReflectionState() cannot flush:
-     * PHPStan's NodeScopeResolver/reflection caches are not ResettableInterface
-     * services, so a class whose shape changed on disk between warm calls can yield
-     * a null scope deep in PHPStanNodeScopeResolver ("Call to a member function
-     * toMutatingScope() on null"). A fresh container is the only guaranteed reset.
+     * Drop the warm container + application so the next run() boots fresh. Used by
+     * the no-pcntl fallback before every warm call, and to recover from warm-state
+     * corruption: PHPStan's NodeScopeResolver/reflection caches are not
+     * ResettableInterface services, so a class whose shape changed on disk between
+     * warm calls can yield a null scope deep in PHPStanNodeScopeResolver ("Call to a
+     * member function toMutatingScope() on null"). A fresh container is the only
+     * guaranteed reset.
      */
     public function reboot(): void
     {
@@ -51,18 +52,173 @@ final class RectorRunner implements RunnerInterface
         $warmBoot = $this->isWarm();
         if (!$warmBoot) {
             $this->boot();
-        } else {
-            // Warm reuse: flush per-run reflection state before analysing the next
-            // file. Rector's DynamicSourceLocatorProvider caches its
-            // AggregateSourceLocator for every non-PHPUnit run, so a second, different
-            // file gets analysed with a locator that only knows the first file and
-            // Rector emits 'System error: ClassReflection must be resolved for class X'
-            // (claude-supertool#273). A fresh CLI process never hits this; the warm
-            // daemon must reset the same services AbstractRectorTestCase resets between
-            // fixtures to behave identically to cold.
-            $this->resetReflectionState();
+        }
+        // Warm reuse must never analyse in the booted container itself. PHPStan's
+        // own class reflection (and its per-class method/property caches) is not a
+        // ResettableInterface service and lives for the whole process, so a class
+        // edited on disk between calls would otherwise be seen with its old shape
+        // forever -- no error, just a silently wrong diff (#8). Resetting Rector's
+        // ResettableInterface services between calls (claude-supertool#273) never
+        // touched those caches, so it is not a reset; the two paths below are.
+
+        if ($this->canFork()) {
+            // Isolate EVERY call (including the first, post-boot one) in a
+            // forked child, never analysing in the parent process itself: the
+            // child's copy-on-write memory absorbs every cache the analysis
+            // fills in and dies with the child, so the parent's container
+            // stays exactly as pristine as right after boot() for every call,
+            // not only the ones after the first.
+            return $this->runForked($argv, $warmBoot);
         }
 
+        // No pcntl (e.g. Windows): forking is unavailable. The only
+        // guaranteed-correct fallback is a fresh container before every warm
+        // call -- slower than the warm path, but never wrong. warm_boot is
+        // reported false: this call did not benefit from reuse.
+        if ($warmBoot) {
+            $this->reboot();
+            $this->boot();
+            $warmBoot = false;
+        }
+
+        return $this->execute($argv, $warmBoot);
+    }
+
+    protected function canFork(): bool
+    {
+        return \function_exists('pcntl_fork')
+            && \function_exists('pcntl_waitpid')
+            && \function_exists('stream_socket_pair');
+    }
+
+    /**
+     * Run $argv in a forked child so the parent's booted container is never mutated
+     * by the analysis. The child serialises its result over a unix socket pair and
+     * exits without running the parent's own shutdown sequence any further than
+     * that; the parent waits for it and decodes the result.
+     *
+     * @param list<string> $argv
+     * @return array{exit_code: int, output: string, warm_boot: bool}
+     */
+    private function runForked(array $argv, bool $warmBoot): array
+    {
+        $sockets = \stream_socket_pair(\STREAM_PF_UNIX, \STREAM_SOCK_STREAM, \STREAM_IPPROTO_IP);
+        if ($sockets === false) {
+            throw new \RuntimeException('Could not create a socket pair for the forked rector call.');
+        }
+        [$parentSocket, $childSocket] = $sockets;
+
+        $pid = \pcntl_fork();
+        if ($pid === -1) {
+            \fclose($parentSocket);
+            \fclose($childSocket);
+            throw new \RuntimeException('pcntl_fork() failed.');
+        }
+
+        if ($pid === 0) {
+            // Child: analyse in isolation, report the result over the socket, then
+            // exit. This is a real forked OS process -- it owns a private
+            // copy-on-write copy of the parent's memory, including the parent's
+            // stdio file descriptors. The MCP daemon's own JSON-RPC transport
+            // writes straight to \STDOUT (not through PHP's output buffer), so a
+            // stray PHP warning/deprecation notice during analysis -- routine for
+            // PHPStan on real-world code -- would otherwise land on the SAME pipe
+            // the client is reading its protocol from and corrupt it. Close and
+            // reopen fd 0/1/2 onto /dev/null before running anything: this
+            // process exits right after this call and never legitimately needs
+            // them, and $childSocket lives on its own fd above 2 so it is
+            // unaffected.
+            \fclose($parentSocket);
+            if (\defined('STDIN')) {
+                @\fclose(\STDIN);
+            }
+            if (\defined('STDOUT')) {
+                @\fclose(\STDOUT);
+            }
+            if (\defined('STDERR')) {
+                @\fclose(\STDERR);
+            }
+            @\fopen('/dev/null', 'rb');
+            @\fopen('/dev/null', 'wb');
+            @\fopen('/dev/null', 'wb');
+
+            $exitCode = 0;
+            try {
+                $result = $this->execute($argv, $warmBoot);
+                $encoded = $this->encodeForkResult($result);
+                \fwrite($childSocket, $encoded);
+            } catch (\Throwable $e) {
+                \fwrite($childSocket, $this->encodeForkResult([
+                    'error' => $e->getMessage(),
+                    'error_class' => $e::class,
+                ]));
+                $exitCode = 1;
+            } finally {
+                \fclose($childSocket);
+            }
+            exit($exitCode);
+        }
+
+        // Parent: wait for the child's result, then reap it.
+        \fclose($childSocket);
+        $raw = '';
+        while (!\feof($parentSocket)) {
+            $chunk = \fread($parentSocket, 65536);
+            if ($chunk === false || $chunk === '') {
+                break;
+            }
+            $raw .= $chunk;
+        }
+        \fclose($parentSocket);
+        \pcntl_waitpid($pid, $status);
+
+        $decoded = $raw === '' ? null : \json_decode($raw, true);
+        if (!\is_array($decoded) || isset($decoded['error'])) {
+            $message = \is_array($decoded) && isset($decoded['error'])
+                ? (string) $decoded['error']
+                : "forked rector call produced no output (child exit status {$status})";
+            throw new \RuntimeException($message);
+        }
+
+        /** @var array{exit_code: int, output: string, warm_boot: bool} $decoded */
+        return $decoded;
+    }
+
+    /**
+     * Encode a forked child's result for the socket. Rector's own JSON output
+     * embeds raw source-derived text; a genuinely successful analysis of a file
+     * containing non-UTF-8 byte sequences must not be turned into a spurious
+     * error just because THIS encoding step failed. JSON_INVALID_UTF8_SUBSTITUTE
+     * replaces invalid bytes rather than throwing, so a real result still
+     * reaches the parent as a result. Without this, a thrown JsonException here
+     * would be reported to the caller as a hard error for an analysis that
+     * actually succeeded: RectorTool's reboot-and-retry recovery
+     * (isRecoverableWarmCorruption()) only matches Rector/PHPStan corruption
+     * messages, never an encoding failure, so it would never kick in.
+     *
+     * @param array<string, mixed> $payload
+     */
+    private function encodeForkResult(array $payload): string
+    {
+        $encoded = \json_encode($payload, \JSON_INVALID_UTF8_SUBSTITUTE);
+        if ($encoded !== false) {
+            return $encoded;
+        }
+
+        $fallback = \json_encode([
+            'error' => 'failed to encode the forked call result: ' . \json_last_error_msg(),
+            'error_class' => 'JsonException',
+        ]);
+
+        return $fallback !== false ? $fallback : '{"error":"failed to encode the forked call result","error_class":"JsonException"}';
+    }
+
+    /**
+     * @param list<string> $argv
+     * @return array{exit_code: int, output: string, warm_boot: bool}
+     */
+    protected function execute(array $argv, bool $warmBoot): array
+    {
         $inputClass = $this->inputClass;
         $outputClass = $this->outputClass;
         \assert($inputClass !== null && $outputClass !== null);
@@ -106,7 +262,7 @@ final class RectorRunner implements RunnerInterface
         ];
     }
 
-    private function boot(): void
+    protected function boot(): void
     {
         // Load rector's scoped autoload lazily. Find it by reflecting on a Rector class:
         // works whether mcp-rector-warm is installed as a local clone (nested vendor) or as
@@ -144,30 +300,6 @@ final class RectorRunner implements RunnerInterface
 
         $this->application = $app;
         $this->container = $container;
-    }
-
-    /**
-     * Reset Rector's per-run reflection state between warm calls. Mirrors
-     * AbstractRectorTestCase::setUp(), which resets every service tagged
-     * ResettableInterface so each fixture analyses with a fresh source locator.
-     * The warm daemon reuses one container across files and needs the same flush;
-     * without it the cached AggregateSourceLocator from the previous file poisons
-     * the next one (claude-supertool#273).
-     */
-    private function resetReflectionState(): void
-    {
-        $container = $this->container;
-        if ($container === null || !method_exists($container, 'tagged')) {
-            return;
-        }
-
-        /** @var iterable<object> $resettables */
-        $resettables = $container->tagged(\Rector\Contract\DependencyInjection\ResettableInterface::class);
-        foreach ($resettables as $resettable) {
-            if (method_exists($resettable, 'reset')) {
-                $resettable->reset();
-            }
-        }
     }
 
     /**

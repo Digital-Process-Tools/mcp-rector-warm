@@ -1,5 +1,4 @@
 description: A trait used by the parent class gains the overridden method mid-session.
-xfail: "#19: an edit to a trait of the parent class is not seen by the warm container (stale reflection)"
 files:
   src/Greets.php: |
     <?php

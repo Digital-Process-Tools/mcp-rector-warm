@@ -18,14 +18,14 @@ foreach ([
 use Mcp\Server;
 use Mcp\Server\Transport\StdioTransport;
 
-// Parse our own CLI flags BEFORE loading rector — keeps Server lean.
+// Parse our own --working-dir flag BEFORE loading rector — keeps Server lean.
+// --config is deliberately NOT parsed out here: RectorConfigsResolver reads it
+// straight from $_SERVER['argv'] later, so it is left exactly where it is.
 $workingDir = null;
-$config = null;
 foreach (array_slice($argv, 1) as $arg) {
     if (str_starts_with($arg, '--working-dir=')) {
         $workingDir = substr($arg, 14);
-    } elseif (str_starts_with($arg, '--config=')) {
-        $config = $arg;
+        break;
     }
 }
 
@@ -35,12 +35,6 @@ if ($workingDir !== null) {
         exit(2);
     }
     chdir($workingDir);
-}
-
-// Hand the --config flag to RectorRunner via env var so we don't clobber $_SERVER['argv']
-// before the MCP SDK has a chance to use it.
-if ($config !== null) {
-    putenv('MCP_RECTOR_CONFIG=' . substr($config, 9));
 }
 
 // NOTE: rector's scoper-autoload is loaded lazily inside RectorRunner::boot() —

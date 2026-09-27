@@ -1,5 +1,4 @@
 description: Two different files in one warm session; the second must be refactored like a cold run would.
-xfail: "#8: a second file in a warm session is not refactored (resetReflectionState returns early, no tagged() on the Rector 2.x container)"
 fixture: tests/Fixtures/project
 steps:
   - call: src/Sample.php
