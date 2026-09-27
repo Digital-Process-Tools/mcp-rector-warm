@@ -1,4 +1,3 @@
-xfail: "#32: runForked() reads the child result with the socket read timeout, so a call longer than default_socket_timeout reports no output"
 description: A call whose analysis outlasts default_socket_timeout must still return its result, as cold Rector does.
 # The server gets a 3s socket timeout so a 5s rule reproduces the 60s default in seconds.
 php_ini:

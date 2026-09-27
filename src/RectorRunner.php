@@ -54,6 +54,20 @@ class RectorRunner implements RunnerInterface
      *  until restart. */
     private ?string $configFileHash = null;
 
+    /** Map of each `withBootstrapFiles()` file's absolute path (as resolved by the last
+     *  successful boot) to a sha256 of its contents at that boot, or [] when the config
+     *  registered none. Unlike $configFile/$configFileHash, these paths are only knowable
+     *  once the container is actually built -- Rector's own SimpleParameterProvider only
+     *  holds them as a side effect of requiring rector.php -- so THIS (never-booting)
+     *  instance cannot resolve them itself; they arrive from the worker's own boot
+     *  handshake (serveWorker()) and are stored here verbatim by boot(), mirroring how
+     *  refreshConfigFileState() mirrors $configFile/$configFileHash. Compared by content
+     *  hash, same rationale as $configFileHash, so an edit to a bootstrap file (a class or
+     *  function added after the file was first required) is picked up before the next call
+     *  (#33) instead of staying invisible for the rest of the session.
+     *  @var array<string, string|null> */
+    private array $bootstrapFileHashes = [];
+
     public function isWarm(): bool
     {
         return $this->workerPid !== null;
@@ -223,6 +237,13 @@ class RectorRunner implements RunnerInterface
         $this->workerPid = $pid;
         $this->workerSocket = $parentSocket;
         $this->refreshConfigFileState();
+        // Bootstrap file paths (#33) are only known inside the process that actually
+        // built the container -- the worker, never THIS instance -- so, unlike
+        // $configFile/$configFileHash, they cannot be independently re-resolved here;
+        // take the worker's own bootInPlace()-computed hashes verbatim off the handshake.
+        $this->bootstrapFileHashes = \is_array($decoded['bootstrap_files'] ?? null)
+            ? $decoded['bootstrap_files']
+            : [];
     }
 
     /**
@@ -246,7 +267,10 @@ class RectorRunner implements RunnerInterface
             \fclose($socket);
             exit(1);
         }
-        $this->writeFrame($socket, (string) \json_encode(['ok' => true]));
+        $this->writeFrame($socket, (string) \json_encode([
+            'ok' => true,
+            'bootstrap_files' => $this->bootstrapFileHashes,
+        ]));
 
         while (true) {
             $frame = $this->readFrame($socket);
@@ -385,12 +409,24 @@ class RectorRunner implements RunnerInterface
             exit($exitCode);
         }
 
-        // Worker: wait for the grandchild's result, then reap it.
+        // Worker: wait for the grandchild's result, then reap it. A read timeout
+        // (default_socket_timeout, 60s by default) is NOT the same thing as the
+        // grandchild closing the socket: fread() returns '' in both cases, but only a
+        // real EOF means there is nothing left to read (#32). stream_get_meta_data()'s
+        // 'timed_out' flag tells them apart -- an analysis that simply outran the
+        // timeout keeps this loop waiting (the grandchild is still working and will
+        // still write+close normally), instead of this being mistaken for "the child
+        // produced no output" while it is, in fact, still running (and, with
+        // dryRun: false, may already have written files to disk).
         \fclose($childSocket);
         $raw = '';
         while (!\feof($parentSocket)) {
             $chunk = \fread($parentSocket, 65536);
             if ($chunk === false || $chunk === '') {
+                $meta = \stream_get_meta_data($parentSocket);
+                if ($meta['timed_out'] ?? false) {
+                    continue;
+                }
                 break;
             }
             $raw .= $chunk;
@@ -592,6 +628,15 @@ class RectorRunner implements RunnerInterface
         while (\strlen($buffer) < $length) {
             $chunk = \fread($socket, $length - \strlen($buffer));
             if ($chunk === false || $chunk === '') {
+                // Same distinction as forkAndExecute()'s wait loop (#32): a read
+                // timeout is not EOF. This channel is the persistent worker<->daemon
+                // socket, so an analysis that legitimately runs longer than
+                // default_socket_timeout must not be mistaken for the peer closing
+                // the connection here either.
+                $meta = \stream_get_meta_data($socket);
+                if ($meta['timed_out'] ?? false) {
+                    continue;
+                }
                 return null;
             }
             $buffer .= $chunk;
@@ -715,6 +760,7 @@ class RectorRunner implements RunnerInterface
     private function bootInPlace(): void
     {
         $this->ensureRectorAutoloaded();
+        $this->ensureProjectAutoloaded();
 
         ob_start();
         try {
@@ -758,6 +804,8 @@ class RectorRunner implements RunnerInterface
             throw new \RuntimeException('Could not detect Rector prefix namespace.');
         }
 
+        $this->bootstrapFileHashes = $this->resolveBootstrapFileHashes();
+
         $this->appClass = $this->resolvePrefixed('Symfony\\Component\\Console\\Application');
         $this->inputClass = $this->resolvePrefixed('Symfony\\Component\\Console\\Input\\ArgvInput');
         $this->outputClass = $this->resolvePrefixed('Symfony\\Component\\Console\\Output\\BufferedOutput');
@@ -784,6 +832,39 @@ class RectorRunner implements RunnerInterface
         $resolver = new RectorConfigsResolver();
 
         return $resolver->provide()->getMainConfigFile();
+    }
+
+    /**
+     * Hash every file the loaded config registered via withBootstrapFiles(), for
+     * configFileChanged() (#33). Only callable AFTER createFromBootstrapConfigs() has
+     * actually required rector.php: the list of bootstrap files is not resolvable from
+     * the config path alone (unlike getMainConfigFile()) -- it only exists as a side
+     * effect of Rector's own SimpleParameterProvider being populated while rector.php
+     * runs, inside the very container build this is called right after (bootInPlace()).
+     * Fails open (returns []) rather than throwing: a defensive fallback if the
+     * SimpleParameterProvider class or its Option::BOOTSTRAP_FILES key ever moves
+     * upstream, exactly like execute()'s ConfigInitializer check just below in this file
+     * -- missing this file-list must never break a boot that otherwise succeeded, only
+     * quietly lose the "picked up a bootstrap edit" behaviour this method exists for.
+     *
+     * @return array<string, string|null>
+     */
+    private function resolveBootstrapFileHashes(): array
+    {
+        try {
+            $bootstrapFiles = \Rector\Configuration\Parameter\SimpleParameterProvider::provideArrayParameter('bootstrap_files');
+        } catch (\Throwable) {
+            return [];
+        }
+
+        $hashes = [];
+        foreach ($bootstrapFiles as $bootstrapFile) {
+            if (is_string($bootstrapFile)) {
+                $hashes[$bootstrapFile] = $this->hashConfigFile($bootstrapFile);
+            }
+        }
+
+        return $hashes;
     }
 
     /**
@@ -827,6 +908,49 @@ class RectorRunner implements RunnerInterface
     }
 
     /**
+     * Load the target project's own Composer autoloader, exactly like cold Rector's
+     * AutoloadIncluder::autoloadRectorInstalledAsGlobalDependency() does (bin/rector.php,
+     * rector/rector package) before it boots the container (#30). mcp-rector-warm bundles
+     * its own scoped copy of Rector (ensureRectorAutoloaded() above); the project being
+     * analysed is never Rector's own dependency, so nothing else ever requires the
+     * project's vendor/autoload.php, and a class that only resolves through it (a
+     * Composer-autoloaded parent class, most commonly) is invisible -- warm silently
+     * reports 0 changes where cold reports 1.
+     *
+     * Resolved relative to the current working directory: bin/mcp-rector-warm already
+     * chdir()s to --working-dir before the server (and every fork) ever runs, so getcwd()
+     * here is the project root, exactly like cold Rector's own relative 'vendor/autoload.php'
+     * require is resolved against its process's cwd.
+     *
+     * Idempotent via get_included_files(), the same guard Rector's own AutoloadIncluder
+     * uses (loadIfExistsAndNotLoadedYet()) -- safe to call every time bootInPlace() runs
+     * (each boot is a never-booted-before process, per the class docblock, so in practice
+     * this only ever runs once per process, but the guard costs nothing and matches the
+     * upstream behaviour it mirrors).
+     *
+     * Known limitation, not silently ignored: this loads the project autoloader once, at
+     * boot, in a worker process that then serves every warm call for the rest of its
+     * session. A `composer dump-autoload` mid-session (a newly generated class in the
+     * project's classmap) is invisible until the worker next reboots -- the same class of
+     * staleness #20 (PR #29) already accepts for rector.php itself between edits, not
+     * newly introduced here. Extending change detection to the project's own
+     * vendor/composer/installed.php is a separate, wider change, left to #33/#34's own
+     * "widen the watched-file set" discussion rather than folded in here.
+     */
+    private function ensureProjectAutoloaded(): void
+    {
+        $projectAutoload = getcwd() . '/vendor/autoload.php';
+        if (!is_file($projectAutoload)) {
+            return;
+        }
+        $realPath = realpath($projectAutoload);
+        if ($realPath !== false && in_array($realPath, get_included_files(), true)) {
+            return;
+        }
+        require_once $projectAutoload;
+    }
+
+    /**
      * True when the resolved main config file (--config, or rector.php/rector.dist.php --
      * exactly what bootInPlace() would use) no longer matches what the last successful
      * boot read. Compared by content hash rather than mtime+size: mtime has whole-second
@@ -838,14 +962,16 @@ class RectorRunner implements RunnerInterface
      * mode, and the file is a handful of KB: cheap to hash before every call next to the
      * reboot it may trigger.
      *
-     * Only the resolved main config file is tracked. A rector.php that itself
-     * requires/includes a shared file is a known limitation, not silently ignored: building
-     * the DI container in bootInPlace() autoloads hundreds of unrelated classes through the
-     * same require/include machinery, so there is no reliable way to isolate "a file
-     * rector.php chose to include" from that noise without parsing rector.php's own source
-     * for require/include statements -- which would still miss a dynamically computed path.
+     * The resolved main config file AND every file the config registered via
+     * withBootstrapFiles() are tracked this way (#33) -- see resolveBootstrapFileHashes().
+     * A rector.php that itself requires/includes some OTHER shared file directly (not via
+     * withBootstrapFiles()) is a known limitation, not silently ignored: building the DI
+     * container in bootInPlace() autoloads hundreds of unrelated classes through the same
+     * require/include machinery, so there is no reliable way to isolate "a file rector.php
+     * chose to include" from that noise without parsing rector.php's own source for
+     * require/include statements -- which would still miss a dynamically computed path.
      * Editing (even a no-op touch of) the main config file itself is the reliable way to
-     * force a reboot after changing a file it includes.
+     * force a reboot after changing such a file.
      */
     protected function configFileChanged(): bool
     {
@@ -864,7 +990,17 @@ class RectorRunner implements RunnerInterface
             return true;
         }
 
-        return $this->hashConfigFile($mainConfigFile) !== $this->configFileHash;
+        if ($this->hashConfigFile($mainConfigFile) !== $this->configFileHash) {
+            return true;
+        }
+
+        foreach ($this->bootstrapFileHashes as $bootstrapFile => $hash) {
+            if ($this->hashConfigFile($bootstrapFile) !== $hash) {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     private function hashConfigFile(?string $path): ?string
