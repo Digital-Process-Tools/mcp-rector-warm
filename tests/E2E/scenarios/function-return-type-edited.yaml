@@ -1,0 +1,54 @@
+description: A function in another file changes its native return type mid-session; the caller inferred return type must follow.
+config: |
+  <?php
+
+  declare(strict_types=1);
+
+  use Rector\Config\RectorConfig;
+  use Rector\TypeDeclaration\Rector\ClassMethod\ReturnTypeFromStrictTypedCallRector;
+  use Rector\ValueObject\PhpVersion;
+
+  return RectorConfig::configure()
+      ->withPaths([__DIR__ . "/src"])
+      ->withAutoloadPaths([__DIR__ . "/src"])
+      ->withPhpVersion(PhpVersion::PHP_83)
+      ->withRules([ReturnTypeFromStrictTypedCallRector::class]);
+files:
+  src/functions.php: |
+    <?php
+
+    declare(strict_types=1);
+
+    namespace App;
+
+    function make_id(): int
+    {
+        return 1;
+    }
+  src/Caller.php: |
+    <?php
+
+    declare(strict_types=1);
+
+    namespace App;
+
+    final class Caller
+    {
+        public function id()
+        {
+            return make_id();
+        }
+    }
+steps:
+  - call: src/Caller.php
+    expect:
+      changed: 1
+      diff_contains: "+    public function id(): int"
+  - edit:
+      path: src/functions.php
+      old: "function make_id(): int\n{\n    return 1;"
+      new: "function make_id(): string\n{\n    return strval(1);"
+  - call: src/Caller.php
+    expect:
+      changed: 1
+      diff_contains: "+    public function id(): string"

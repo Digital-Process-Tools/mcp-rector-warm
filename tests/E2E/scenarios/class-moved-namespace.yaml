@@ -1,0 +1,82 @@
+description: The parent class moves to another directory and namespace, and the child `use` statement follows it.
+config: |
+  <?php
+
+  declare(strict_types=1);
+
+  use Rector\Config\RectorConfig;
+  use Rector\Php83\Rector\ClassMethod\AddOverrideAttributeToOverriddenMethodsRector;
+  use Rector\ValueObject\PhpVersion;
+
+  return RectorConfig::configure()
+      ->withPaths([__DIR__ . "/src"])
+      ->withAutoloadPaths([__DIR__ . "/src"])
+      ->withPhpVersion(PhpVersion::PHP_83)
+      ->withRules([AddOverrideAttributeToOverriddenMethodsRector::class]);
+files:
+  src/Base.php: |
+    <?php
+
+    declare(strict_types=1);
+
+    namespace App;
+
+    class Base
+    {
+        public function run(): void
+        {
+        }
+    }
+  src/Child.php: |
+    <?php
+
+    declare(strict_types=1);
+
+    namespace App\Http;
+
+    use App\Base;
+
+    final class Child extends Base
+    {
+        public function run(): void
+        {
+            echo "child";
+        }
+    }
+steps:
+  # Empty parent method: nothing to mark.
+  - call: src/Child.php
+    expect: {changed: 0}
+  # Move Base to App\Model with a non-empty method; the old App\Base is gone.
+  - delete: src/Base.php
+  - write:
+      path: src/Model/Base.php
+      content: |
+        <?php
+
+        declare(strict_types=1);
+
+        namespace App\Model;
+
+        class Base
+        {
+            public function run(): void
+            {
+                echo "base";
+            }
+        }
+  - edit:
+      path: src/Child.php
+      old: "use App\\Base;"
+      new: "use App\\Model\\Base;"
+  - call: src/Child.php
+    expect:
+      changed: 1
+      diff_contains: "+    #[\\Override]"
+  # Point the child back at the deleted class: it must not be found any more.
+  - edit:
+      path: src/Child.php
+      old: "use App\\Model\\Base;"
+      new: "use App\\Base;"
+  - call: src/Child.php
+    expect: {changed: 0}

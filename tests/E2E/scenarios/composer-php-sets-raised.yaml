@@ -1,0 +1,37 @@
+xfail: "#34: withPhpSets() reads composer.json once at boot, so a raised PHP constraint does not change the sets"
+description: withPhpSets() with no argument picks its sets from composer.json; raising the PHP constraint mid-session must bring the PHP 8.2 set in.
+config: |
+  <?php
+
+  declare(strict_types=1);
+
+  use Rector\Config\RectorConfig;
+
+  return RectorConfig::configure()
+      ->withPaths([__DIR__ . "/src"])
+      ->withPhpSets();
+files:
+  composer.json: |
+    {"name": "acme/app", "require": {"php": "^8.1"}}
+  src/Money.php: |
+    <?php
+
+    declare(strict_types=1);
+
+    final class Money
+    {
+        public function __construct(private readonly int $amount)
+        {
+        }
+    }
+steps:
+  - call: src/Money.php
+    expect: {changed: 0}
+  - edit:
+      path: composer.json
+      old: "^8.1"
+      new: "^8.2"
+  - call: src/Money.php
+    expect:
+      changed: 1
+      diff_contains: "+final readonly class Money"

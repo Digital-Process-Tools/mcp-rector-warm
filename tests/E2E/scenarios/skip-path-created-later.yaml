@@ -1,0 +1,59 @@
+description: A withSkip path that does not exist at boot is created mid-session; a directory call must still skip it, and a sibling created alongside must still be processed.
+config: |
+  <?php
+
+  declare(strict_types=1);
+
+  use Rector\Config\RectorConfig;
+  use Rector\Php82\Rector\Class_\ReadOnlyClassRector;
+  use Rector\ValueObject\PhpVersion;
+
+  return RectorConfig::configure()
+      ->withPaths([__DIR__ . "/src"])
+      ->withSkip([__DIR__ . "/src/Later.php"])
+      ->withPhpVersion(PhpVersion::PHP_83)
+      ->withRules([ReadOnlyClassRector::class]);
+files:
+  src/Existing.php: |
+    <?php
+
+    declare(strict_types=1);
+
+    final class Existing
+    {
+    }
+steps:
+  - call: src
+    expect: {changed: 0}
+  - write:
+      path: src/Later.php
+      content: |
+        <?php
+
+        declare(strict_types=1);
+
+        final class Later
+        {
+            public function __construct(private readonly int $id)
+            {
+            }
+        }
+  - write:
+      path: src/Sibling.php
+      content: |
+        <?php
+
+        declare(strict_types=1);
+
+        final class Sibling
+        {
+            public function __construct(private readonly int $id)
+            {
+            }
+        }
+  # Positive control: Sibling is refactored, so the call really ran over the new files.
+  - call: src
+    expect:
+      changed_files: [src/Sibling.php]
+      diff_contains: "+final readonly class Sibling"
+      diff_excludes: "class Later"

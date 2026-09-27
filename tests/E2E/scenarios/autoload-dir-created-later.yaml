@@ -1,0 +1,48 @@
+description: A withAutoloadPaths directory that does not exist at boot is created mid-session with the parent class in it.
+config: |
+  <?php
+
+  declare(strict_types=1);
+
+  use Rector\Config\RectorConfig;
+  use Rector\Php83\Rector\ClassMethod\AddOverrideAttributeToOverriddenMethodsRector;
+  use Rector\ValueObject\PhpVersion;
+
+  return RectorConfig::configure()
+      ->withPaths([__DIR__ . "/src"])
+      ->withAutoloadPaths([__DIR__ . "/src", __DIR__ . "/lib"])
+      ->withPhpVersion(PhpVersion::PHP_83)
+      ->withRules([AddOverrideAttributeToOverriddenMethodsRector::class]);
+files:
+  src/Child.php: |
+    <?php
+
+    declare(strict_types=1);
+
+    final class Child extends Base
+    {
+        public function run(): void
+        {
+            echo "child";
+        }
+    }
+steps:
+  - call: src/Child.php
+  - write:
+      path: lib/Base.php
+      content: |
+        <?php
+
+        declare(strict_types=1);
+
+        class Base
+        {
+            public function run(): void
+            {
+                echo "base";
+            }
+        }
+  - call: src/Child.php
+    expect:
+      changed: 1
+      diff_contains: "+    #[\\Override]"

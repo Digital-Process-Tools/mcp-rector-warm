@@ -1,0 +1,69 @@
+xfail: "#33: withBootstrapFiles files are required once in the parent at boot, so a class added later is never seen"
+description: A class declared by a withBootstrapFiles file is added mid-session; cold Rector includes the bootstrap file fresh on every run.
+config: |
+  <?php
+
+  declare(strict_types=1);
+
+  use Rector\Config\RectorConfig;
+  use Rector\Php83\Rector\ClassMethod\AddOverrideAttributeToOverriddenMethodsRector;
+  use Rector\ValueObject\PhpVersion;
+
+  // lib/ is not an autoload path: the bootstrap file is the only way Base becomes known.
+  return RectorConfig::configure()
+      ->withPaths([__DIR__ . "/src"])
+      ->withBootstrapFiles([__DIR__ . "/bootstrap.php"])
+      ->withPhpVersion(PhpVersion::PHP_83)
+      ->withRules([AddOverrideAttributeToOverriddenMethodsRector::class]);
+files:
+  bootstrap.php: |
+    <?php
+
+    declare(strict_types=1);
+
+    require_once __DIR__ . "/lib/Other.php";
+  lib/Other.php: |
+    <?php
+
+    declare(strict_types=1);
+
+    class Other
+    {
+    }
+  lib/Base.php: |
+    <?php
+
+    declare(strict_types=1);
+
+    class Base
+    {
+        public function run(): void
+        {
+            echo "base";
+        }
+    }
+  src/Child.php: |
+    <?php
+
+    declare(strict_types=1);
+
+    final class Child extends Base
+    {
+        public function run(): void
+        {
+            echo "child";
+        }
+    }
+steps:
+  # Base is unknown: nothing to override, cold or warm.
+  - call: src/Child.php
+    expect: {changed: 0}
+  - edit:
+      path: bootstrap.php
+      old: "require_once __DIR__ . \"/lib/Other.php\";"
+      new: "require_once __DIR__ . \"/lib/Other.php\";\nrequire_once __DIR__ . \"/lib/Base.php\";"
+  # Positive control for the step above: now Base is declared, so the attribute is added.
+  - call: src/Child.php
+    expect:
+      changed: 1
+      diff_contains: "+    #[\\Override]"

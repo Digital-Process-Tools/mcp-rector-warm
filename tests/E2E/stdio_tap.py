@@ -58,6 +58,12 @@ def main() -> int:
                     view = view[os.write(out_fd, view):]
             except OSError:
                 client_gone = True  # keep recording what the server still writes
+        # The server's stdout is closed: it exited (or crashed, e.g. #31). Close ours too
+        # so the client sees EOF now instead of waiting out its whole call timeout.
+        try:
+            os.close(out_fd)
+        except OSError:
+            pass
 
     reader = threading.Thread(target=pump_stdout, daemon=True)
     reader.start()

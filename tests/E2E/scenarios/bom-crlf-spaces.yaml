@@ -1,0 +1,22 @@
+description: A file with a UTF-8 BOM and CRLF line endings, in a directory whose name has spaces, is refactored and applied the same way as cold.
+config: |
+  <?php
+
+  declare(strict_types=1);
+
+  use Rector\Config\RectorConfig;
+  use Rector\Php82\Rector\Class_\ReadOnlyClassRector;
+  use Rector\ValueObject\PhpVersion;
+
+  return RectorConfig::configure()
+      ->withPaths([__DIR__ . "/src"])
+      ->withPhpVersion(PhpVersion::PHP_83)
+      ->withRules([ReadOnlyClassRector::class]);
+steps:
+  - write:
+      path: src/My Dir/Money Value.php
+      content: "\U0000FEFF<?php\r\n\r\ndeclare(strict_types=1);\r\n\r\nfinal class MoneyValue\r\n{\r\n    public function __construct(private readonly int $amount)\r\n    {\r\n    }\r\n}\r\n"
+  - call: src/My Dir/Money Value.php
+  - call: src/My Dir
+    dry_run: false
+  - call: src/My Dir/Money Value.php

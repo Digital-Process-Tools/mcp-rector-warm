@@ -1,0 +1,38 @@
+description: The PHP version comes from composer.json (no withPhpVersion) and is raised mid-session; a PHP 8.2 rule must start applying.
+config: |
+  <?php
+
+  declare(strict_types=1);
+
+  use Rector\Config\RectorConfig;
+  use Rector\Php82\Rector\Class_\ReadOnlyClassRector;
+
+  return RectorConfig::configure()
+      ->withPaths([__DIR__ . "/src"])
+      ->withRules([ReadOnlyClassRector::class]);
+files:
+  composer.json: |
+    {"name": "acme/app", "require": {"php": "^8.1"}}
+  src/Money.php: |
+    <?php
+
+    declare(strict_types=1);
+
+    final class Money
+    {
+        public function __construct(private readonly int $amount)
+        {
+        }
+    }
+steps:
+  # PHP 8.1 target: readonly classes do not exist yet.
+  - call: src/Money.php
+    expect: {changed: 0}
+  - edit:
+      path: composer.json
+      old: "^8.1"
+      new: "^8.2"
+  - call: src/Money.php
+    expect:
+      changed: 1
+      diff_contains: "+final readonly class Money"

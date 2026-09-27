@@ -26,7 +26,8 @@ The official Python `mcp` SDK (pinned in `requirements.txt`) drives `bin/mcp-rec
 **The scenario oracle:** after every `call` step in the warm session, a cold `vendor/bin/rector process` runs on an identical copy of the tree, and the changed files and diffs must match. A new case needs no hand-written expected diff; `expect` only pins extra facts.
 
 **Scenario keys** (validated in `test_scenarios.py`: `TOP_KEYS`, `STEP_KINDS`, `CALL_KEYS`, `EXPECT_KEYS`; an unknown key is an error, not ignored):
-- top level: `description`, `xfail`, `fixture` (a repo-relative dir copied in first), `config` (`rector.php` source; `null` means no config; omitted means the fixture's own config, else `DEFAULT_CONFIG`), `files`, `steps`.
+- top level: `description`, `xfail`, `fixture` (a repo-relative dir copied in first), `config` (`rector.php` source; `null` means no config; omitted means the fixture's own config, else `DEFAULT_CONFIG`), `oracle` (false skips the cold comparison), `php_ini` (a mapping passed as `php -d key=value` to the server only, never the cold oracle; e.g. `default_socket_timeout: 3` makes #32 reproduce in seconds), `files`, `steps`.
+- a server that dies mid-call (e.g. #31) surfaces as `MCPError: Connection closed` right away: `stdio_tap.py` closes the client's stdout when the server's closes, rather than leaving the call to hit `E2E_CALL_TIMEOUT`.
 - each step has exactly one of `write` {path, content}, `edit` {path, old, new}, `delete` (path), `rename` {from, to}, `call` (path).
 - a `call` step may add `dry_run` (defaults to true) and `expect`: `changed`, `changed_files`, `diff_contains`, `diff_excludes`, `is_error`, `error_class`.
 - at least one `call` step is required.
