@@ -22,7 +22,7 @@
 
 Every `rector process foo.php` pays the same toll: autoloader bootstrap, [DI container](https://github.com/rectorphp/rector/blob/main/src/DependencyInjection) build, ruleset compile. **~3-5 seconds before a single rule fires.** For agents and validators that run Rector after every edit, that cold-start cost dominates wall time.
 
-`mcp-rector-warm` runs Rector inside a long-lived PHP process. **First call pays the boot once. Every subsequent call reuses the live container.**
+`mcp-rector-warm` keeps a warm Rector container ready across calls. **First call pays the boot once. Every subsequent call reuses it** -- the container itself always lives in a forked worker, never in the long-lived daemon process (#31), so re-editing `rector.php` between calls can never crash the server.
 
 ## Install
 

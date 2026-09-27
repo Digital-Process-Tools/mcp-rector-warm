@@ -15,7 +15,7 @@ use Rector\DependencyInjection\RectorContainerFactory;
  * `require`s a rector.php (or withBootstrapFiles file) that declares a class or
  * function, and a reboot used to re-require it in the very process that had
  * already required it once. So booting always happens in a forked "warm worker"
- * child instead -- see boot()/spawnWorker(). This instance (running inside the
+ * child instead -- see boot()/serveWorker(). This instance (running inside the
  * long-lived MCP daemon) only ever talks to that worker over a persistent
  * socket; it never requires rector.php itself, so it can fork a brand-new
  * worker -- itself never having required anything either -- as many times as
@@ -36,7 +36,7 @@ class RectorRunner implements RunnerInterface
     private ?string $prefix = null;
 
     /** pid of the persistent warm-worker child that holds the booted container, or
-     *  null when nothing is booted. Set by boot()/spawnWorker(), cleared by reboot(). */
+     *  null when nothing is booted. Set by boot(), cleared by reboot()/forgetDeadWorker(). */
     private ?int $workerPid = null;
 
     /** @var resource|null Persistent duplex socket to the warm-worker child. */
@@ -83,6 +83,42 @@ class RectorRunner implements RunnerInterface
     }
 
     /**
+     * True when the worker process this instance still believes is booted no longer
+     * exists -- crashed, was killed, or exited on its own -- since the last time this
+     * was checked. Reaps it non-blockingly (pcntl_waitpid(..., WNOHANG)) so a dead
+     * worker never lingers as a zombie: WNOHANG returns 0 immediately when the process
+     * is still alive, so this never blocks run() waiting on a worker that is fine.
+     * Distinct from isWarm(), which only reflects THIS instance's own belief.
+     */
+    private function workerIsDead(): bool
+    {
+        if ($this->workerPid === null) {
+            return false;
+        }
+        $status = 0;
+        $result = \pcntl_waitpid($this->workerPid, $status, \WNOHANG);
+
+        return $result !== 0;
+    }
+
+    /**
+     * Clear worker bookkeeping after workerIsDead() (or a failed frame write/read in
+     * runForked()) found the worker gone, so the next run() boots a fresh one instead
+     * of writing to a socket whose peer no longer exists. Unlike reboot(), never waits
+     * on the pid: the worker is already known gone (or workerIsDead() already reaped
+     * it), so a second wait here would either hang on the wrong process state or reap
+     * nothing new.
+     */
+    private function forgetDeadWorker(): void
+    {
+        if (\is_resource($this->workerSocket)) {
+            @\fclose($this->workerSocket);
+        }
+        $this->workerPid = null;
+        $this->workerSocket = null;
+    }
+
+    /**
      * Run a rector command. Returns ['exit_code' => int, 'output' => string, 'warm_boot' => bool].
      *
      * @param list<string> $argv Rector CLI args including the binary name as $argv[0].
@@ -100,6 +136,16 @@ class RectorRunner implements RunnerInterface
         }
 
         $warmBoot = $this->isWarm();
+        if ($warmBoot && $this->workerIsDead()) {
+            // The worker process crashed, was OOM-killed, or otherwise exited between
+            // calls: isWarm() only reflects whether THIS instance still believes it
+            // booted one, not whether that process still exists, so left unchecked
+            // every call below would keep writing to a socket whose peer is gone
+            // (#31 follow-up). Forget it so the block below boots a fresh worker
+            // instead, exactly as if nothing had ever booted.
+            $this->forgetDeadWorker();
+            $warmBoot = false;
+        }
         if ($warmBoot && $this->configFileChanged()) {
             // The worker's booted container still holds the rules it read at boot() time;
             // reusing it would run them forever, even though rector.php now says
@@ -237,13 +283,28 @@ class RectorRunner implements RunnerInterface
     {
         \assert($this->workerSocket !== null);
         $payload = (string) \json_encode(['argv' => $argv, 'warm_boot' => $warmBoot]);
-        $this->writeFrame($this->workerSocket, $payload);
-        $raw = $this->readFrame($this->workerSocket);
+        try {
+            $this->writeFrame($this->workerSocket, $payload);
+            $raw = $this->readFrame($this->workerSocket);
+        } catch (\RuntimeException $e) {
+            // The worker died mid-call (crash, OOM-kill) rather than between calls, so
+            // workerIsDead()'s WNOHANG check in run() never got a chance to catch it
+            // before this write/read was attempted. Forget it now so the NEXT call
+            // boots a fresh worker instead of repeating this same failure forever
+            // (#31 follow-up) -- this call still fails; there is no result to recover.
+            $this->forgetDeadWorker();
+            throw $e;
+        }
         $decoded = $raw === null ? null : \json_decode($raw, true);
         if (!\is_array($decoded) || isset($decoded['error'])) {
             $message = \is_array($decoded) && isset($decoded['error'])
                 ? (string) $decoded['error']
                 : 'the warm worker closed its connection unexpectedly';
+            if (!\is_array($decoded)) {
+                // A clean EOF with no frame at all also means the worker is gone
+                // (its own end of the socket closed) -- same self-heal as above.
+                $this->forgetDeadWorker();
+            }
             throw new \RuntimeException($message);
         }
 

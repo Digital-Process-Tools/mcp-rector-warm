@@ -225,6 +225,16 @@ final class RectorRunnerTest extends TestCase
      * afterwards, and a second call against the same still-empty config
      * refuses identically rather than silently reusing a "warm" state that
      * can never do anything.
+     *
+     * isWarm() afterwards depends on whether THIS environment can fork (#31): with
+     * pcntl, boot() still builds a real container in a worker before execute()
+     * refuses it, so isWarm() is true; without pcntl, run() never boots or forks
+     * anything any more -- every call, including this one, goes through the
+     * disposable-subprocess fallback (runCold()) -- so isWarm() stays false, exactly
+     * as testRunWithoutForkSupportAlwaysRunsColdAndNeverBootsInPlace pins for the
+     * stubbed case. Asserting a hardcoded `true` here would fail on this repo's own
+     * `no-pcntl` CI job (#31 follow-up: caught by actually running this test with
+     * pcntl disabled, not by reading the assertion).
      */
     public function testRunThrowsWhenZeroRulesRegistered(): void
     {
@@ -236,6 +246,9 @@ final class RectorRunnerTest extends TestCase
         );
         $previousCwd = getcwd();
         $previousArgv = $_SERVER['argv'] ?? ['rector'];
+        $canFork = \function_exists('pcntl_fork')
+            && \function_exists('pcntl_waitpid')
+            && \function_exists('stream_socket_pair');
 
         try {
             chdir($tmp);
@@ -251,9 +264,12 @@ final class RectorRunnerTest extends TestCase
                 self::assertStringContainsString('registers no rules', $e->getMessage());
             }
 
-            self::assertTrue(
+            self::assertSame(
+                $canFork,
                 $runner->isWarm(),
-                'boot() built a real container from a config that genuinely loaded; only execute() refused',
+                $canFork
+                    ? 'boot() built a real container from a config that genuinely loaded; only execute() refused'
+                    : 'without pcntl every call is a disposable cold subprocess (#31); nothing is ever warm',
             );
 
             // The refusal is not a one-off: the same still-empty config refuses
