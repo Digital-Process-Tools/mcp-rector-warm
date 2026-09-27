@@ -124,5 +124,9 @@ Steps: `write` (path, content), `edit` (path, old, new; `old` must occur once), 
 `dry_run: false` to apply). `expect` takes `changed`, `changed_files`, `diff_contains`,
 `diff_excludes`, `is_error`, `error_class`. At the top level, `config` replaces the
 default `rector.php` (`null` for none), `fixture: tests/Fixtures/project` starts from a
-directory, and `xfail: "#N: ..."` marks a scenario that hits a filed issue. The full
-format is in the docstring of `tests/E2E/test_scenarios.py`; unknown keys fail loudly.
+directory, `xfail: "#N: ..."` marks a scenario that hits a filed issue, and
+`oracle: false` skips the cold-`rector process` comparison for every in-tree call --
+only for a fix whose whole point is that warm deliberately no longer matches what a
+cold, unpatched Rector does on the same tree (e.g. #14: a missing config's own default
+behaviour is exactly the bug). The full format is in the docstring of
+`tests/E2E/test_scenarios.py`; unknown keys fail loudly.

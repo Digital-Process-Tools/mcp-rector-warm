@@ -119,10 +119,11 @@ Returns:
 `warm_boot: true` ⇒ container reused. `false` ⇒ first call (cold boot just finished).
 
 **Failure is reported as an MCP tool error.** A rejected path (outside the
-working dir), a nonexistent path, or an exception raised inside Rector itself
-all come back as a tool result with `isError: true`, so an MCP host can see
-the failure and surface it instead of treating a broken call as a success.
-The structured details survive in `structuredContent`:
+working dir), a nonexistent path, a project with no `rector.php` and no
+`--config` given at startup, or an exception raised inside Rector itself all
+come back as a tool result with `isError: true`, so an MCP host can see the
+failure and surface it instead of treating a broken call as a success. The
+structured details survive in `structuredContent`:
 
 ```json
 {
@@ -134,6 +135,11 @@ The structured details survive in `structuredContent`:
   "trace": ""
 }
 ```
+
+A missing config reports `error_class: "RuntimeException"` with a message naming
+`--config` and `rector.php`. The daemon does not restart itself: add a
+`rector.php` and call again, and it boots normally, since a failed boot never
+marks the container warm.
 
 The tool also declares its behavior via MCP tool annotations: `readOnlyHint:
 false` (a non-dry-run call writes files), `destructiveHint: true`,
@@ -148,6 +154,8 @@ Three decisions worth knowing:
 2. **Parallel mode forcibly disabled (`--debug` flag).** Rector's worker fork model expects `$_SERVER['argv'][0]` to be the rector CLI binary. From an MCP server it isn't, so workers can't respawn. Single-thread analysis only — that's fine for the per-file edit loop this is designed for.
 
 3. **Runtime-prefixed namespace handled.** Rector's bundled Symfony is namespaced `RectorPrefix<date>\\Symfony\\Component\\Console\\...` to avoid dependency conflicts. The runner detects the prefix at boot and resolves Application/Input/Output class names dynamically. Survives Rector version bumps.
+
+4. **A missing config, or a project's own `rector.php` printing while it loads, cannot corrupt the MCP stdout.** Rector's CLI treats a missing `rector.php` as friendly onboarding and Symfony's console output writes straight to the real stdout stream, bypassing an `ob_start()` wrap entirely -- and a project's `rector.php` can `echo`, or trigger a notice/deprecation, while it loads. Neither reaches the JSON-RPC pipe: a missing config is refused as a real, reported error *before* any of Rector's own console machinery runs (per call, not at server startup -- a `rector.php` added later just works on the next call), config resolution and container boot run inside an output buffer, and PHP's own error display is pointed at stderr (`display_errors=stderr`). Not covered: a `rector.php` that exists and loads fine but registers zero rules hits the same onboarding-warning path later, mid-analysis, unguarded by this -- a distinct, unfiled gap in the same defect class ([trap.d](trap.d/)).
 
 ## FAQ
 

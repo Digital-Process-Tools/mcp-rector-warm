@@ -74,4 +74,46 @@ final class RectorRunnerTest extends TestCase
         );
         self::assertSame(['boot', 'execute:cold', 'reboot', 'boot', 'execute:cold'], $runner->log);
     }
+
+    /**
+     * #14: with no rector.php (and no --config on the server's own argv), Rector's
+     * own ProcessCommand treats this as friendly onboarding -- it prints a warning
+     * via a SymfonyStyle that writes straight to \STDOUT (bypassing our ob_*() wrap)
+     * and reports Command::SUCCESS for a call that did nothing. boot() must refuse
+     * before any of that -- a real, reported error, never a silent no-op -- and
+     * must never mark the runner warm (isWarm() stays false, so a caller adding a
+     * rector.php afterwards can simply retry the same call).
+     */
+    public function testRunThrowsWhenNoConfigResolvesAndNeverMarksWarm(): void
+    {
+        $tmp = sys_get_temp_dir() . '/rector-runner-test-' . bin2hex(random_bytes(8));
+        mkdir($tmp);
+        $previousCwd = getcwd();
+        $previousArgv = $_SERVER['argv'] ?? ['rector'];
+
+        try {
+            chdir($tmp);
+            // Neutralise the real process argv: RectorConfigsResolver reads --config
+            // from $_SERVER['argv'] directly (see bin/mcp-rector-warm), and this
+            // test's own argv (phpunit's) must not accidentally supply one.
+            $_SERVER['argv'] = ['rector'];
+
+            $runner = new RectorRunner();
+            self::assertFalse($runner->isWarm());
+
+            try {
+                $runner->run(['rector', 'process']);
+                self::fail('expected a RuntimeException for a missing config');
+            } catch (\RuntimeException $e) {
+                self::assertStringContainsString('No rector.php', $e->getMessage());
+                self::assertStringContainsString('--config', $e->getMessage());
+            }
+
+            self::assertFalse($runner->isWarm(), 'a boot that refused must never leave the runner warm');
+        } finally {
+            chdir($previousCwd);
+            $_SERVER['argv'] = $previousArgv;
+            rmdir($tmp);
+        }
+    }
 }
