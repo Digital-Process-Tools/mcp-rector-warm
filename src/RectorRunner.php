@@ -440,36 +440,103 @@ class RectorRunner implements RunnerInterface
      */
     protected function runCold(array $argv): array
     {
-        $descriptors = [0 => ['pipe', 'r'], 1 => ['pipe', 'w'], 2 => ['pipe', 'w']];
-        $command = [\PHP_BINARY, \dirname(__DIR__) . '/bin/rector-cold-call.php'];
-        $process = \proc_open($command, $descriptors, $pipes);
-        if (!\is_resource($process)) {
-            throw new \RuntimeException('Could not spawn a cold rector subprocess (no-pcntl fallback, #31).');
+        // The result travels through a temp file, never through stdout/stderr (#46):
+        // Rector's own SymfonyStyle/ConsoleOutput writes (e.g. a deprecated-set
+        // warning) bypass ob_start() and land straight on the real fd 1, and once
+        // that happens json_decode()ing stdout as the result silently corrupts a
+        // successful run into "no output". stdout and stderr are drained purely for
+        // diagnostics now, never parsed as data.
+        $resultFile = \tempnam(\sys_get_temp_dir(), 'rector-cold-');
+        if ($resultFile === false) {
+            throw new \RuntimeException('Could not allocate a temp file for the cold rector subprocess result channel.');
         }
 
-        $request = (string) \json_encode([
-            'daemon_argv' => $_SERVER['argv'] ?? [],
-            'call_argv' => $argv,
-            'cwd' => \getcwd(),
-        ]);
-        \fwrite($pipes[0], $request);
-        \fclose($pipes[0]);
-        $stdout = \stream_get_contents($pipes[1]);
-        $stderr = \stream_get_contents($pipes[2]);
-        \fclose($pipes[1]);
-        \fclose($pipes[2]);
-        $exitCode = \proc_close($process);
+        try {
+            $descriptors = [0 => ['pipe', 'r'], 1 => ['pipe', 'w'], 2 => ['pipe', 'w']];
+            $command = [\PHP_BINARY, \dirname(__DIR__) . '/bin/rector-cold-call.php'];
+            $process = \proc_open($command, $descriptors, $pipes);
+            if (!\is_resource($process)) {
+                throw new \RuntimeException('Could not spawn a cold rector subprocess (no-pcntl fallback, #31).');
+            }
 
-        $decoded = $stdout === false || $stdout === '' ? null : \json_decode($stdout, true);
-        if (!\is_array($decoded) || isset($decoded['error'])) {
-            $message = \is_array($decoded) && isset($decoded['error'])
-                ? (string) $decoded['error']
-                : "cold rector subprocess produced no output (exit {$exitCode}): " . \trim((string) $stderr);
-            throw new \RuntimeException($message);
+            $request = (string) \json_encode([
+                'daemon_argv' => $_SERVER['argv'] ?? [],
+                'call_argv' => $argv,
+                'cwd' => \getcwd(),
+                'result_file' => $resultFile,
+            ]);
+            \fwrite($pipes[0], $request);
+            \fclose($pipes[0]);
+
+            [$consoleOutput, $stderr] = $this->drainColdPipes($pipes[1], $pipes[2]);
+            \fclose($pipes[1]);
+            \fclose($pipes[2]);
+            $exitCode = \proc_close($process);
+
+            $resultJson = \is_file($resultFile) ? \file_get_contents($resultFile) : false;
+            $decoded = $resultJson === false || $resultJson === '' ? null : \json_decode($resultJson, true);
+            if (!\is_array($decoded) || isset($decoded['error'])) {
+                $diagnostic = \trim($stderr . ($consoleOutput !== '' ? \PHP_EOL . $consoleOutput : ''));
+                $message = \is_array($decoded) && isset($decoded['error'])
+                    ? (string) $decoded['error']
+                    : "cold rector subprocess produced no output (exit {$exitCode}): " . $diagnostic;
+                throw new \RuntimeException($message);
+            }
+
+            /** @var array{exit_code: int, output: string, warm_boot: bool} $decoded */
+            return $decoded;
+        } finally {
+            if (\is_file($resultFile)) {
+                @\unlink($resultFile);
+            }
+        }
+    }
+
+    /**
+     * Drain the cold child's stdout (fd 1, Rector's own console writes -- #46) and
+     * stderr (fd 2, PHP notices) concurrently with stream_select(), rather than one
+     * after the other. Reading them sequentially with stream_get_contents()
+     * deadlocks the moment either pipe fills its OS buffer before reaching EOF: the
+     * parent blocks reading pipe N to completion while the child blocks writing to
+     * pipe N+1, and neither side can move again (#45, observed past ~64 KiB on
+     * stderr). stream_select() lets the parent drain whichever pipe has data
+     * waiting, in either order, so no pipe can back up and block the child.
+     *
+     * @param resource $stdout
+     * @param resource $stderr
+     * @return array{0: string, 1: string}
+     */
+    private function drainColdPipes($stdout, $stderr): array
+    {
+        $buffers = [1 => '', 2 => ''];
+        $open = [1 => $stdout, 2 => $stderr];
+        foreach ($open as $pipe) {
+            \stream_set_blocking($pipe, false);
         }
 
-        /** @var array{exit_code: int, output: string, warm_boot: bool} $decoded */
-        return $decoded;
+        while ($open !== []) {
+            $read = \array_values($open);
+            $write = null;
+            $except = null;
+            $changed = @\stream_select($read, $write, $except, null);
+            if ($changed === false) {
+                break;
+            }
+            foreach ($open as $fd => $pipe) {
+                if (!\in_array($pipe, $read, true)) {
+                    continue;
+                }
+                $chunk = \fread($pipe, 65536);
+                if ($chunk !== false && $chunk !== '') {
+                    $buffers[$fd] .= $chunk;
+                }
+                if (\feof($pipe)) {
+                    unset($open[$fd]);
+                }
+            }
+        }
+
+        return [$buffers[1], $buffers[2]];
     }
 
     /**
