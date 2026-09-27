@@ -1,0 +1,56 @@
+description: rector.php is edited mid-session to reference a nonexistent rule class; the call is reported as a failed MCP tool call (rather than silently claiming no changes), and a subsequent valid edit recovers.
+# A config this broken fails to even build the DI container; boot() lets that exception
+# escape uncaught (#20), so RectorTool's own catch reports it exactly the way #14/#15's own
+# missing-config refusal is reported: isError: true (#16). Cold `vendor/bin/rector process`
+# has no such concept -- a raw subprocess crash looks nothing like an MCP tool error -- so
+# this scenario deliberately diverges from the cold oracle throughout, same as
+# no-rector-config.yaml.
+oracle: false
+files:
+  src/Probe.php: |
+    <?php
+
+    declare(strict_types=1);
+
+    final class Probe
+    {
+        public function __construct(private readonly int $value)
+        {
+        }
+    }
+steps:
+  - call: src/Probe.php
+    expect:
+      changed: 1
+      diff_contains: "+final readonly class Probe"
+  - write:
+      path: rector.php
+      content: |
+        <?php
+
+        declare(strict_types=1);
+
+        use Rector\Config\RectorConfig;
+
+        return RectorConfig::configure()
+            ->withPaths([__DIR__ . '/src'])
+            ->withRules([\Totally\Unknown\NonexistentRector::class]);
+  - call: src/Probe.php
+    expect: {is_error: true, changed: 0}
+  - write:
+      path: rector.php
+      content: |
+        <?php
+
+        declare(strict_types=1);
+
+        use Rector\Config\RectorConfig;
+        use Rector\Php83\Rector\ClassMethod\AddOverrideAttributeToOverriddenMethodsRector;
+        use Rector\ValueObject\PhpVersion;
+
+        return RectorConfig::configure()
+            ->withPaths([__DIR__ . '/src'])
+            ->withPhpVersion(PhpVersion::PHP_83)
+            ->withRules([AddOverrideAttributeToOverriddenMethodsRector::class]);
+  - call: src/Probe.php
+    expect: {is_error: false, changed: 0}

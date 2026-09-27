@@ -1,0 +1,59 @@
+description: rector.php is edited mid-session then reverted back to its original content; the warm container picks up the revert too, not just the edit.
+files:
+  src/Probe.php: |
+    <?php
+
+    declare(strict_types=1);
+
+    final class Probe
+    {
+        public function __construct(private readonly int $value)
+        {
+        }
+    }
+steps:
+  - call: src/Probe.php
+    expect:
+      changed: 1
+      diff_contains: "+final readonly class Probe"
+  - write:
+      path: rector.php
+      content: |
+        <?php
+
+        declare(strict_types=1);
+
+        use Rector\Config\RectorConfig;
+        use Rector\Php83\Rector\ClassMethod\AddOverrideAttributeToOverriddenMethodsRector;
+        use Rector\ValueObject\PhpVersion;
+
+        return RectorConfig::configure()
+            ->withPaths([__DIR__ . '/src'])
+            ->withPhpVersion(PhpVersion::PHP_83)
+            ->withRules([AddOverrideAttributeToOverriddenMethodsRector::class]);
+  - call: src/Probe.php
+    expect: {changed: 0}
+  - write:
+      path: rector.php
+      content: |
+        <?php
+
+        declare(strict_types=1);
+
+        use Rector\Config\RectorConfig;
+        use Rector\Php82\Rector\Class_\ReadOnlyClassRector;
+        use Rector\Php83\Rector\ClassMethod\AddOverrideAttributeToOverriddenMethodsRector;
+        use Rector\ValueObject\PhpVersion;
+
+        return RectorConfig::configure()
+            ->withPaths([__DIR__ . '/src'])
+            ->withAutoloadPaths([__DIR__ . '/src'])
+            ->withPhpVersion(PhpVersion::PHP_83)
+            ->withRules([
+                ReadOnlyClassRector::class,
+                AddOverrideAttributeToOverriddenMethodsRector::class,
+            ]);
+  - call: src/Probe.php
+    expect:
+      changed: 1
+      diff_contains: "+final readonly class Probe"

@@ -149,7 +149,7 @@ false` (a non-dry-run call writes files), `destructiveHint: true`,
 
 Three decisions worth knowing:
 
-1. **One daemon per project, not per call.** Config + working dir pin at server startup. This keeps `$_SERVER['argv']` clean for `RectorConfigsResolver` and lets the container cache across every call.
+1. **One daemon per project, not per call.** Working dir pins at server startup. This keeps `$_SERVER['argv']` clean for `RectorConfigsResolver` and lets the container cache across calls -- but the *config* is not pinned the same way: before every call the runner hashes the resolved `rector.php`/`rector.dist.php` (whichever `RectorConfigsResolver` would pick), and a changed hash forces a reboot before that call runs, so an edit to the config takes effect on the next call rather than waiting for a restart. Only the main config file itself is hashed; a `rector.php` that `require`s a shared file is a known limitation -- touch/edit the main config file too to force a reboot after changing what it includes.
 
 2. **Parallel mode forcibly disabled (`--debug` flag).** Rector's worker fork model expects `$_SERVER['argv'][0]` to be the rector CLI binary. From an MCP server it isn't, so workers can't respawn. Single-thread analysis only — that's fine for the per-file edit loop this is designed for.
 

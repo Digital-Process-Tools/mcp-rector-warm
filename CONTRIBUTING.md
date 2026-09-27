@@ -122,7 +122,7 @@ steps:
 Steps: `write` (path, content), `edit` (path, old, new; `old` must occur once), `delete`
 (path), `rename` (from, to), `call` (a path relative to the tree, a file or a directory;
 `dry_run: false` to apply). `expect` takes `changed`, `changed_files`, `diff_contains`,
-`diff_excludes`, `is_error`, `error_class`. At the top level, `config` replaces the
+`diff_excludes`, `is_error`, `error_class`, `exit_code`. At the top level, `config` replaces the
 default `rector.php` (`null` for none), `fixture: tests/Fixtures/project` starts from a
 directory, `xfail: "#N: ..."` marks a scenario that hits a filed issue, and
 `oracle: false` skips the cold-`rector process` comparison for every in-tree call --
