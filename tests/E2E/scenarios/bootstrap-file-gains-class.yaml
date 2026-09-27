@@ -1,5 +1,5 @@
-xfail: "#33: withBootstrapFiles files are required once in the parent at boot, so a class added later is never seen"
 description: A class declared by a withBootstrapFiles file is added mid-session; cold Rector includes the bootstrap file fresh on every run.
+bootstrap_files: [bootstrap.php]
 config: |
   <?php
 

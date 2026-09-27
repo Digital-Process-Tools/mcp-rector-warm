@@ -30,6 +30,11 @@ Scenario format (YAML) -- see CONTRIBUTING.md for a worked example:
                                    #   timeout reproduces in seconds, #32); the cold
                                    #   oracle keeps PHP defaults.
   files: {rel/path.php: source}    # optional: files written on top
+  bootstrap_files: [rel/path.php]  # optional: paths the config registers via
+                                   #   withBootstrapFiles() -- like rector.php itself
+                                   #   (#33), a write/edit/delete/rename on one of
+                                   #   these forces the NEXT call to reboot, same as a
+                                   #   rector.php edit does.
   steps:                           # required, run in order
     - write:  {path: rel, content: source}       # create or replace
     - edit:   {path: rel, old: text, new: text}  # 'old' must occur exactly once
@@ -49,10 +54,11 @@ Scenario format (YAML) -- see CONTRIBUTING.md for a worked example:
 
 Checked on every scenario, whatever its steps: every call after the first in-tree one
 reports warm_boot = true (so the oracle compares a warm container, not a reboot) --
-UNLESS a write/edit/delete/rename on rector.php/rector.dist.php happened since the
-previous call, in which case that one call must report warm_boot = false (a forced
-reboot, #20) and warm_boot returns to true from the call after. stdout carries nothing
-but JSON-RPC, and the server exits 0 when the client closes.
+UNLESS a write/edit/delete/rename on rector.php/rector.dist.php, or on a path listed
+in the scenario's own 'bootstrap_files' (#33), happened since the previous call, in
+which case that one call must report warm_boot = false (a forced reboot, #20/#33) and
+warm_boot returns to true from the call after. stdout carries nothing but JSON-RPC,
+and the server exits 0 when the client closes.
 """
 
 from __future__ import annotations
@@ -106,7 +112,7 @@ return RectorConfig::configure()
     ]);
 """
 
-TOP_KEYS = {"description", "xfail", "fixture", "config", "oracle", "php_ini", "files", "steps"}
+TOP_KEYS = {"description", "xfail", "fixture", "config", "oracle", "php_ini", "files", "bootstrap_files", "steps"}
 STEP_KINDS = {"write", "edit", "delete", "rename", "call"}
 CALL_KEYS = {"call", "dry_run", "expect"}
 EXPECT_KEYS = {"changed", "changed_files", "diff_contains", "diff_excludes", "is_error", "error_class", "error_contains"}
@@ -221,21 +227,26 @@ def as_list(value: Any) -> list[str]:
     return [value] if isinstance(value, str) else list(value)
 
 
-# A write/edit/delete/rename on the resolved main config file (#20) forces the NEXT
-# in-tree call to reboot: warm_boot must be False for that one call, then True again
-# from the call after, once the parent has re-booted from the new config.
+# A write/edit/delete/rename on the resolved main config file (#20), OR on a path the
+# scenario names in its own 'bootstrap_files' list (#33), forces the NEXT in-tree call
+# to reboot: warm_boot must be False for that one call, then True again from the call
+# after, once the parent has re-booted from the new config/bootstrap files. Bootstrap
+# files are scenario-specific (declared inside the scenario's own 'config:' via
+# withBootstrapFiles()), unlike the two fixed main-config names, so the watched set is
+# built per scenario rather than being a fixed module-level constant like the old
+# CONFIG_FILE_NAMES-only check was.
 CONFIG_FILE_NAMES = {"rector.php", "rector.dist.php"}
 
 
-def step_touches_config(step: dict[str, Any]) -> bool:
+def step_touches_config(step: dict[str, Any], watched: set[str]) -> bool:
     if "write" in step:
-        return step["write"]["path"] in CONFIG_FILE_NAMES
+        return step["write"]["path"] in watched
     if "edit" in step:
-        return step["edit"]["path"] in CONFIG_FILE_NAMES
+        return step["edit"]["path"] in watched
     if "delete" in step:
-        return step["delete"] in CONFIG_FILE_NAMES
+        return step["delete"] in watched
     if "rename" in step:
-        return step["rename"]["from"] in CONFIG_FILE_NAMES or step["rename"]["to"] in CONFIG_FILE_NAMES
+        return step["rename"]["from"] in watched or step["rename"]["to"] in watched
     return False
 
 
@@ -300,6 +311,7 @@ def test_scenario(scenario_file: Path, data: dict[str, Any], tmp_path: Path) -> 
     config = tree.root / "rector.php"
     call_steps = [step for step in data["steps"] if "call" in step]
     oracle = data.get("oracle", True)
+    watched_config_paths = CONFIG_FILE_NAMES | set(data.get("bootstrap_files") or [])
 
     async def run() -> tuple[int, list[Exception]]:
         calls_made = 0
@@ -310,16 +322,16 @@ def test_scenario(scenario_file: Path, data: dict[str, Any], tmp_path: Path) -> 
                 where = f"{scenario_file.name} step {i}"
                 if "write" in step:
                     tree.write(step["write"]["path"], step["write"]["content"])
-                    config_touched_since_last_call = config_touched_since_last_call or step_touches_config(step)
+                    config_touched_since_last_call = config_touched_since_last_call or step_touches_config(step, watched_config_paths)
                 elif "edit" in step:
                     tree.edit(step["edit"]["path"], step["edit"]["old"], step["edit"]["new"])
-                    config_touched_since_last_call = config_touched_since_last_call or step_touches_config(step)
+                    config_touched_since_last_call = config_touched_since_last_call or step_touches_config(step, watched_config_paths)
                 elif "delete" in step:
                     tree.delete(step["delete"])
-                    config_touched_since_last_call = config_touched_since_last_call or step_touches_config(step)
+                    config_touched_since_last_call = config_touched_since_last_call or step_touches_config(step, watched_config_paths)
                 elif "rename" in step:
                     tree.rename(step["rename"]["from"], step["rename"]["to"])
-                    config_touched_since_last_call = config_touched_since_last_call or step_touches_config(step)
+                    config_touched_since_last_call = config_touched_since_last_call or step_touches_config(step, watched_config_paths)
                 else:
                     in_tree_call = not os.path.isabs(step["call"])
                     cold_tree = None
