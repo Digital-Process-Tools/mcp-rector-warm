@@ -924,14 +924,16 @@ class RectorRunner implements RunnerInterface
      * mode, and the file is a handful of KB: cheap to hash before every call next to the
      * reboot it may trigger.
      *
-     * Only the resolved main config file is tracked. A rector.php that itself
-     * requires/includes a shared file is a known limitation, not silently ignored: building
-     * the DI container in bootInPlace() autoloads hundreds of unrelated classes through the
-     * same require/include machinery, so there is no reliable way to isolate "a file
-     * rector.php chose to include" from that noise without parsing rector.php's own source
-     * for require/include statements -- which would still miss a dynamically computed path.
+     * The resolved main config file AND every file the config registered via
+     * withBootstrapFiles() are tracked this way (#33) -- see resolveBootstrapFileHashes().
+     * A rector.php that itself requires/includes some OTHER shared file directly (not via
+     * withBootstrapFiles()) is a known limitation, not silently ignored: building the DI
+     * container in bootInPlace() autoloads hundreds of unrelated classes through the same
+     * require/include machinery, so there is no reliable way to isolate "a file rector.php
+     * chose to include" from that noise without parsing rector.php's own source for
+     * require/include statements -- which would still miss a dynamically computed path.
      * Editing (even a no-op touch of) the main config file itself is the reliable way to
-     * force a reboot after changing a file it includes.
+     * force a reboot after changing such a file.
      */
     protected function configFileChanged(): bool
     {
