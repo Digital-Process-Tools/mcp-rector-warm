@@ -1,6 +1,7 @@
-description: A rector.php that declares a class fails to boot, is fixed, and the next call boots again; re-requiring the config must not kill the server (#31 -- boot() now always runs in a fresh worker process, never re-requiring the same rector.php twice in one process).
-# Oracle off: the failing first call is a tool error warm and a CLI fatal_errors report cold, by design.
+description: "Without pcntl (#18, php -d disable_functions=pcntl_fork), a rector.php that declares a class must not crash the second call: every call now boots cold in its own subprocess instead of rebooting the daemon's own process in place (#31)."
 oracle: false
+php_ini:
+  disable_functions: pcntl_fork
 config: |
   <?php
 
@@ -11,14 +12,14 @@ config: |
   use Rector\ValueObject\PhpVersion;
 
   // Any class or function declared at the top level of rector.php (an inline custom rule, a helper).
-  final class HelperDeclaredInConfig
+  final class HelperDeclaredInConfigNoPcntl
   {
   }
 
   return RectorConfig::configure()
       ->withPaths([__DIR__ . "/src"])
       ->withPhpVersion(PhpVersion::PHP_83)
-      ->withRules([ReadOnlyClassRector::class, NoSuchRector::class]);
+      ->withRules([ReadOnlyClassRector::class]);
 files:
   src/Money.php: |
     <?php
@@ -32,14 +33,14 @@ files:
         }
     }
 steps:
-  # The unknown rule makes the first boot throw, after the class above was declared.
+  # Without pcntl, every call reboots -- so a second call, with no edit at all,
+  # already re-requires the class-declaring rector.php a second time and used to
+  # crash the daemon (#31, #18). Two calls, no edit, is the whole reproduction.
   - call: src/Money.php
     expect:
-      is_error: true
-  - edit:
-      path: rector.php
-      old: ", NoSuchRector::class"
-      new: ""
+      is_error: false
+      changed: 1
+      diff_contains: "+final readonly class Money"
   - call: src/Money.php
     expect:
       is_error: false

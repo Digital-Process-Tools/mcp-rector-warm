@@ -1,4 +1,4 @@
-description: A valid rector.php that declares a class is edited mid-session; the forced reboot (#20) must not kill the server (#31 -- the reboot now always spawns a fresh worker process rather than re-requiring rector.php in place).
+description: A valid rector.php that declares a top-level FUNCTION (not only a class) is edited mid-session; the forced reboot (#20) must not kill the server (#31).
 config: |
   <?php
 
@@ -9,9 +9,12 @@ config: |
   use Rector\Php83\Rector\ClassMethod\AddOverrideAttributeToOverriddenMethodsRector;
   use Rector\ValueObject\PhpVersion;
 
-  // Any class or function declared at the top level of rector.php (an inline custom rule, a helper).
-  final class HelperDeclaredInConfig
+  // A top-level FUNCTION declared in rector.php (an inline helper), distinct from
+  // the class-declaring siblings of this scenario (config-declares-class-*.yaml):
+  // PHP's redeclare fatal fires the same way for a function as for a class.
+  function helperDeclaredInConfig(): bool
   {
+      return true;
   }
 
   return RectorConfig::configure()

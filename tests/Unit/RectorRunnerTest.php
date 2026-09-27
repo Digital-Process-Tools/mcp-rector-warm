@@ -16,78 +16,67 @@ final class RectorRunnerTest extends TestCase
     }
 
     /**
-     * Control-flow pin for the no-pcntl fallback (claude-supertool#8): no CI
-     * leg in this repo runs without pcntl (single ubuntu-latest job), so this
-     * exercises the branch mechanically by forcing canFork() to report
-     * unavailable. A warm call must then reboot + reboot the container and
-     * report warm_boot=false -- never silently reuse the old container or
-     * silently take the fork path.
+     * Control-flow pin for the no-pcntl fallback (#31, formerly #8): CI does not run
+     * without pcntl (single ubuntu-latest job), so this exercises the branch
+     * mechanically by forcing canFork() to report unavailable. Before #31, a warm
+     * call rebooted the SAME process's container in place -- which crashed for real
+     * whenever rector.php (or a withBootstrapFiles file) declared a class or
+     * function, since that process had already required it once. Without pcntl there
+     * is no OS-process boundary to isolate a reboot in at all, so run() must never
+     * boot()/reboot() this instance in place any more: every call, including the
+     * first, goes through runCold() (a genuinely fresh `php` subprocess per call) and
+     * reports warm_boot=false. isWarm() must stay false throughout -- nothing here is
+     * ever warm.
      */
-    public function testRunWithoutForkSupportRebootsAndReportsColdOnWarmCalls(): void
+    public function testRunWithoutForkSupportAlwaysRunsColdAndNeverBootsInPlace(): void
     {
         $runner = new class extends RectorRunner {
             /** @var list<string> */
             public array $log = [];
-            private bool $booted = false;
 
             protected function canFork(): bool
             {
                 return false;
             }
 
-            public function isWarm(): bool
-            {
-                return $this->booted;
-            }
-
             public function reboot(): void
             {
                 $this->log[] = 'reboot';
-                $this->booted = false;
             }
 
             protected function boot(): void
             {
                 $this->log[] = 'boot';
-                $this->booted = true;
-            }
-
-            /**
-             * Fixed to false, never the real filesystem-backed check: this test pins the
-             * no-pcntl fallback (every warm call fully reboots, #8), which already forces a
-             * reboot on every warm call regardless of any config change, so the two must not
-             * be conflated. Without this override, run() would consult the REAL
-             * configFileChanged() (a real RectorConfigsResolver + a real is_file()/hash_file()
-             * against getcwd()) and the log below would happen to still match today only
-             * because no rector.php exists at the repo root -- an assertion that stops meaning
-             * what it says the moment that stops being true.
-             */
-            protected function configFileChanged(): bool
-            {
-                return false;
             }
 
             /**
              * @param list<string> $argv
              * @return array{exit_code: int, output: string, warm_boot: bool}
              */
-            protected function execute(array $argv, bool $warmBoot): array
+            protected function runCold(array $argv): array
             {
-                $this->log[] = 'execute:' . ($warmBoot ? 'warm' : 'cold');
+                $this->log[] = 'runCold';
 
-                return ['exit_code' => 0, 'output' => '', 'warm_boot' => $warmBoot];
+                return ['exit_code' => 0, 'output' => '', 'warm_boot' => false];
             }
         };
 
         $first = $runner->run(['rector']);
         self::assertFalse($first['warm_boot'], 'the very first call is never warm');
+        self::assertFalse($runner->isWarm(), 'without pcntl, nothing is ever warm');
 
         $second = $runner->run(['rector']);
         self::assertFalse(
             $second['warm_boot'],
-            'without pcntl, a warm call must fully reboot rather than silently report warm reuse',
+            'without pcntl, every call is a fresh cold subprocess -- never a reused container',
         );
-        self::assertSame(['boot', 'execute:cold', 'reboot', 'boot', 'execute:cold'], $runner->log);
+        self::assertFalse($runner->isWarm());
+        self::assertSame(
+            ['runCold', 'runCold'],
+            $runner->log,
+            'boot()/reboot() must never run in place without pcntl (#31): there is no process '
+            . 'boundary available to isolate a reboot in, so run() must not call them at all',
+        );
     }
 
     /**
