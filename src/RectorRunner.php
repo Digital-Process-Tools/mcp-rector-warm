@@ -254,9 +254,14 @@ class RectorRunner implements RunnerInterface
         // reported error the caller cannot mistake for a completed run, and
         // Rector's onboarding text never reaches this process's stdout in either
         // the forked or the no-pcntl fallback path (both call this same method).
-        // Fails open (no guard) if ConfigInitializer is ever renamed/removed
-        // upstream: this check is additive, not a hard new dependency for the rest
-        // of the runner.
+        // The class_exists()/method_exists() checks below fail OPEN if
+        // ConfigInitializer is ever renamed upstream (skip the guard, run as
+        // before #27) rather than breaking every call over a class that no
+        // longer exists. container->get() itself is deliberately left
+        // unguarded: if it throws for some other reason, that is no worse
+        // than the status quo -- ProcessCommand's own later construction of
+        // the identical ConfigInitializer service would hit the same failure
+        // a few lines further in, also uncaught.
         if (\class_exists(\Rector\Configuration\ConfigInitializer::class)) {
             $configInitializer = $this->container->get(\Rector\Configuration\ConfigInitializer::class);
             if (
