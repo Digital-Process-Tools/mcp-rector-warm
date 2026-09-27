@@ -440,19 +440,37 @@ class RectorRunner implements RunnerInterface
      */
     protected function runCold(array $argv): array
     {
-        // The result travels through a temp file, never through stdout/stderr (#46):
-        // Rector's own SymfonyStyle/ConsoleOutput writes (e.g. a deprecated-set
-        // warning) bypass ob_start() and land straight on the real fd 1, and once
-        // that happens json_decode()ing stdout as the result silently corrupts a
-        // successful run into "no output". stdout and stderr are drained purely for
-        // diagnostics now, never parsed as data.
-        $resultFile = \tempnam(\sys_get_temp_dir(), 'rector-cold-');
-        if ($resultFile === false) {
-            throw new \RuntimeException('Could not allocate a temp file for the cold rector subprocess result channel.');
+        // Both the result (#46) and the child's stdout/stderr (#45) travel through
+        // temp files, never through OS pipes. A pipe has a small, fixed OS buffer:
+        // reading two of them one after another (the original code) deadlocks the
+        // moment either pipe fills before the parent gets to it, because the child
+        // then blocks writing while the parent blocks reading the other one (#45).
+        // stream_select() can drain multiple pipes concurrently to avoid that -- but
+        // stream_select() over proc_open() pipes is documented not to work on
+        // Windows at all ("Use of stream_select() on file descriptors returned by
+        // proc_open() will fail and return false under Windows", php.net), and
+        // Windows is this fallback's own stated reason to exist (no pcntl, ever).
+        // A file has no such bounded buffer: proc_open()'s own 'file' descriptor
+        // type lets the child write directly to a file, sidestepping the whole
+        // pipe-buffer-deadlock class rather than working around it, identically on
+        // every platform. Rector's own console writes (SymfonyStyle/ConsoleOutput)
+        // bypass ob_start() and display_errors and land straight on the real fd 1,
+        // so json_decode()ing stdout as the result (the original bug behind #46)
+        // is still wrong even once #45 is fixed -- the result never shares a
+        // channel with anything Rector itself may write.
+        $resultFile = \tempnam(\sys_get_temp_dir(), 'rector-cold-result-');
+        $stdoutFile = \tempnam(\sys_get_temp_dir(), 'rector-cold-stdout-');
+        $stderrFile = \tempnam(\sys_get_temp_dir(), 'rector-cold-stderr-');
+        if ($resultFile === false || $stdoutFile === false || $stderrFile === false) {
+            throw new \RuntimeException('Could not allocate temp files for the cold rector subprocess channels.');
         }
 
         try {
-            $descriptors = [0 => ['pipe', 'r'], 1 => ['pipe', 'w'], 2 => ['pipe', 'w']];
+            $descriptors = [
+                0 => ['pipe', 'r'],
+                1 => ['file', $stdoutFile, 'w'],
+                2 => ['file', $stderrFile, 'w'],
+            ];
             $command = [\PHP_BINARY, \dirname(__DIR__) . '/bin/rector-cold-call.php'];
             $process = \proc_open($command, $descriptors, $pipes);
             if (!\is_resource($process)) {
@@ -467,15 +485,13 @@ class RectorRunner implements RunnerInterface
             ]);
             \fwrite($pipes[0], $request);
             \fclose($pipes[0]);
-
-            [$consoleOutput, $stderr] = $this->drainColdPipes($pipes[1], $pipes[2]);
-            \fclose($pipes[1]);
-            \fclose($pipes[2]);
             $exitCode = \proc_close($process);
 
             $resultJson = \is_file($resultFile) ? \file_get_contents($resultFile) : false;
             $decoded = $resultJson === false || $resultJson === '' ? null : \json_decode($resultJson, true);
             if (!\is_array($decoded) || isset($decoded['error'])) {
+                $stderr = (string) \file_get_contents($stderrFile);
+                $consoleOutput = (string) \file_get_contents($stdoutFile);
                 $diagnostic = \trim($stderr . ($consoleOutput !== '' ? \PHP_EOL . $consoleOutput : ''));
                 $message = \is_array($decoded) && isset($decoded['error'])
                     ? (string) $decoded['error']
@@ -486,57 +502,12 @@ class RectorRunner implements RunnerInterface
             /** @var array{exit_code: int, output: string, warm_boot: bool} $decoded */
             return $decoded;
         } finally {
-            if (\is_file($resultFile)) {
-                @\unlink($resultFile);
-            }
-        }
-    }
-
-    /**
-     * Drain the cold child's stdout (fd 1, Rector's own console writes -- #46) and
-     * stderr (fd 2, PHP notices) concurrently with stream_select(), rather than one
-     * after the other. Reading them sequentially with stream_get_contents()
-     * deadlocks the moment either pipe fills its OS buffer before reaching EOF: the
-     * parent blocks reading pipe N to completion while the child blocks writing to
-     * pipe N+1, and neither side can move again (#45, observed past ~64 KiB on
-     * stderr). stream_select() lets the parent drain whichever pipe has data
-     * waiting, in either order, so no pipe can back up and block the child.
-     *
-     * @param resource $stdout
-     * @param resource $stderr
-     * @return array{0: string, 1: string}
-     */
-    private function drainColdPipes($stdout, $stderr): array
-    {
-        $buffers = [1 => '', 2 => ''];
-        $open = [1 => $stdout, 2 => $stderr];
-        foreach ($open as $pipe) {
-            \stream_set_blocking($pipe, false);
-        }
-
-        while ($open !== []) {
-            $read = \array_values($open);
-            $write = null;
-            $except = null;
-            $changed = @\stream_select($read, $write, $except, null);
-            if ($changed === false) {
-                break;
-            }
-            foreach ($open as $fd => $pipe) {
-                if (!\in_array($pipe, $read, true)) {
-                    continue;
-                }
-                $chunk = \fread($pipe, 65536);
-                if ($chunk !== false && $chunk !== '') {
-                    $buffers[$fd] .= $chunk;
-                }
-                if (\feof($pipe)) {
-                    unset($open[$fd]);
+            foreach ([$resultFile, $stdoutFile, $stderrFile] as $tempFile) {
+                if (\is_string($tempFile) && \is_file($tempFile)) {
+                    @\unlink($tempFile);
                 }
             }
         }
-
-        return [$buffers[1], $buffers[2]];
     }
 
     /**
