@@ -6,6 +6,49 @@ This project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-09-27
+
+### Added
+
+- Added (#5): an E2E scenario (`tests/E2E/scenarios/abstract-parent-and-child-edited.yaml`) reproducing the shape reported in #5 -- an abstract base class and its child both edited between warm calls -- and asserting no `toMutatingScope()` crash and a clean warm-vs-cold match. The scenario passes on current `main` as written: the reboot+retry recovery from #3 (fb00629) and the per-call fork isolation from PR #17 (710303e, which itself closed #8) already cover this class of stale-scope bug, so #5 closes as fixed by that mechanism, with this test as regression coverage.
+
+- CI leg exercising the no-pcntl warm-reboot fallback (#18): a dedicated `no-pcntl` job disables `pcntl_fork`, `pcntl_waitpid` and `stream_socket_pair` via a `php.ini` override, so the real `boot()`/`reboot()`/`execute()` sequence in `tests/Integration/ServerStdioTest.php` runs `RectorRunner`'s fallback path (#8) end to end over a real subprocess, instead of only through the existing stubbed unit test. That job's own step confirms the three functions are actually unavailable before running, so a future PHP image that silently re-enables them fails loudly rather than passing for the wrong reason. `ServerStdioTest`'s warm-boot assertions are now fork-aware (`expectsForkedWarmth()`) since the fallback legitimately reboots before every call and never reports a later call as warm — a gap the new leg surfaced: those two assertions previously hard-coded the forked-path expectation and would have failed under a genuine no-pcntl run.
+
+- Added (#21): `rector_process` now declares MCP tool annotations (`destructiveHint: true`, `idempotentHint: false`, `openWorldHint: false`, `readOnlyHint: false`, since a non-dry-run call writes files), and its Rector invocation now inserts `--` before the path argument so a path beginning with `-` is never parsed as a Rector CLI flag.
+
+- End-to-end test suite in `tests/E2E/` (#22): the official Python MCP SDK client launches `bin/mcp-rector-warm` over stdio and checks the handshake, `tools/list`, dry-run and applied `tools/call` results, the warm second call, a refused call, a clean exit, and that nothing but JSON-RPC reaches stdout. Run it with `tests/E2E/run.sh`; CI runs it in a new `e2e` job.
+- Data-driven warm-session scenarios in `tests/E2E/scenarios/` (#22): each YAML file describes a small codebase and a sequence of edits and `rector_process` calls in one warm session, and every call is checked against a fresh cold `rector process` on an identical copy of the tree, so a new case needs no hand-written expected diff. Known defects (#8, #14, #15, #16, #19, #20) are strict expected failures that flip when fixed.
+
+- Class-hierarchy E2E scenarios (#22): eleven warm-session cases in `tests/E2E/scenarios/` where an edit to a parent, grandparent, interface or a newly created parent file, or to the `extends`/`implements` clause, flips what `AddOverrideAttributeToOverriddenMethodsRector` or `AddTypeToConstRector` proposes: `extends-added`, `extends-removed`, `implements-added`, `parent-gains-existing-method`, `parent-method-removed`, `grandparent-edited`, `interface-extends-interface`, `parent-visibility-changed`, `new-parent-file-mid-session`, `abstract-parent-method-added` and `interface-constant`. Each checks the warm result against a cold `rector process` after every call, and at least one call per case must report a changed file.
+
+- `tools/warm-vs-cold.py` (#22): checks mcp-rector-warm against cold Rector on a real project. It runs one warm session over the official Python MCP client and a fresh `rector process --dry-run` for each file (in parallel with `--jobs`), on a seeded sample spread across directories. It writes a JSON report and a Markdown report (matches, mismatches with both diffs, warm and cold errors, p50/p95 timings) and exits non-zero on any mismatch. Every call is a dry run. A generated wrapper config moves Rector's cache to scratch. `--project-autoload` runs this checkout the way a project that installs the package in `require-dev` loads it. See "Checking against a real project" in CONTRIBUTING.md.
+
+- E2E regression scenarios: `apply-twice-idempotent`, `autoload-dir-created-later`, `bom-crlf-spaces`, `class-moved-namespace`, `composer-php-version-raised`, `file-outside-configured-paths`, `function-return-type-edited`, `parent-deleted-child-remains`, `readonly-parent-toggled`, `skip-path-created-later`, `syntax-error-then-fixed`.
+- E2E strict xfails for filed defects: `project-composer-autoload` (#30), `config-declares-class-reboot` and `config-declares-class-edited` (#31), `slow-call-over-socket-timeout` (#32), `bootstrap-file-gains-class` (#33), `composer-php-sets-raised` (#34).
+- E2E harness: a scenario-level `php_ini` key passes `php -d key=value` to the server only, so #32 reproduces in seconds with `default_socket_timeout: 3`; `stdio_tap.py` now closes the client side when the server exits, so a crash (#31) fails fast as `Connection closed` instead of waiting out the call timeout.
+
+### Fixed
+
+- Fixed (#8): the warm daemon no longer returns a class's stale types after that class is edited on disk. Every `rector_process` call now runs isolated in a forked child process (falling back to a full container reboot before each call where `pcntl` is unavailable, e.g. Windows), so a class edited between calls is seen with its current shape instead of the type PHPStan's own reflection cache had recorded for the process lifetime. The per-call `resetReflectionState()` is removed: it guarded on a `tagged()` method Rector's container does not implement, so it had never run, and with every call forked (or rebooted) it has nothing left to reset.
+
+- Fixed (#14): a `rector_process` call in a project with no `rector.php` (and no `--config` given at server startup) now returns a real error instead of a silent, misleading success. Rector's own CLI treats a missing config as friendly onboarding -- it prints a warning via a `SymfonyStyle` that writes straight to the real stdout, bypassing `ob_start()`, and reports exit code 0 for a call that did nothing. `rector_process` now refuses before any of that runs, with `exit_code: -1` and a clear `error` naming the missing config.
+
+- Fixed (#15): a project's `rector.php` printing while it loads (an `echo`, a notice, a deprecation) no longer corrupts the MCP JSON-RPC stream on stdout. Config resolution and container boot are now wrapped in the same output-buffer pattern already used around Rector's own analysis run, and PHP's error display now goes to stderr (`display_errors=stderr`) rather than wherever stdout happens to point.
+
+- Fixed (#16): a failed `rector_process` call (a path outside the working directory, a nonexistent path, or an exception raised inside Rector's own processing) now comes back as an MCP tool error (`isError: true`) instead of an ordinary successful result, so a host can see the failure and self-correct. The structured details (`exit_code`, `error`, `error_class`, `trace`) are preserved in `structuredContent`.
+
+- Fixed (#20): editing `rector.php`/`rector.dist.php` mid-session no longer waits for a server restart to take effect. Before every `rector_process` call, the warm daemon compares a sha256 of the resolved config file's current bytes against the one it booted from; a changed hash forces a container reboot before that call runs, so the new rules apply on the very next call. Content hash rather than mtime+size: mtime has whole-second resolution on common filesystems, so two edits within the same second (or a save strategy that writes the same mtime back) can be indistinguishable from "unchanged" for mtime+size, while a hash always reflects the exact bytes about to be `require()`'d. Only the main config file is tracked -- a `rector.php` that itself `require`s a shared file is a known limitation, not silently ignored (see the README); touching/editing the main config file is the reliable way to force a reboot after changing a file it includes. A config edit that breaks the container (e.g. an unknown rule class, or a `--config` path deleted since the last boot) is now reported as a failed MCP tool call (`isError: true`, per #16) with the real exception's class and message, instead of crashing the daemon or silently reporting no changes, and a later valid edit recovers on the next call.
+
+- Fixed (#27): a `rector_process` call against a `rector.php` that loads fine but registers zero rules (and zero sets) now returns a real error instead of leaking Rector's onboarding text onto the MCP stdout stream. Rector's own `ProcessCommand` treats "no rules loaded" the same as "no config at all" and prints a warning via a `SymfonyStyle` bound straight to the real stdout, bypassing `ob_start()` (follow-up to #14). `rector_process` now refuses before `$application->run()` is ever called, with `exit_code: -1` and a clear `error` naming the empty rule set.
+
+- Fixed: rebooting the warm container no longer crashes the server with a PHP fatal ("Cannot declare class/function already declared") when `rector.php` (or a `withBootstrapFiles` file) declares a class or function. Booting now always happens in a process that has never booted before -- a forked worker on platforms with pcntl, a fresh `php` subprocess per call otherwise -- rather than re-`require`ing the config in the same long-lived process on a config edit or on the no-pcntl fallback (#31).
+
+- Fixed: removing a `withSkip()` entry (or any other Rector config parameter) mid-session no longer keeps applying it. Rector's `SimpleParameterProvider` statics (used for `Option::SKIP` and others) are merged, never reset, so an in-process reboot used to leave the earlier boot's parameters in effect even after the config changed. #31's fix already boots every reboot in a genuinely fresh process, which starts these statics clean, closing this as the same root cause (#41).
+
+### Security
+
+- Security: `trap.d/22.supertool-worktree-config-boundary.md` embedded the maintainer's absolute local home-directory path (`/Users/<name>/Documents/mcp-rector-warm/.supertool.json`). `trap.d/` ships in the dist archive of every tagged release (no `.gitattributes` export-ignore excludes it), so this disclosed the maintainer's local username and directory layout to anyone downloading the tag. Replaced with the repo-relative form `<repo>/.supertool.json`, and added a regression test (`tests/Unit/TrapDNoHostPathsTest.php`) that scans every `trap.d/*.md` fragment for an absolute `/Users/<name>/` or `/home/<name>/` path (#44).
+
 ## [0.4.2] — 2026-08-22
 
 ### Changed
@@ -100,7 +143,8 @@ MCP `output` field now contains `file_diffs[].applied_rectors` + `diff` so consu
 - PHPUnit unit + integration tests covering boot, tool listing, warm reuse (`warm_boot: true` on second call).
 - Standalone CLI: `--working-dir`, `--config` flags pinned at server start.
 
-[Unreleased]: https://github.com/Digital-Process-Tools/mcp-rector-warm/compare/v0.4.2...HEAD
+[Unreleased]: https://github.com/Digital-Process-Tools/mcp-rector-warm/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/Digital-Process-Tools/mcp-rector-warm/releases/tag/v0.5.0
 [0.4.2]: https://github.com/Digital-Process-Tools/mcp-rector-warm/releases/tag/v0.4.2
 [0.4.0]: https://github.com/Digital-Process-Tools/mcp-rector-warm/releases/tag/v0.4.0
 [0.2.1]: https://github.com/Digital-Process-Tools/mcp-rector-warm/releases/tag/v0.2.1
