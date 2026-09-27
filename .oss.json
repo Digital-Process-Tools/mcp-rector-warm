@@ -1,0 +1,34 @@
+{
+  "repo": "Digital-Process-Tools/mcp-rector-warm",
+  "default_branch": "main",
+  "branch_pattern": "fix/{issue}",
+  "test_command": "./vendor/bin/phpunit --no-coverage",
+  "version_sites": [
+    "CHANGELOG.md"
+  ],
+  "changelog_dir": "changelog.d",
+  "changelog_untagged": [
+    "0.3.0"
+  ],
+  "docs_targets": [
+    "README.md"
+  ],
+  "labels": {
+    "priority": [],
+    "lanes": [],
+    "filed_by_loop": "filed-by-loop",
+    "lane_other": "lane-other"
+  },
+  "milestones": [],
+  "release": {
+    "tag_pattern": "v{version}",
+    "merge_method": "squash",
+    "commit_subject": null,
+    "triggers": {
+      "merged_prs": 10,
+      "soak_hours": 48
+    }
+  },
+  "curate_route_threshold": 15,
+  "triage_route_threshold": 0
+}
