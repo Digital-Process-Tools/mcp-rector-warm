@@ -42,9 +42,10 @@ One warm session (official Python `mcp` client, `rector_process` with `dryRun: t
 | --- | --- | --- |
 | cold, per file | 7.02s | 9.00s |
 | warm, later calls | 0.68s | 2.40s |
-| warm, first call (boot) | 10.1s | |
+| warm, first call | 10.1s | n=1 |
 
-If warm later-call p50 goes well above ~1s on a similar project, or the first call gets much slower than 10s, treat it as a regression. Update the README table and this baseline together.
+- `warm_first` is **not the boot cost**. The timer (`started` in `run_warm`) starts after `session.initialize()`, so process start and handshake are excluded, and the file's own work is included (that file took 9.0s cold). Warm-up also spills into `warm_later`: call 2 took 4.04s. The warm phase runs first, before the OS file cache is warm.
+- Only the `warm_later` p50 against the `cold` p50 is a like-for-like comparison. If warm later-call p50 goes well above ~1s on a similar project, treat it as a regression. Update the README table and this baseline together.
 
 **A mismatch means** the warm server answered differently from a fresh process on the same bytes. Reduce it:
 1. Re-run that one file cold and warm-alone (`--files @one.txt`). If warm-alone matches, earlier files in the session are poisoning it: bisect the prefix of `files.txt`.
