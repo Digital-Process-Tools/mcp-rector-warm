@@ -277,6 +277,34 @@ class RectorRunner implements RunnerInterface
     }
 
     /**
+     * Best-effort SIGKILL of a wedged $pid, then reap it -- the shared shape
+     * behind every deadline-expiry path in this file (boot(), runForked(),
+     * forkAndExecute()). Blocks on the reap ONLY when a kill signal was
+     * actually sent: pcntl_waitpid() with no WNOHANG waits for the process to
+     * exit, and a process that was just SIGKILLed exits promptly, so that wait
+     * is bounded in practice. Without posix_kill() (self-review finding,
+     * #58 follow-up: pcntl and posix are separate extensions -- a build can
+     * have one without the other), nothing was ever sent to stop the wedge, so
+     * a BLOCKING wait here would trade "the caller never returns" for "this
+     * cleanup step never returns" on the exact same wedged process --
+     * defeating the whole point of the deadline. WNOHANG there instead:
+     * best-effort, never blocks. If the process is still wedged, it is not
+     * reaped here and may rarely linger as a real zombie until it exits (or
+     * the daemon itself does) -- a narrower, platform-specific gap than an
+     * unbounded hang, and the caller gets its clean, timely error either way.
+     */
+    private function killAndReap(int $pid): void
+    {
+        $status = 0;
+        if (\function_exists('posix_kill')) {
+            @\posix_kill($pid, \SIGKILL);
+            \pcntl_waitpid($pid, $status);
+        } else {
+            \pcntl_waitpid($pid, $status, \WNOHANG);
+        }
+    }
+
+    /**
      * Boot: fork a brand-new "warm worker" child and wait for it to either confirm it
      * booted (a real container built inside that fresh process) or report why it could
      * not, before returning. The worker then serves every call for THIS instance until
@@ -328,11 +356,7 @@ class RectorRunner implements RunnerInterface
             // though it never finished booting -- SIGKILL + reap it here so it
             // never lingers as a zombie under THIS process, same as every other
             // deadline-expiry path in this file.
-            if (\function_exists('posix_kill')) {
-                @\posix_kill($pid, \SIGKILL);
-            }
-            $status = 0;
-            \pcntl_waitpid($pid, $status);
+            $this->killAndReap($pid);
             \fclose($parentSocket);
             throw new \RuntimeException($e->getMessage());
         }
@@ -450,11 +474,7 @@ class RectorRunner implements RunnerInterface
             // that should be rare given forkAndExecute()'s own deadline already
             // covers the common "grandchild alone is wedged" case.
             if ($this->workerPid !== null) {
-                if (\function_exists('posix_kill')) {
-                    @\posix_kill($this->workerPid, \SIGKILL);
-                }
-                $status = 0;
-                \pcntl_waitpid($this->workerPid, $status);
+                $this->killAndReap($this->workerPid);
             }
             $this->forgetDeadWorker();
             throw new \RuntimeException($e->getMessage());
@@ -590,10 +610,7 @@ class RectorRunner implements RunnerInterface
                         // fix) has no upper bound of its own, so this is the one.
                         // Force it down and reap it so it never lingers as this
                         // worker's own zombie (the very failure #48 described).
-                        if (\function_exists('posix_kill')) {
-                            @\posix_kill($pid, \SIGKILL);
-                        }
-                        \pcntl_waitpid($pid, $status);
+                        $this->killAndReap($pid);
                         \fclose($parentSocket);
 
                         throw new \RuntimeException(
@@ -852,9 +869,12 @@ class RectorRunner implements RunnerInterface
      *   looping forever -- distinct from returning null (a real EOF), so the
      *   caller (runForked()) can tell "the worker is genuinely gone" apart from
      *   "the worker has gone quiet past its deadline" and react differently.
-     *   null (the default -- every caller except runForked()'s own call-response
-     *   read, e.g. boot()'s handshake) preserves the pre-#58 behaviour: loop on a
-     *   timeout forever, distinguishing only real EOF from a live peer.
+     *   null (the default) preserves the pre-#58 behaviour: loop on a timeout
+     *   forever, distinguishing only real EOF from a live peer. Every current
+     *   caller (boot()'s handshake, runForked()'s call-response read) now
+     *   passes a real deadline; null stays the default here for any FUTURE
+     *   readFrame()/readExactly() caller that has no --call-timeout budget of
+     *   its own to enforce.
      */
     private function readExactly($socket, int $length, ?int $deadlineNs = null): ?string
     {

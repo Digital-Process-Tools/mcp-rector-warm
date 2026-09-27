@@ -164,6 +164,17 @@ def process_descendants(root_pid: int) -> list[tuple[int, int, str]]:
     runs this on anything but ubuntu-latest.
     """
     proc = subprocess.run(["ps", "-eo", "pid,ppid,stat"], capture_output=True, text=True, timeout=10)
+    # A failed `ps` invocation (nonzero exit, e.g. a sandboxed/restricted
+    # environment) must never be read as "the daemon has no descendants" --
+    # self-review caught that an unchecked returncode makes exactly that
+    # mistake: empty/header-only stdout parses to an empty list either way, so
+    # "checked and clean" and "couldn't check, said clean anyway" would be
+    # indistinguishable to every caller of assert_no_zombie_descendants().
+    if proc.returncode != 0:
+        raise RuntimeError(
+            f"ps -eo pid,ppid,stat exited {proc.returncode}, cannot determine the daemon's process tree: "
+            f"stderr={proc.stderr!r}"
+        )
     by_ppid: dict[int, list[tuple[int, int, str]]] = {}
     for line in proc.stdout.splitlines()[1:]:
         parts = line.split(None, 2)
@@ -207,7 +218,10 @@ def assert_no_zombie_descendants(record_dir: Path, *, max_live: int | None = Non
         f"daemon (pid {pid}) has {len(zombies)} zombie/defunct descendant(s) after the call: {zombies} "
         f"-- full descendant list: {descendants}"
     )
-    live = [d for d in descendants if d not in zombies]
+    # The assert above only returns control when zombies == [], so descendants
+    # IS the live list by this point -- no separate filter needed (self-review
+    # caught the earlier version computing this redundantly).
+    live = descendants
     if max_live is not None:
         assert len(live) <= max_live, (
             f"daemon (pid {pid}) has {len(live)} live descendant(s), expected at most {max_live} -- "
