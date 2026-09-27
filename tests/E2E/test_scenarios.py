@@ -18,6 +18,13 @@ Scenario format (YAML) -- see CONTRIBUTING.md for a worked example:
   fixture: tests/Fixtures/project  # optional: dir (repo-relative) copied in first
   config: <rector.php source>      # optional; null = no rector.php; omitted = the
                                    #   fixture's own, else DEFAULT_CONFIG below
+  oracle: true                     # optional, default true. Set false when the fix
+                                   #   under test makes warm deliberately diverge from
+                                   #   a cold 'rector process' on the same tree (e.g.
+                                   #   #14: cold's own no-config default is exactly
+                                   #   the buggy behaviour being refused) -- skips the
+                                   #   cold-oracle comparison and the warm_boot check
+                                   #   for every in-tree call in the scenario.
   files: {rel/path.php: source}    # optional: files written on top
   steps:                           # required, run in order
     - write:  {path: rel, content: source}       # create or replace
@@ -91,7 +98,7 @@ return RectorConfig::configure()
     ]);
 """
 
-TOP_KEYS = {"description", "xfail", "fixture", "config", "files", "steps"}
+TOP_KEYS = {"description", "xfail", "fixture", "config", "oracle", "files", "steps"}
 STEP_KINDS = {"write", "edit", "delete", "rename", "call"}
 CALL_KEYS = {"call", "dry_run", "expect"}
 EXPECT_KEYS = {"changed", "changed_files", "diff_contains", "diff_excludes", "is_error", "error_class"}
@@ -248,6 +255,7 @@ def test_scenario(scenario_file: Path, data: dict[str, Any], tmp_path: Path) -> 
     record = tmp_path / "record"
     config = tree.root / "rector.php"
     call_steps = [step for step in data["steps"] if "call" in step]
+    oracle = data.get("oracle", True)
 
     async def run() -> tuple[int, list[Exception]]:
         calls_made = 0
@@ -264,15 +272,16 @@ def test_scenario(scenario_file: Path, data: dict[str, Any], tmp_path: Path) -> 
                 elif "rename" in step:
                     tree.rename(step["rename"]["from"], step["rename"]["to"])
                 else:
+                    in_tree_call = not os.path.isabs(step["call"])
                     cold_tree = None
-                    if not os.path.isabs(step["call"]):
+                    if oracle and in_tree_call:
                         # Snapshot BEFORE the warm call: an applying call rewrites the warm tree.
                         cold_tree = tmp_path / f"cold-{i}"
                         shutil.copytree(tree.root, cold_tree)
                         cold_tree = cold_tree.resolve()
                     await call_step(server, step, cold_tree, tree.root, in_tree_calls == 0, where)
                     calls_made += 1
-                    in_tree_calls += cold_tree is not None
+                    in_tree_calls += in_tree_call
             return calls_made, server.transport_errors
 
     calls_made, transport_errors = anyio.run(run)

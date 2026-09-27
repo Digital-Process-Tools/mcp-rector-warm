@@ -1,6 +1,11 @@
 description: A project with no rector.php; the call still answers, and nothing but JSON-RPC reaches stdout.
-xfail: "#14: with no rector.php, Rector writes a warning block to stdout"
 config: null
+# Cold `vendor/bin/rector process` on this same tree treats a missing config as
+# friendly onboarding: it prints a warning and reports success for a no-op
+# (#14). This is exactly the behaviour the fix refuses to reproduce -- warm
+# and cold are deliberately different here, so the cold oracle comparison
+# does not apply to this scenario.
+oracle: false
 files:
   src/Probe.php: |
     <?php
@@ -12,3 +17,6 @@ files:
     }
 steps:
   - call: src/Probe.php
+    expect:
+      is_error: false
+      error_class: RuntimeException

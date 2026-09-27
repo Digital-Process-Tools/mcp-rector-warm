@@ -3,6 +3,22 @@
 
 declare(strict_types=1);
 
+// Every PHP-level notice/deprecation/warning display goes to stderr, never
+// onto the JSON-RPC pipe on stdout (#15). This is PHP's own documented
+// destination switch: no fd surgery, no risk of invalidating the STDOUT
+// resource for whatever else in the process still legitimately expects it
+// to be a live stream (closing and reopening fd 1 was tried and made a real
+// container boot die silently, exit 255, nothing on stdout or stderr --
+// something downstream still expects \STDOUT to be a valid, open resource).
+ini_set('display_errors', 'stderr');
+
+// Duplicate the real stdout descriptor up front, before anything else runs:
+// handed explicitly to StdioTransport below, so the MCP transport keeps
+// writing to the real pipe even if something later closes/reopens the
+// STDOUT constant for its own reasons (the forked analysis child already
+// does exactly that to its own copy of fd 1/2 -- see RectorRunner::runForked()).
+$mcpStdout = @fopen('php://fd/1', 'wb') ?: STDOUT;
+
 @ini_set('memory_limit', '-1');
 // Dual-mode autoload: local clone vs. composer-global install.
 foreach ([
@@ -45,4 +61,4 @@ $server = Server::builder()
     ->setDiscovery(dirname(__DIR__), ['src'])
     ->build();
 
-$server->run(new StdioTransport());
+$server->run(new StdioTransport(output: $mcpStdout));

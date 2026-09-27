@@ -276,11 +276,42 @@ class RectorRunner implements RunnerInterface
             }
             require_once $scoperAutoload;
         }
-        // Resolve Rector configs and build container.
-        $resolver = new RectorConfigsResolver();
-        $bootstrapConfigs = $resolver->provide();
-        $factory = new RectorContainerFactory();
-        $container = $factory->createFromBootstrapConfigs($bootstrapConfigs);
+        // Resolve Rector configs and build the container. rector.php is a plain
+        // PHP file `require`d while resolving/building -- a project's own config
+        // (or a dependency it pulls in) can `echo` while it loads (#15), and that
+        // must never reach the MCP transport's stdout. Wrap the whole step the
+        // same way execute() already wraps $application->run() for Rector's own
+        // raw-echo JSON formatter: ob_start()/ob_get_clean() catches an explicit
+        // echo/print at PHP's output-buffer layer, before it ever becomes a raw
+        // write(1, ...); it does NOT catch a notice/deprecation/warning display
+        // (that bypasses the buffer stack entirely) -- display_errors=stderr,
+        // set in bin/mcp-rector-warm before any of this runs, covers that half.
+        ob_start();
+        try {
+            $resolver = new RectorConfigsResolver();
+            $bootstrapConfigs = $resolver->provide();
+            if ($bootstrapConfigs->getMainConfigFile() === null) {
+                // Rector's own CLI treats this as friendly onboarding: ProcessCommand
+                // sees !areSomeRectorsLoaded(), offers to generate a rector.php via
+                // SymfonyStyle, and returns Command::SUCCESS regardless (#14) -- a
+                // silent no-op reported as success, from a call whose console
+                // output we cannot even suppress: SymfonyStyle's ConsoleOutput
+                // writes straight to \STDOUT, bypassing this very ob_*() wrap (it
+                // holds a stream resource, not a userland echo). Never reach any
+                // of that: refuse before the container is even built, as a real,
+                // reported error the caller cannot mistake for a completed run.
+                throw new \RuntimeException(
+                    'No rector.php (or rector.dist.php) config found in the working '
+                    . 'directory, and no --config was given when the server started. '
+                    . 'Refusing to run Rector without a config: pass --config=PATH to '
+                    . 'mcp-rector-warm, or add a rector.php to the project.'
+                );
+            }
+            $factory = new RectorContainerFactory();
+            $container = $factory->createFromBootstrapConfigs($bootstrapConfigs);
+        } finally {
+            ob_end_clean();
+        }
 
         $this->prefix = $this->detectRectorPrefix();
         if ($this->prefix === null) {

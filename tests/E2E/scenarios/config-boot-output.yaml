@@ -1,5 +1,4 @@
 description: A rector.php that prints while it boots; that output must not reach the MCP stdout.
-xfail: "#15: rector.php boot output reaches stdout"
 config: |
   <?php
 
