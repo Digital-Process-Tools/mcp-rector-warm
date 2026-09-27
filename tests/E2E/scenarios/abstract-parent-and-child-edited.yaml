@@ -1,0 +1,59 @@
+description: An abstract base class and its child are both edited between warm calls (#5); the warm container must not crash with a null PHPStan scope ("Call to a member function toMutatingScope() on null") and must still answer like a cold run.
+files:
+  src/Base.php: |
+    <?php
+
+    declare(strict_types=1);
+
+    abstract class Base
+    {
+        abstract public function run(): void;
+
+        public function helper(): void
+        {
+        }
+    }
+  src/Child.php: |
+    <?php
+
+    declare(strict_types=1);
+
+    final class Child extends Base
+    {
+        public function run(): void
+        {
+            echo 'child';
+        }
+
+        public function helper(): void
+        {
+        }
+    }
+steps:
+  # First warm call, before either class is touched. Positive control: no
+  # attribute yet (Base::helper() is still empty-bodied, so the rule skips
+  # it; Base::run() is abstract and is always skipped by the rule regardless
+  # of the edits below).
+  - call: src/Child.php
+    expect: {is_error: false, changed: 0}
+  # Edit the ABSTRACT base class...
+  - edit:
+      path: src/Base.php
+      old: "public function helper(): void\n    {\n    }"
+      new: "public function helper(): void\n    {\n        echo 'base helper';\n    }"
+  # ...and the CHILD class, both between warm calls -- the issue's own repro shape.
+  - edit:
+      path: src/Child.php
+      old: "public function helper(): void\n    {\n    }"
+      new: "public function helper(): void\n    {\n        echo 'child helper';\n    }"
+  # The warm container must still answer -- no crash, no stale scope -- and match a
+  # cold run on the same edited tree (checked automatically by the oracle above).
+  # The attribute is now due to the Base::helper() body edit; the Child::helper()
+  # body edit does not itself change the rule's decision (only the parent's
+  # signature/body matters), so it exercises the "child file itself also
+  # changed" half of the issue's repro shape via the oracle and is_error only.
+  - call: src/Child.php
+    expect:
+      is_error: false
+      changed: 1
+      diff_contains: '+    #[\Override]'
