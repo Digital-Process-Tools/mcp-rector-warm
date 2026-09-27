@@ -15,7 +15,7 @@
   ],
   "labels": {
     "priority": [],
-    "lanes": [],
+    "lanes": ["lane-warm-state", "lane-protocol", "lane-tests"],
     "filed_by_loop": "filed-by-loop",
     "lane_other": "lane-other"
   },
