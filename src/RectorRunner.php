@@ -26,12 +26,13 @@ class RectorRunner implements RunnerInterface
     }
 
     /**
-     * Drop the warm container + application so the next run() boots fresh. Used to
-     * recover from warm-state corruption that resetReflectionState() cannot flush:
-     * PHPStan's NodeScopeResolver/reflection caches are not ResettableInterface
-     * services, so a class whose shape changed on disk between warm calls can yield
-     * a null scope deep in PHPStanNodeScopeResolver ("Call to a member function
-     * toMutatingScope() on null"). A fresh container is the only guaranteed reset.
+     * Drop the warm container + application so the next run() boots fresh. Used by
+     * the no-pcntl fallback before every warm call, and to recover from warm-state
+     * corruption: PHPStan's NodeScopeResolver/reflection caches are not
+     * ResettableInterface services, so a class whose shape changed on disk between
+     * warm calls can yield a null scope deep in PHPStanNodeScopeResolver ("Call to a
+     * member function toMutatingScope() on null"). A fresh container is the only
+     * guaranteed reset.
      */
     public function reboot(): void
     {
@@ -51,17 +52,14 @@ class RectorRunner implements RunnerInterface
         $warmBoot = $this->isWarm();
         if (!$warmBoot) {
             $this->boot();
-        } else {
-            // Warm reuse. PHPStan's own class reflection (and its per-class
-            // method/property caches) is not a ResettableInterface service and
-            // lives for the whole process, so a class edited on disk between
-            // calls is otherwise seen with its old shape forever -- no error,
-            // just a silently wrong diff (claude-supertool#8).
-            // resetReflectionState() alone (claude-supertool#273) only flushes
-            // the three services Rector itself resets between fixtures; it
-            // never touches PHPStan's caches.
-            $this->resetReflectionState();
         }
+        // Warm reuse must never analyse in the booted container itself. PHPStan's
+        // own class reflection (and its per-class method/property caches) is not a
+        // ResettableInterface service and lives for the whole process, so a class
+        // edited on disk between calls would otherwise be seen with its old shape
+        // forever -- no error, just a silently wrong diff (#8). Resetting Rector's
+        // ResettableInterface services between calls (claude-supertool#273) never
+        // touched those caches, so it is not a reset; the two paths below are.
 
         if ($this->canFork()) {
             // Isolate EVERY call (including the first, post-boot one) in a
@@ -73,8 +71,7 @@ class RectorRunner implements RunnerInterface
             return $this->runForked($argv, $warmBoot);
         }
 
-        // No pcntl (e.g. Windows): forking is unavailable, and
-        // resetReflectionState() alone is not a complete reset. The only
+        // No pcntl (e.g. Windows): forking is unavailable. The only
         // guaranteed-correct fallback is a fresh container before every warm
         // call -- slower than the warm path, but never wrong. warm_boot is
         // reported false: this call did not benefit from reuse.
@@ -303,41 +300,6 @@ class RectorRunner implements RunnerInterface
 
         $this->application = $app;
         $this->container = $container;
-    }
-
-    /**
-     * Reset Rector's per-run reflection state between warm calls. Mirrors
-     * AbstractRectorTestCase::setUp(), which resets every service implementing
-     * ResettableInterface so each fixture analyses with a fresh source locator.
-     * The warm daemon reuses one container across files and needs the same flush;
-     * without it the cached AggregateSourceLocator from the previous file poisons
-     * the next one (claude-supertool#273).
-     *
-     * Rector's own container is entropy/entropy's Container, which finds services
-     * by contract via findByContract() -- there is no tagged() method on it at
-     * all, so a method_exists($container, 'tagged') guard here always fails and
-     * this used to return before resetting anything (claude-supertool#8:
-     * AbstractRectorTestCase itself calls findByContract(ResettableInterface::class),
-     * confirmed against vendor/rector/rector/src/Testing/PHPUnit/AbstractRectorTestCase.php).
-     * Now that every warm call runs isolated in a forked child (see run()), this
-     * reset is no longer load-bearing for correctness, but it stays as the same
-     * defence-in-depth Rector's own test harness relies on -- so it needs to
-     * actually run rather than silently no-op.
-     */
-    private function resetReflectionState(): void
-    {
-        $container = $this->container;
-        if ($container === null || !method_exists($container, 'findByContract')) {
-            return;
-        }
-
-        /** @var iterable<object> $resettables */
-        $resettables = $container->findByContract(\Rector\Contract\DependencyInjection\ResettableInterface::class);
-        foreach ($resettables as $resettable) {
-            if (method_exists($resettable, 'reset')) {
-                $resettable->reset();
-            }
-        }
     }
 
     /**

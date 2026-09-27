@@ -1,5 +1,4 @@
 description: The parent class is renamed (file and class) and the child re-pointed; the old parent must not linger in the warm container.
-xfail: "#19: after the parent is renamed and the child re-pointed, the warm container still answers from the old parent (stale reflection)"
 files:
   src/Base.php: |
     <?php

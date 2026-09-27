@@ -1,5 +1,4 @@
 description: Editing the PARENT class of the processed file changes the result; the warm container must not answer from the old parent.
-xfail: "#19: an edit to the parent class is not seen by the warm container (stale reflection)"
 files:
   src/Base.php: |
     <?php

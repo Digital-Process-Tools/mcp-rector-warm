@@ -14,7 +14,7 @@ changes, the resulting file contents. An optional 'expect' block pins extra fact
 Scenario format (YAML) -- see CONTRIBUTING.md for a worked example:
 
   description: str                 # required, one line
-  xfail: "#8"                      # optional: a filed issue this scenario hits (strict)
+  xfail: "#16"                     # optional: a filed issue this scenario hits (strict)
   fixture: tests/Fixtures/project  # optional: dir (repo-relative) copied in first
   config: <rector.php source>      # optional; null = no rector.php; omitted = the
                                    #   fixture's own, else DEFAULT_CONFIG below

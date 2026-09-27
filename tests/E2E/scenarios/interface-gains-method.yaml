@@ -1,5 +1,4 @@
 description: An interface implemented by the processed class gains the method mid-session.
-xfail: "#19: an edit to an implemented interface is not seen by the warm container (stale reflection)"
 config: |
   <?php
 

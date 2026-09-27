@@ -133,7 +133,6 @@ def test_second_call_in_the_same_session_is_warm_and_agrees_with_the_first(proje
     assert normalise(second, project)["changed_files"] == ["src/Money.php"]
 
 
-@pytest.mark.xfail(strict=True, reason="#8: a second file in a warm session is not refactored")
 def test_a_different_second_file_in_a_warm_session_is_refactored(project: Path, record: Path) -> None:
     async def scenario():
         async with open_server(project, record, project / "rector.php") as server:

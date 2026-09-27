@@ -1,5 +1,4 @@
 description: A file created mid-session is picked up when the same directory is processed again.
-xfail: "#8 (reasoned, not verified): a file the session's first run did not see is not refactored -- the #8 symptom, reached through a directory run"
 files:
   src/Existing.php: |
     <?php
