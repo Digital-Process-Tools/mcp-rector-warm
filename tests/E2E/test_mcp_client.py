@@ -16,8 +16,8 @@ import pytest
 from mcp_types.version import HANDSHAKE_PROTOCOL_VERSIONS
 
 from mcp_harness import (
-    BIN,
     FIXTURE_PROJECT,
+    REPO,
     exit_record,
     non_jsonrpc_lines,
     normalise,
@@ -45,9 +45,16 @@ def record(tmp_path: Path) -> Path:
     return tmp_path / "record"
 
 
-def server_version_from_bin() -> str:
-    match = re.search(r"setServerInfo\('mcp-rector-warm',\s*'([^']+)'\)", BIN.read_text())
-    assert match, "could not read the server version from bin/mcp-rector-warm"
+def latest_released_version() -> str:
+    # Independent oracle for server_info.version (#59): the bin script used
+    # to hardcode a version string, and a test deriving its expectation from
+    # that same literal would pass no matter how stale it was. CHANGELOG.md's
+    # newest "## [x.y.z]" heading (never "## [Unreleased]") is what
+    # ServerVersion.resolve() itself falls back to for a git checkout with no
+    # reachable release tag, which is exactly this test's own environment.
+    changelog = (REPO / "CHANGELOG.md").read_text()
+    match = re.search(r"^## \[(\d+\.\d+\.\d+)\]", changelog, re.MULTILINE)
+    assert match, "could not find a released version heading in CHANGELOG.md"
     return match.group(1)
 
 
@@ -62,7 +69,7 @@ def test_initialize_negotiates_protocol_and_reports_server_info(project: Path, r
     assert init.protocol_version == EXPECTED_PROTOCOL
     assert session_version == init.protocol_version
     assert init.server_info.name == "mcp-rector-warm"
-    assert init.server_info.version == server_version_from_bin()
+    assert init.server_info.version == latest_released_version()
     assert init.capabilities.tools is not None, "server must advertise the tools capability"
 
 
