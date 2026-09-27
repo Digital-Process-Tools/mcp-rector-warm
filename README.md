@@ -70,17 +70,23 @@ Reads MCP JSON-RPC on stdin, writes responses on stdout.
 
 ## Benchmark
 
-Measured on a real DVSI codebase (Rector config with 677 paths, ~50KB target file):
+Measured with `tools/warm-vs-cold.py` on a real private production codebase (PHP 8.2.0, Apple Silicon, v0.5.0 at `4902c3d`): 20 files sampled across the tree, each run once through one warm server session and once through a fresh `rector process --dry-run`, cold runs serial so neither side shares CPU with the other.
 
-| Setup | Per-call wall | Notes |
-|-------|---------------|-------|
-| Cold rector CLI | ~4500ms | autoloader + container + ruleset each time |
-| **mcp-rector-warm (warm)** | **~500ms** | container reused, opcache hot |
-| Daemon cold boot | ~3000ms | paid **once** at server start |
+| Setup | median | p95 | Notes |
+|-------|--------|-----|-------|
+| Cold `rector process`, one file | 7.02s | 9.00s | autoloader + container + ruleset each time |
+| **mcp-rector-warm, later calls** | **0.68s** | **2.40s** | container reused |
+| mcp-rector-warm, first call | 10.1s | | boot, paid **once** per session |
 
-**~9× faster per call.** For a tool running Rector after 100 edits: **7.5 min → 50s.**
+**~10× faster per call at the median.** 20 files: **144s cold → 30s warm**, first call's boot included. All 20 warm answers matched the cold ones.
 
-Numbers vary with project size and rule set. The win is the cold-start amortization, not magic.
+Numbers vary with project size and rule set. The win is the cold-start amortization, not magic. Reproduce on your own project:
+
+```bash
+python3 tools/warm-vs-cold.py --project /path/to/project --files 'src/**/*.php' --limit 20 --jobs 1 --out /tmp/wvc
+```
+
+The script needs the Python MCP client from `tests/E2E/requirements.txt`, and writes the timings to `report.md` in `--out`.
 
 ## Compatibility
 
