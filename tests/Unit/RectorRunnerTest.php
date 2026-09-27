@@ -479,6 +479,94 @@ final class RectorRunnerTest extends TestCase
     }
 
     /**
+     * #58, no-pcntl fallback: runCold()'s own deadline enforcement
+     * (proc_get_status()/proc_terminate() polling, added because proc_close()
+     * used to block unconditionally) has a DIFFERENT kill mechanism than the two
+     * pcntl-path loops (posix_kill()+pcntl_waitpid() there vs. proc_terminate()
+     * here) and is otherwise untested. Forces canFork() false so this always
+     * exercises the fallback, independent of whether pcntl happens to be
+     * available in whatever environment runs this suite -- unlike the pcntl
+     * tests above, this one needs no skip guard.
+     *
+     * This spawns a REAL bin/rector-cold-call.php subprocess and boots a real
+     * (tiny) Rector container in it, so it is slower than the other unit tests
+     * here; the wedge itself is a rule that sleep()s, the same technique as
+     * tests/E2E/scenarios/slow-call-over-socket-timeout.yaml and this file's
+     * own wedged-call test above.
+     */
+    public function testColdCallIsKilledAtItsDeadlineWithoutPcntl(): void
+    {
+        $tmp = sys_get_temp_dir() . '/rector-runner-cold-timeout-test-' . bin2hex(random_bytes(8));
+        mkdir($tmp);
+        mkdir($tmp . '/src');
+        file_put_contents(
+            $tmp . '/src/Foo.php',
+            "<?php\n\ndeclare(strict_types=1);\n\nfinal class Foo\n{\n}\n",
+        );
+        file_put_contents(
+            $tmp . '/rector.php',
+            "<?php\n\n"
+            . "declare(strict_types=1);\n\n"
+            . "use PhpParser\\Node;\n"
+            . "use PhpParser\\Node\\Stmt\\Class_;\n"
+            . "use Rector\\Config\\RectorConfig;\n"
+            . "use Rector\\Rector\\AbstractRector;\n\n"
+            . "final class WedgedColdRector extends AbstractRector\n"
+            . "{\n"
+            . "    public function getNodeTypes(): array\n"
+            . "    {\n"
+            . "        return [Class_::class];\n"
+            . "    }\n\n"
+            . "    public function refactor(Node \$node): ?Node\n"
+            . "    {\n"
+            . "        sleep(30);\n\n"
+            . "        return null;\n"
+            . "    }\n"
+            . "}\n\n"
+            . "return RectorConfig::configure()->withRules([WedgedColdRector::class]);\n",
+        );
+        $previousCwd = getcwd();
+        $previousArgv = $_SERVER['argv'] ?? ['rector'];
+
+        try {
+            chdir($tmp);
+            $_SERVER['argv'] = ['rector'];
+
+            // 5s deadline: generous room over the real container-boot cost this
+            // path pays every call (no warm reuse, by construction), while still
+            // far under the sleep(30) the rule itself would otherwise block on.
+            $runner = new class(5) extends RectorRunner {
+                protected function canFork(): bool
+                {
+                    return false;
+                }
+            };
+
+            $start = microtime(true);
+            try {
+                $runner->run(['rector', 'process', '--', $tmp . '/src/Foo.php']);
+                self::fail('expected the wedged cold call to throw a timeout error');
+            } catch (\RuntimeException $e) {
+                self::assertStringContainsString('--call-timeout', $e->getMessage());
+                self::assertStringContainsString('cold rector subprocess', $e->getMessage());
+            }
+            $elapsed = microtime(true) - $start;
+            self::assertLessThan(
+                25.0,
+                $elapsed,
+                "the cold subprocess must be killed at roughly its 5s deadline, not left to hang -- took {$elapsed}s",
+            );
+        } finally {
+            chdir($previousCwd);
+            $_SERVER['argv'] = $previousArgv;
+            unlink($tmp . '/rector.php');
+            unlink($tmp . '/src/Foo.php');
+            rmdir($tmp . '/src');
+            rmdir($tmp);
+        }
+    }
+
+    /**
      * #63: resolveBootstrapFileHashes() fails open (returns []) when
      * SimpleParameterProvider::provideArrayParameter() throws, so a boot with a
      * genuinely broken bootstrap-file resolution looks identical -- from the

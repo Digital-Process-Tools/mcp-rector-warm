@@ -98,12 +98,18 @@ class RectorRunner implements RunnerInterface
      *  actually pass. */
     private int $callTimeoutSeconds;
 
-    /** Set once, at process start, by bin/mcp-rector-warm's --call-timeout parsing
-     *  (or bin/rector-cold-call.php's, for the no-pcntl one-shot subprocess) --
-     *  before any RectorTool/RectorRunner is constructed. Never read directly:
-     *  every RectorRunner instance resolves its OWN $callTimeoutSeconds once, in
-     *  its constructor, so a later call to this setter cannot change the timeout
-     *  an already-built instance enforces mid-call. */
+    /** Set once, at process start, by bin/mcp-rector-warm's --call-timeout parsing,
+     *  before any RectorTool/RectorRunner is constructed. bin/rector-cold-call.php
+     *  -- the no-pcntl one-shot subprocess spawned BY runCold() -- never calls this
+     *  setter and never needs to: its own RectorRunner only ever reaches
+     *  runOnceInThisProcess() -> execute(), never forkAndExecute()/runForked(), so
+     *  its $callTimeoutSeconds is simply unused; the deadline for a cold call is
+     *  enforced one level up, by the DAEMON's own runCold() (the process that
+     *  spawned and is timing that subprocess), not inside the subprocess itself.
+     *  Never read directly: every RectorRunner instance resolves its OWN
+     *  $callTimeoutSeconds once, in its constructor, so a later call to this
+     *  setter cannot change the timeout an already-built instance enforces
+     *  mid-call. */
     private static ?int $defaultCallTimeoutSeconds = null;
 
     public static function setDefaultCallTimeoutSeconds(int $seconds): void
@@ -684,13 +690,26 @@ class RectorRunner implements RunnerInterface
                         break;
                     }
                     if (\hrtime(true) >= $deadline) {
-                        // SIGKILL, not the proc_terminate() default (SIGTERM): a
-                        // wedged process (the reason this branch exists) is, by
-                        // definition, not responding to signals it could choose
-                        // to handle -- consistent with the pcntl paths above,
-                        // which also go straight to SIGKILL rather than asking
-                        // nicely first.
-                        \proc_terminate($process, \SIGKILL);
+                        // Signal 9 (SIGKILL), NOT the \SIGKILL constant: this whole
+                        // branch is the fallback for when pcntl is unavailable
+                        // (Windows, or #18's disable_functions case) -- the ONE
+                        // platform band this code exists for -- and \SIGKILL is
+                        // defined by the pcntl extension, not by core PHP or by
+                        // proc_open()'s own family of functions. Referencing it
+                        // here would throw "Undefined constant SIGKILL" on exactly
+                        // the builds this fallback is for, in the one branch meant
+                        // to make a wedged call fail cleanly instead of hanging.
+                        // The literal is safe everywhere: POSIX assigns 9 to
+                        // SIGKILL universally, and proc_terminate()'s signal
+                        // parameter is documented as ignored on Windows (it calls
+                        // TerminateProcess() instead), so passing 9 there is a
+                        // harmless no-op rather than a platform mismatch. Not
+                        // asking nicely first (SIGTERM, proc_terminate()'s own
+                        // default) for the same reason the pcntl paths above go
+                        // straight to a hard kill: a wedged process is, by
+                        // definition, not responding to signals it could choose to
+                        // handle.
+                        \proc_terminate($process, 9);
                         \proc_close($process);
 
                         throw new \RuntimeException(
@@ -823,9 +842,15 @@ class RectorRunner implements RunnerInterface
                 $meta = \stream_get_meta_data($socket);
                 if ($meta['timed_out'] ?? false) {
                     if ($deadlineNs !== null && \hrtime(true) >= $deadlineNs) {
+                        // No specific "Ns" figure here, deliberately: this method
+                        // has no idea whether its caller's $deadlineNs is the bare
+                        // --call-timeout value or one with a grace period added
+                        // (runForked() passes callDeadlineNs(RUN_FORKED_DEADLINE_
+                        // GRACE_SECONDS), never the bare $this->callTimeoutSeconds)
+                        // -- a message quoting $this->callTimeoutSeconds here would
+                        // understate how long this specific wait actually ran.
                         throw new RectorCallTimeoutException(
-                            "rector call exceeded {$this->callTimeoutSeconds}s (--call-timeout) "
-                            . 'waiting on the warm worker',
+                            'rector call exceeded its configured --call-timeout waiting on the warm worker',
                         );
                     }
                     continue;
@@ -1051,8 +1076,8 @@ class RectorRunner implements RunnerInterface
      * SimpleParameterProvider class or its Option::BOOTSTRAP_FILES key ever moves
      * upstream -- missing this file-list must never break a boot that otherwise
      * succeeded, only quietly lose the "picked up a bootstrap edit" behaviour this
-     * method exists for. Unlike execute()'s ConfigInitializer check further down in
-     * this file (deliberately left UNCAUGHT -- see the comment there), this one is a
+     * method exists for. Unlike execute()'s ConfigInitializer check earlier in this
+     * file (deliberately left UNCAUGHT -- see the comment there), this one is a
      * genuine try/catch, so the catch branch writes one line to stderr (#63):
      * display_errors=stderr is already set (bin/mcp-rector-warm), so this lands in
      * the same server logs a boot failure would, instead of a silent, permanent
