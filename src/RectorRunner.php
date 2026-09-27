@@ -870,11 +870,13 @@ class RectorRunner implements RunnerInterface
      *   caller (runForked()) can tell "the worker is genuinely gone" apart from
      *   "the worker has gone quiet past its deadline" and react differently.
      *   null (the default) preserves the pre-#58 behaviour: loop on a timeout
-     *   forever, distinguishing only real EOF from a live peer. Every current
-     *   caller (boot()'s handshake, runForked()'s call-response read) now
-     *   passes a real deadline; null stays the default here for any FUTURE
-     *   readFrame()/readExactly() caller that has no --call-timeout budget of
-     *   its own to enforce.
+     *   forever, distinguishing only real EOF from a live peer. Two of THREE
+     *   current callers now pass a real deadline (boot()'s handshake,
+     *   runForked()'s call-response read); the third, serveWorker()'s own
+     *   idle-between-calls readFrame(), deliberately keeps the null default --
+     *   a worker legitimately blocks indefinitely waiting for its NEXT request
+     *   from the daemon, which is not a call in progress and has no
+     *   --call-timeout budget to spend while idle.
      */
     private function readExactly($socket, int $length, ?int $deadlineNs = null): ?string
     {
