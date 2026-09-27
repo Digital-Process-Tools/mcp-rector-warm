@@ -118,6 +118,27 @@ Returns:
 
 `warm_boot: true` ⇒ container reused. `false` ⇒ first call (cold boot just finished).
 
+**Failure is reported as an MCP tool error.** A rejected path (outside the
+working dir), a nonexistent path, or an exception raised inside Rector itself
+all come back as a tool result with `isError: true`, so an MCP host can see
+the failure and surface it instead of treating a broken call as a success.
+The structured details survive in `structuredContent`:
+
+```json
+{
+  "exit_code": -1,
+  "output": "",
+  "warm_boot": false,
+  "error": "rector_process: path is outside the configured working directory.",
+  "error_class": "SecurityError",
+  "trace": ""
+}
+```
+
+The tool also declares its behavior via MCP tool annotations: `readOnlyHint:
+false` (a non-dry-run call writes files), `destructiveHint: true`,
+`idempotentHint: false`, `openWorldHint: false`.
+
 ## How it works
 
 Three decisions worth knowing:
