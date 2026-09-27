@@ -18,5 +18,5 @@ files:
 steps:
   - call: src/Probe.php
     expect:
-      is_error: false
+      is_error: true    # a refused call is an MCP tool error (#16)
       error_class: RuntimeException
