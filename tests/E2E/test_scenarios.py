@@ -227,15 +227,17 @@ def as_list(value: Any) -> list[str]:
     return [value] if isinstance(value, str) else list(value)
 
 
-# A write/edit/delete/rename on the resolved main config file (#20), OR on a path the
-# scenario names in its own 'bootstrap_files' list (#33), forces the NEXT in-tree call
-# to reboot: warm_boot must be False for that one call, then True again from the call
-# after, once the parent has re-booted from the new config/bootstrap files. Bootstrap
-# files are scenario-specific (declared inside the scenario's own 'config:' via
-# withBootstrapFiles()), unlike the two fixed main-config names, so the watched set is
-# built per scenario rather than being a fixed module-level constant like the old
-# CONFIG_FILE_NAMES-only check was.
-CONFIG_FILE_NAMES = {"rector.php", "rector.dist.php"}
+# A write/edit/delete/rename on the resolved main config file (#20), on composer.json
+# (#34 -- withPhpSets() with no argument reads its require.php once at boot), OR on a
+# path the scenario names in its own 'bootstrap_files' list (#33), forces the NEXT
+# in-tree call to reboot: warm_boot must be False for that one call, then True again
+# from the call after, once the parent has re-booted from the new config/bootstrap
+# files. Bootstrap files are scenario-specific (declared inside the scenario's own
+# 'config:' via withBootstrapFiles()), unlike the three fixed names below (composer.json
+# is a fixed project-root name, exactly like rector.php/rector.dist.php, never declared
+# per scenario), so the watched set is built per scenario rather than being a fixed
+# module-level constant like the old CONFIG_FILE_NAMES-only check was.
+CONFIG_FILE_NAMES = {"rector.php", "rector.dist.php", "composer.json"}
 
 
 def step_touches_config(step: dict[str, Any], watched: set[str]) -> bool:

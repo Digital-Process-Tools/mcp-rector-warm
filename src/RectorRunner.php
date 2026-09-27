@@ -68,6 +68,21 @@ class RectorRunner implements RunnerInterface
      *  @var array<string, string|null> */
     private array $bootstrapFileHashes = [];
 
+    /** Absolute path of the project's composer.json (getcwd() . '/composer.json', matching
+     *  ensureProjectAutoloaded()'s own resolution -- bin/mcp-rector-warm chdir()s to
+     *  --working-dir before anything forks) as resolved the last time a worker booted, or
+     *  null when the file does not exist. withPhpSets() called with no argument reads this
+     *  file's `require.php` once, at boot, to pick its rule sets -- unlike rector.php itself
+     *  or a withBootstrapFiles() file, composer.json is never required by rector.php, so a
+     *  mid-session edit to it went undetected by configFileChanged() and the worker kept
+     *  serving the PHP-set selection from the stale constraint (#34). Refreshed the same way
+     *  $configFile is: resolving the path and hashing its bytes never requires the file. */
+    private ?string $composerFile = null;
+
+    /** sha256 of $composerFile's contents as of the last successful boot, or null when
+     *  $composerFile is null. Same rationale and comparison method as $configFileHash. */
+    private ?string $composerFileHash = null;
+
     public function isWarm(): bool
     {
         return $this->workerPid !== null;
@@ -835,6 +850,19 @@ class RectorRunner implements RunnerInterface
     }
 
     /**
+     * Resolve the project's composer.json the same way ensureProjectAutoloaded() resolves
+     * vendor/autoload.php: relative to getcwd(), which bin/mcp-rector-warm has already
+     * chdir()'d to --working-dir before this (or any forked worker) process runs. Used by
+     * configFileChanged() and refreshConfigFileState() (#34).
+     */
+    private function resolveComposerFile(): ?string
+    {
+        $path = getcwd() . '/composer.json';
+
+        return is_file($path) ? $path : null;
+    }
+
+    /**
      * Hash every file the loaded config registered via withBootstrapFiles(), for
      * configFileChanged() (#33). Only callable AFTER createFromBootstrapConfigs() has
      * actually required rector.php: the list of bootstrap files is not resolvable from
@@ -884,6 +912,10 @@ class RectorRunner implements RunnerInterface
         }
         $this->configFile = $mainConfigFile;
         $this->configFileHash = $this->hashConfigFile($mainConfigFile);
+
+        $composerFile = $this->resolveComposerFile();
+        $this->composerFile = $composerFile;
+        $this->composerFileHash = $this->hashConfigFile($composerFile);
     }
 
     /**
@@ -931,11 +963,13 @@ class RectorRunner implements RunnerInterface
      * Known limitation, not silently ignored: this loads the project autoloader once, at
      * boot, in a worker process that then serves every warm call for the rest of its
      * session. A `composer dump-autoload` mid-session (a newly generated class in the
-     * project's classmap) is invisible until the worker next reboots -- the same class of
-     * staleness #20 (PR #29) already accepts for rector.php itself between edits, not
-     * newly introduced here. Extending change detection to the project's own
-     * vendor/composer/installed.php is a separate, wider change, left to #33/#34's own
-     * "widen the watched-file set" discussion rather than folded in here.
+     * project's classmap, with composer.json itself untouched) is invisible until the
+     * worker next reboots -- the same class of staleness #20 (PR #29) already accepts for
+     * rector.php itself between edits, not newly introduced here. #34 closed the narrower
+     * gap (composer.json's own bytes -- read by withPhpSets() -- are now tracked by
+     * configFileChanged() via resolveComposerFile()); extending detection further, to the
+     * project's own vendor/composer/installed.php so a dump-autoload with no composer.json
+     * edit is also caught, remains a separate, wider change.
      */
     private function ensureProjectAutoloaded(): void
     {
@@ -962,8 +996,10 @@ class RectorRunner implements RunnerInterface
      * mode, and the file is a handful of KB: cheap to hash before every call next to the
      * reboot it may trigger.
      *
-     * The resolved main config file AND every file the config registered via
-     * withBootstrapFiles() are tracked this way (#33) -- see resolveBootstrapFileHashes().
+     * The resolved main config file, every file the config registered via
+     * withBootstrapFiles() (#33) -- see resolveBootstrapFileHashes() -- and the project's
+     * composer.json (#34) -- see resolveComposerFile(), needed because withPhpSets() with no
+     * argument reads composer.json's require.php once at boot -- are all tracked this way.
      * A rector.php that itself requires/includes some OTHER shared file directly (not via
      * withBootstrapFiles()) is a known limitation, not silently ignored: building the DI
      * container in bootInPlace() autoloads hundreds of unrelated classes through the same
@@ -998,6 +1034,15 @@ class RectorRunner implements RunnerInterface
             if ($this->hashConfigFile($bootstrapFile) !== $hash) {
                 return true;
             }
+        }
+
+        $composerFile = $this->resolveComposerFile();
+        if ($composerFile !== $this->composerFile) {
+            return true;
+        }
+
+        if ($this->hashConfigFile($composerFile) !== $this->composerFileHash) {
+            return true;
         }
 
         return false;
