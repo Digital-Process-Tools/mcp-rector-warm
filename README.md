@@ -97,7 +97,7 @@ Reads MCP JSON-RPC on stdin, writes responses on stdout.
 |------|---------|---------|
 | `--working-dir=PATH` | current directory | `chdir()`s here before anything else runs; `rector_process` refuses any path outside it. |
 | `--config=PATH` | Rector's own resolution (`rector.php`/`rector.dist.php` in `--working-dir`) | Passed straight through to Rector; not parsed by mcp-rector-warm itself. |
-| `--call-timeout=SECONDS` | `600` | Hard per-call deadline, independent of PHP's `default_socket_timeout` ([#32](https://github.com/Digital-Process-Tools/mcp-rector-warm/issues/32)): a call still working past `default_socket_timeout` keeps going, but one that outruns `--call-timeout` is killed and reported as an error instead of blocking the caller forever ([#58](https://github.com/Digital-Process-Tools/mcp-rector-warm/issues/58)). `0` disables it. Measured on a real project: 0.3-2.4s per warm call, ~10s for the first (container-building) call — 600s never cuts off real work. |
+| `--call-timeout=SECONDS` | `600` | Hard per-call deadline, independent of PHP's `default_socket_timeout` ([#32](https://github.com/Digital-Process-Tools/mcp-rector-warm/issues/32)): a call still working past `default_socket_timeout` keeps going, but one that outruns `--call-timeout` is killed and reported as an error instead of blocking the caller forever ([#58](https://github.com/Digital-Process-Tools/mcp-rector-warm/issues/58)). `0` disables it. Measured on a real project: 0.3-2.4s per warm call, ~10s for the first (container-building) call — 600s never cuts off real work. The kill is an unconditional SIGKILL with no grace for an in-flight file write, so while this deadline is active (nonzero), `rector_process` refuses any `dryRun: false` call outright rather than risk a truncated file with no backup ([#72](https://github.com/Digital-Process-Tools/mcp-rector-warm/issues/72)); pass `--call-timeout=0` if you need to apply changes. |
 
 ## Benchmark
 
@@ -145,7 +145,7 @@ Run Rector on a path.
 | Argument | Type | Default | Description |
 |----------|------|---------|-------------|
 | `path` | string | required | Absolute path to file or directory under the working dir |
-| `dryRun` | bool | `true` | Preview changes only. `false` writes them. |
+| `dryRun` | bool | `true` | Preview changes only. `false` writes them. Refused when a nonzero `--call-timeout` deadline is active ([#72](https://github.com/Digital-Process-Tools/mcp-rector-warm/issues/72)); use `--call-timeout=0` to apply changes. |
 
 Returns:
 

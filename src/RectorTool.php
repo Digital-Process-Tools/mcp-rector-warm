@@ -69,6 +69,32 @@ final class RectorTool
             ]);
         }
 
+        // #72: every --call-timeout kill site (RectorRunner::killAndReap(),
+        // the worker backstop, the no-pcntl proc_terminate() path) sends an
+        // unconditional SIGKILL/signal 9 with no grace for an in-flight file
+        // write. Rector writes each changed file by truncating it and then
+        // writing the new content (vendor rector's FileProcessor ->
+        // Nette\Utils\FileSystem::write() -> file_put_contents()); a kill
+        // landing mid-write leaves that file truncated with no copy of its
+        // original content anywhere -- Rector's in-memory copy dies with the
+        // killed process. A dry-run call never writes, so it is always safe
+        // to kill regardless of the deadline. Refuse instead, before the run
+        // ever starts, rather than risk data loss no caller was warned about:
+        // the caller must either keep dryRun:true, or restart the server with
+        // --call-timeout=0 (unlimited, the pre-#58 behaviour) to apply changes.
+        if (!$dryRun && $this->runner->getCallTimeoutSeconds() > 0) {
+            return self::errorResult([
+                'exit_code'   => -1,
+                'output'      => '',
+                'warm_boot'   => $this->runner->isWarm(),
+                'error'       => 'rector_process: refusing dryRun:false while a --call-timeout deadline is '
+                    . 'active. A killed rector call can leave a file truncated mid-write with no backup. '
+                    . 'Restart the server with --call-timeout=0 to apply changes, or keep dryRun:true.',
+                'error_class' => 'UnsafeCallTimeoutError',
+                'trace'       => '',
+            ]);
+        }
+
         // --debug disables parallel mode + suppresses file_diffs in JSON output.
         // We keep it for speed: parallel mode on 1 file is 14s overhead because rector
         // still scans all configured paths at boot. Single-thread bypasses the worker

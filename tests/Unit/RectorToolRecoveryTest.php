@@ -67,6 +67,11 @@ final class RectorToolRecoveryTest extends TestCase
             {
                 ++$this->reboots;
             }
+
+            public function getCallTimeoutSeconds(): int
+            {
+                return 0;
+            }
         };
 
         $tool = RectorTool::withRunner($fake);
@@ -98,6 +103,11 @@ final class RectorToolRecoveryTest extends TestCase
             public function reboot(): void
             {
                 ++$this->reboots;
+            }
+
+            public function getCallTimeoutSeconds(): int
+            {
+                return 0;
             }
         };
 
@@ -134,6 +144,11 @@ final class RectorToolRecoveryTest extends TestCase
             public function reboot(): void
             {
                 ++$this->reboots;
+            }
+
+            public function getCallTimeoutSeconds(): int
+            {
+                return 0;
             }
         };
 

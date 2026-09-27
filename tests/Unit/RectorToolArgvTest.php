@@ -57,6 +57,11 @@ final class RectorToolArgvTest extends TestCase
             public function reboot(): void
             {
             }
+
+            public function getCallTimeoutSeconds(): int
+            {
+                return 0;
+            }
         };
 
         $tool = RectorTool::withRunner($fake);

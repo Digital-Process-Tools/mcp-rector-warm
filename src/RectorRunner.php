@@ -132,6 +132,12 @@ class RectorRunner implements RunnerInterface
         return $this->workerPid !== null;
     }
 
+    /** @inheritDoc */
+    public function getCallTimeoutSeconds(): int
+    {
+        return $this->callTimeoutSeconds;
+    }
+
     /**
      * Tear down the warm worker (if any) so the next run() boots a fresh one in a brand
      * new, never-booted child. Used by RectorTool to recover from warm-state corruption:
