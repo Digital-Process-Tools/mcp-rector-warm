@@ -1,0 +1,38 @@
+description: A rector.php that loads but registers zero rules; onboarding text must not reach MCP stdout.
+config: |
+  <?php
+
+  declare(strict_types=1);
+
+  use Rector\Config\RectorConfig;
+
+  return RectorConfig::configure();
+# Cold `vendor/bin/rector process` on this same tree treats zero registered
+# rules as friendly onboarding too: it prints a warning and reports success
+# for a no-op (#27, follow-up to #14). Warm is deliberately different here --
+# it refuses instead of leaking that text through the MCP transport -- so the
+# cold-oracle comparison does not apply to this scenario.
+oracle: false
+files:
+  src/Probe.php: |
+    <?php
+
+    declare(strict_types=1);
+
+    final class Probe
+    {
+    }
+steps:
+  - call: src/Probe.php
+    expect:
+      is_error: true    # a refused call is an MCP tool error (#16)
+      error_class: RuntimeException
+      # The message must name the real reason (no rules registered), not the
+      # fork path's own unrelated crash: on this repo's only CI leg (and any
+      # box with pcntl), the forked child's fd0/1/2 close-and-reopen dance
+      # (RectorRunner::runForked()) invalidates SymfonyStyle's ConsoleOutput
+      # stream before it can write the onboarding text, so the call already
+      # comes back as a RuntimeException with a *different*, useless message
+      # ("fwrite(): supplied resource is not a valid stream resource") even
+      # without any fix for #27 -- this assertion is what tells the two apart.
+      error_contains: "no rules"

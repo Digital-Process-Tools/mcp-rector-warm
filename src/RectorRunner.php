@@ -242,6 +242,35 @@ class RectorRunner implements RunnerInterface
         $outputClass = $this->outputClass;
         \assert($inputClass !== null && $outputClass !== null);
         \assert($this->application !== null);
+        \assert($this->container !== null);
+
+        // A rector.php that loads fine but registers zero rules (and zero sets)
+        // hits ProcessCommand::execute()'s own "!areSomeRectorsLoaded()" onboarding
+        // branch, which prints through the SymfonyStyle service -- backed by a
+        // ConsoleOutput that holds a stream resource on the REAL \STDOUT, bypassing
+        // the ob_*() wrap below entirely (#27, follow-up to #14's "no config file
+        // at all" case already refused in boot()). Ask the same question boot()
+        // asks, one level later, before $application->run() is ever called: a real,
+        // reported error the caller cannot mistake for a completed run, and
+        // Rector's onboarding text never reaches this process's stdout in either
+        // the forked or the no-pcntl fallback path (both call this same method).
+        // Fails open (no guard) if ConfigInitializer is ever renamed/removed
+        // upstream: this check is additive, not a hard new dependency for the rest
+        // of the runner.
+        if (\class_exists(\Rector\Configuration\ConfigInitializer::class)) {
+            $configInitializer = $this->container->get(\Rector\Configuration\ConfigInitializer::class);
+            if (
+                \is_object($configInitializer)
+                && \method_exists($configInitializer, 'areSomeRectorsLoaded')
+                && !$configInitializer->areSomeRectorsLoaded()
+            ) {
+                throw new \RuntimeException(
+                    'The rector.php config loaded, but registers no rules or sets. '
+                    . 'Refusing to run Rector with nothing to do: add ->withRules() '
+                    . 'or ->withSets() (or a preset) to the config.'
+                );
+            }
+        }
 
         // ArgvInput expects $_SERVER['argv'] semantics: [scriptName, ...args]
         $input = new $inputClass($argv);
