@@ -42,6 +42,19 @@ final class ServerStdioTest extends TestCase
         rmdir($dir);
     }
 
+    /**
+     * True when this PHP process can fork, i.e. the same gate
+     * RectorRunner::canFork() checks. When false, RectorRunner falls back to a
+     * full reboot before every call (#8), so no later call is ever reported
+     * warm — that is the fallback's whole point, not a bug in it.
+     */
+    private static function expectsForkedWarmth(): bool
+    {
+        return \function_exists('pcntl_fork')
+            && \function_exists('pcntl_waitpid')
+            && \function_exists('stream_socket_pair');
+    }
+
     public static function setUpBeforeClass(): void
     {
         self::$bin = dirname(__DIR__, 2) . '/bin/mcp-rector-warm';
@@ -132,7 +145,13 @@ final class ServerStdioTest extends TestCase
         $third = array_values(array_filter($responses, fn($r) => ($r['id'] ?? null) === 3))[0] ?? null;
         self::assertNotNull($third, 'no response for id=3');
         $structured = $third['result']['structuredContent'];
-        self::assertTrue($structured['warm_boot'], 'second tools/call should reuse warm container');
+        self::assertSame(
+            self::expectsForkedWarmth(),
+            $structured['warm_boot'],
+            self::expectsForkedWarmth()
+                ? 'second tools/call should reuse warm container'
+                : 'without pcntl, RectorRunner reboots before every call, so the second call is cold too',
+        );
     }
 
     /**
@@ -175,12 +194,16 @@ final class ServerStdioTest extends TestCase
             file_put_contents($file, $this->probeClass(withChange: true));
             touch($file, time() + 5);
 
-            // Same warm container must re-read the file and report the change.
+            // With pcntl, the same warm container must re-read the file and report the
+            // change. Without it, RectorRunner reboots before this call (#8's fallback),
+            // so warm_boot is legitimately false here too — the guarantee that matters in
+            // that mode is correctness (below), not warmth.
             $this->send($proc['stdin'], $this->processCall(3, $file));
             $second = $this->readResponse($proc['stdout'], 3);
-            self::assertTrue(
+            self::assertSame(
+                self::expectsForkedWarmth(),
                 $second['result']['structuredContent']['warm_boot'],
-                'second call should reuse the warm container' . $this->stderrTail($proc['stderr'])
+                'second call warm_boot mismatch' . $this->stderrTail($proc['stderr'])
             );
             self::assertNotSame(-1, $this->changedFiles($second), 'rector output was unparseable' . $this->stderrTail($proc['stderr']));
             self::assertSame(
