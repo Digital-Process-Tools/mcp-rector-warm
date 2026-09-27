@@ -342,15 +342,18 @@ class RectorRunner implements RunnerInterface
             // Grandchild: analyse in isolation, report the result over the socket, then
             // exit. This is a real forked OS process -- it owns a private
             // copy-on-write copy of the worker's memory, including the worker's
-            // stdio file descriptors (which are themselves already redirected to
-            // /dev/null-equivalents, since the worker is not the MCP daemon and
-            // never legitimately writes to the real transport). A stray PHP
-            // warning/deprecation notice during analysis -- routine for PHPStan on
-            // real-world code -- must never land on a pipe something else is
-            // reading a protocol from. Close and reopen fd 0/1/2 onto /dev/null
-            // before running anything: this process exits right after this call
-            // and never legitimately needs them, and $childSocket lives on its own
-            // fd above 2 so it is unaffected.
+            // stdio file descriptors -- which are NOT redirected (the worker itself
+            // still inherits the daemon's real stdin/stdout/stderr unredirected;
+            // attempted as a #31 follow-up and reverted after it interacted badly
+            // with PHP's own resource-refcount GC, see the commit that added this
+            // comment for the mechanism -- a real, open gap, not fixed here). A
+            // stray PHP warning/deprecation notice during analysis -- routine for
+            // PHPStan on real-world code -- must never land on a pipe something
+            // else is reading a protocol from. Close and reopen fd 0/1/2 onto
+            // /dev/null before running anything, in THIS grandchild at least: this
+            // process exits right after this call and never legitimately needs
+            // them, and $childSocket lives on its own fd above 2 so it is
+            // unaffected.
             \fclose($parentSocket);
             if (\defined('STDIN')) {
                 @\fclose(\STDIN);

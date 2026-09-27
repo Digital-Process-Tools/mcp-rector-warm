@@ -288,4 +288,96 @@ final class RectorRunnerTest extends TestCase
             rmdir($tmp);
         }
     }
+
+    /**
+     * #31 follow-up: a worker killed (crashed, OOM-killed) between calls used to leave
+     * isWarm() reporting true forever, since only an explicit reboot() ever cleared it.
+     * Every subsequent call then threw "Failed writing a frame to the warm-worker
+     * socket." -- a message RectorTool::isRecoverableWarmCorruption() never matches,
+     * so the daemon stayed wedged until restarted externally. workerIsDead() (a
+     * non-blocking pcntl_waitpid(..., WNOHANG) liveness check, run from run() before
+     * trusting isWarm()) must reap the dead worker and boot a genuinely fresh one on
+     * the very next call instead.
+     */
+    public function testDeadWorkerSelfHealsOnNextCall(): void
+    {
+        if (!\function_exists('posix_kill') || !\function_exists('pcntl_fork')) {
+            self::markTestSkipped('posix_kill/pcntl_fork unavailable in this environment');
+        }
+
+        // A zero-rule config, same as testRunThrowsWhenZeroRulesRegistered above: boots
+        // a real worker and refuses via execute()'s own guard BEFORE $application->run()
+        // is ever called, so it never reaches Rector's/Symfony Console's real formatting
+        // pipeline (which needs a real stdout tty and does not tolerate running twice,
+        // once per real fork, inside a shared PHPUnit process). All this test needs is a
+        // real worker to kill; which exact error it refuses each call with is incidental.
+        $tmp = sys_get_temp_dir() . '/rector-runner-dead-worker-test-' . bin2hex(random_bytes(8));
+        mkdir($tmp);
+        file_put_contents(
+            $tmp . '/rector.php',
+            "<?php\n\ndeclare(strict_types=1);\n\nuse Rector\\Config\\RectorConfig;\n\nreturn RectorConfig::configure();\n",
+        );
+        $previousCwd = getcwd();
+        $previousArgv = $_SERVER['argv'] ?? ['rector'];
+
+        try {
+            chdir($tmp);
+            $_SERVER['argv'] = ['rector'];
+
+            $runner = new RectorRunner();
+            try {
+                $runner->run(['rector', 'process']);
+                self::fail('expected the zero-rule config to refuse');
+            } catch (\RuntimeException $e) {
+                self::assertStringContainsString('registers no rules', $e->getMessage());
+            }
+            self::assertTrue($runner->isWarm(), 'a real worker should have booted');
+
+            $pidProperty = new \ReflectionProperty(RectorRunner::class, 'workerPid');
+            $pidProperty->setAccessible(true);
+            $firstPid = $pidProperty->getValue($runner);
+            self::assertIsInt($firstPid);
+
+            \posix_kill($firstPid, \SIGKILL);
+            // Reap it ourselves too so it never lingers as this test process's own
+            // zombie regardless of what workerIsDead() does -- WNOHANG makes this safe
+            // even if workerIsDead() already reaped it first.
+            $status = 0;
+            \pcntl_waitpid($firstPid, $status, \WNOHANG);
+
+            // SIGKILL delivery/reaping is not instantaneous: the very next call can
+            // legitimately race the kernel and hit runForked()'s own "worker closed its
+            // connection unexpectedly" (or "Failed writing a frame...") path instead of
+            // a clean fresh boot -- forgetDeadWorker() runs on THAT path too, so the
+            // call after THAT is guaranteed a fresh boot. The bug this pins is a wedge
+            // that repeats forever, never a single racy call; retry a bounded number of
+            // times for exactly the same reason production code self-heals over
+            // several calls rather than promising the very next one recovers.
+            $recovered = false;
+            for ($attempt = 0; $attempt < 5; $attempt++) {
+                try {
+                    $runner->run(['rector', 'process']);
+                    self::fail('expected the zero-rule refusal, from a freshly booted worker');
+                } catch (\RuntimeException $e) {
+                    if (str_contains($e->getMessage(), 'registers no rules')) {
+                        $recovered = true;
+                        break;
+                    }
+                }
+            }
+            self::assertTrue(
+                $recovered,
+                'a killed worker must self-heal into a fresh boot within a few calls, never wedge every later call identically',
+            );
+            self::assertTrue($runner->isWarm(), 'a fresh worker must have booted to replace the killed one');
+
+            $secondPid = $pidProperty->getValue($runner);
+            self::assertNotSame($firstPid, $secondPid, 'the NEW worker must be a different process, not the killed one');
+        } finally {
+            chdir($previousCwd);
+            $_SERVER['argv'] = $previousArgv;
+            unlink($tmp . '/rector.php');
+            rmdir($tmp);
+        }
+    }
 }
