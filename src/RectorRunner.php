@@ -52,17 +52,126 @@ final class RectorRunner implements RunnerInterface
         if (!$warmBoot) {
             $this->boot();
         } else {
-            // Warm reuse: flush per-run reflection state before analysing the next
-            // file. Rector's DynamicSourceLocatorProvider caches its
-            // AggregateSourceLocator for every non-PHPUnit run, so a second, different
-            // file gets analysed with a locator that only knows the first file and
-            // Rector emits 'System error: ClassReflection must be resolved for class X'
-            // (claude-supertool#273). A fresh CLI process never hits this; the warm
-            // daemon must reset the same services AbstractRectorTestCase resets between
-            // fixtures to behave identically to cold.
+            // Warm reuse. PHPStan's own class reflection (and its per-class
+            // method/property caches) is not a ResettableInterface service and
+            // lives for the whole process, so a class edited on disk between
+            // calls is otherwise seen with its old shape forever -- no error,
+            // just a silently wrong diff (claude-supertool#8).
+            // resetReflectionState() alone (claude-supertool#273) only flushes
+            // the three services Rector itself resets between fixtures; it
+            // never touches PHPStan's caches.
             $this->resetReflectionState();
         }
 
+        if ($this->canFork()) {
+            // Isolate EVERY call (including the first, post-boot one) in a
+            // forked child, never analysing in the parent process itself: the
+            // child's copy-on-write memory absorbs every cache the analysis
+            // fills in and dies with the child, so the parent's container
+            // stays exactly as pristine as right after boot() for every call,
+            // not only the ones after the first.
+            return $this->runForked($argv, $warmBoot);
+        }
+
+        // No pcntl (e.g. Windows): forking is unavailable, and
+        // resetReflectionState() alone is not a complete reset. The only
+        // guaranteed-correct fallback is a fresh container before every warm
+        // call -- slower than the warm path, but never wrong. warm_boot is
+        // reported false: this call did not benefit from reuse.
+        if ($warmBoot) {
+            $this->reboot();
+            $this->boot();
+            $warmBoot = false;
+        }
+
+        return $this->execute($argv, $warmBoot);
+    }
+
+    private function canFork(): bool
+    {
+        return \function_exists('pcntl_fork')
+            && \function_exists('pcntl_waitpid')
+            && \function_exists('stream_socket_pair');
+    }
+
+    /**
+     * Run $argv in a forked child so the parent's booted container is never mutated
+     * by the analysis. The child serialises its result over a unix socket pair and
+     * exits without running the parent's own shutdown sequence any further than
+     * that; the parent waits for it and decodes the result.
+     *
+     * @param list<string> $argv
+     * @return array{exit_code: int, output: string, warm_boot: bool}
+     */
+    private function runForked(array $argv, bool $warmBoot): array
+    {
+        $sockets = \stream_socket_pair(\STREAM_PF_UNIX, \STREAM_SOCK_STREAM, \STREAM_IPPROTO_IP);
+        if ($sockets === false) {
+            throw new \RuntimeException('Could not create a socket pair for the forked rector call.');
+        }
+        [$parentSocket, $childSocket] = $sockets;
+
+        $pid = \pcntl_fork();
+        if ($pid === -1) {
+            \fclose($parentSocket);
+            \fclose($childSocket);
+            throw new \RuntimeException('pcntl_fork() failed.');
+        }
+
+        if ($pid === 0) {
+            // Child: analyse in isolation, report the result over the socket, then
+            // exit. This is a real forked OS process -- it owns a private
+            // copy-on-write copy of the parent's memory, including the parent's
+            // stdio file descriptors, but this call is the only thing it ever does
+            // before exiting, so nothing else reaches them.
+            \fclose($parentSocket);
+            $exitCode = 0;
+            try {
+                $result = $this->execute($argv, $warmBoot);
+                \fwrite($childSocket, (string) \json_encode($result, \JSON_THROW_ON_ERROR));
+            } catch (\Throwable $e) {
+                \fwrite($childSocket, (string) \json_encode([
+                    'error' => $e->getMessage(),
+                    'error_class' => $e::class,
+                ], \JSON_THROW_ON_ERROR));
+                $exitCode = 1;
+            } finally {
+                \fclose($childSocket);
+            }
+            exit($exitCode);
+        }
+
+        // Parent: wait for the child's result, then reap it.
+        \fclose($childSocket);
+        $raw = '';
+        while (!\feof($parentSocket)) {
+            $chunk = \fread($parentSocket, 65536);
+            if ($chunk === false || $chunk === '') {
+                break;
+            }
+            $raw .= $chunk;
+        }
+        \fclose($parentSocket);
+        \pcntl_waitpid($pid, $status);
+
+        $decoded = $raw === '' ? null : \json_decode($raw, true);
+        if (!\is_array($decoded) || isset($decoded['error'])) {
+            $message = \is_array($decoded) && isset($decoded['error'])
+                ? (string) $decoded['error']
+                : "forked rector call produced no output (child exit status {$status})";
+            throw new \RuntimeException($message);
+        }
+
+        /** @var array{exit_code: int, output: string, warm_boot: bool} $decoded */
+        return $decoded;
+    }
+
+    /**
+     * @param list<string> $argv
+     * @return array{exit_code: int, output: string, warm_boot: bool}
+     */
+    private function execute(array $argv, bool $warmBoot): array
+    {
         $inputClass = $this->inputClass;
         $outputClass = $this->outputClass;
         \assert($inputClass !== null && $outputClass !== null);
@@ -148,21 +257,32 @@ final class RectorRunner implements RunnerInterface
 
     /**
      * Reset Rector's per-run reflection state between warm calls. Mirrors
-     * AbstractRectorTestCase::setUp(), which resets every service tagged
+     * AbstractRectorTestCase::setUp(), which resets every service implementing
      * ResettableInterface so each fixture analyses with a fresh source locator.
      * The warm daemon reuses one container across files and needs the same flush;
      * without it the cached AggregateSourceLocator from the previous file poisons
      * the next one (claude-supertool#273).
+     *
+     * Rector's own container is entropy/entropy's Container, which finds services
+     * by contract via findByContract() -- there is no tagged() method on it at
+     * all, so a method_exists($container, 'tagged') guard here always fails and
+     * this used to return before resetting anything (claude-supertool#8:
+     * AbstractRectorTestCase itself calls findByContract(ResettableInterface::class),
+     * confirmed against vendor/rector/rector/src/Testing/PHPUnit/AbstractRectorTestCase.php).
+     * Now that every warm call runs isolated in a forked child (see run()), this
+     * reset is no longer load-bearing for correctness, but it stays as the same
+     * defence-in-depth Rector's own test harness relies on -- so it needs to
+     * actually run rather than silently no-op.
      */
     private function resetReflectionState(): void
     {
         $container = $this->container;
-        if ($container === null || !method_exists($container, 'tagged')) {
+        if ($container === null || !method_exists($container, 'findByContract')) {
             return;
         }
 
         /** @var iterable<object> $resettables */
-        $resettables = $container->tagged(\Rector\Contract\DependencyInjection\ResettableInterface::class);
+        $resettables = $container->findByContract(\Rector\Contract\DependencyInjection\ResettableInterface::class);
         foreach ($resettables as $resettable) {
             if (method_exists($resettable, 'reset')) {
                 $resettable->reset();

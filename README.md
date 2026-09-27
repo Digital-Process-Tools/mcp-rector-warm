@@ -132,7 +132,7 @@ Three decisions worth knowing:
 
 **Does this replace `vendor/bin/rector`?** No. Use it from MCP clients (Claude Desktop, agents). For one-off CLI calls the regular binary is still simpler.
 
-**Does it support `rector --fix`?** Yes — pass `dryRun: false` to apply changes.
+**Can it apply changes?** Yes — pass `dryRun: false`. (Rector itself has no `--fix` flag: it writes by default and only previews with `--dry-run`.)
 
 **Why not a phar?** Rector ships as a real Composer library. Phar packaging would just add a runtime cost without a benefit here.
 

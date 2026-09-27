@@ -35,6 +35,18 @@ Open a GitHub issue with:
 - Features that re-enable parallel mode without a clean solution for the worker-spawn problem (it would break the warm guarantee).
 - Wrappers that just shell out to `vendor/bin/rector` — defeats the whole purpose.
 
+## Warm-state internals
+
+Things that cost time to rediscover. Read before touching `RectorRunner`.
+
+- **Every warm call runs isolated in a forked child.** `run()` forks (`pcntl_fork`) after the container is booted, so the analysis in each call mutates only the forked child's copy-on-write memory; the parent's container is never touched by any call and stays exactly as it was right after `boot()`. This is what makes a class edited on disk between calls visible on the very next call — including changes PHPStan's own class reflection would otherwise cache for the whole process (#8).
+- **No pcntl (e.g. Windows): the fallback is a full `reboot()` before every warm call.** Slower — the container rebuild cost is paid on every call instead of once — but correct, because a fresh container is the only complete reset available without forking.
+- **`resetReflectionState()` resets Rector's own `ResettableInterface` services** (`DynamicSourceLocatorProvider`, `RenamedClassesDataCollector`, `PostFileProcessor` in Rector 2.x) via the container's `findByContract()` — not `tagged()`, which Rector's own container does not implement. It is defence-in-depth alongside the fork, not the primary fix: it never touched PHPStan's reflection/scope caches, which is why the fork exists.
+- **Warm-state bugs only reproduce through the subprocess.** Rector bypasses its source-locator cache when `isPHPUnitRun()` is true, so an in-process test cannot see them. Staleness tests belong in `tests/Integration/ServerStdioTest.php`, which spawns the real bin.
+- **Staleness test recipe.** Write the files, call, edit a *different* file, `touch()` it past the 1s mtime granularity, call the first file again, assert the diff follows the edit. Same-file edits are already covered by the AST re-parse and prove nothing about reflection.
+- **Cross-file type fixtures need `withAutoloadPaths()`.** A rule that reads a type from another file (e.g. `ReturnTypeFromStrictTypedCallRector`) silently does nothing unless the fixture's `rector.php` lists `src` under `withAutoloadPaths()` as well as `withPaths()`.
+- **`--config` resolution.** `RectorConfigsResolver` reads `--config` from the server's own `$_SERVER['argv']`, not from anything the runner passes. Pinned by `testNonDefaultConfigNameIsHonoured`.
+
 ## Local development
 
 ```bash

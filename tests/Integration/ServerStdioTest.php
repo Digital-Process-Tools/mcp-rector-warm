@@ -275,6 +275,126 @@ final class ServerStdioTest extends TestCase
     }
 
     /**
+     * Staleness guard for types read from OTHER files. B calls A::foo(); when
+     * A::foo()'s return type changes on disk between two warm calls, the second
+     * analysis of B must see the new type. PHPStan keeps class reflection for the
+     * process lifetime and none of it is ResettableInterface, so a reused container
+     * answers with A's old type: no error, just a wrong diff (#8).
+     */
+    public function testDependencyEditIsSeenByWarmContainer(): void
+    {
+        $project = $this->makeDependencyProject();
+        $proc = $this->spawnServer($project);
+
+        try {
+            $this->send($proc['stdin'], ['jsonrpc' => '2.0', 'id' => 1, 'method' => 'initialize', 'params' => [
+                'protocolVersion' => '2024-11-05',
+                'capabilities'    => new \stdClass(),
+                'clientInfo'      => ['name' => 'phpunit', 'version' => '1.0.0'],
+            ]]);
+            $this->send($proc['stdin'], ['jsonrpc' => '2.0', 'method' => 'notifications/initialized']);
+
+            $this->send($proc['stdin'], $this->processCall(2, $project . '/src/Caller.php'));
+            $first = $this->readResponse($proc['stdout'], 2);
+            self::assertStringContainsString(
+                'public function bar(Dependency $dependency): int',
+                $this->diffOf($first),
+                'baseline: Dependency::foo(): int should propagate to Caller::bar()' . $this->stderrTail($proc['stderr']),
+            );
+
+            file_put_contents($project . '/src/Dependency.php', $this->dependencyClass('string', "'x'"));
+            touch($project . '/src/Dependency.php', time() + 5);
+
+            $this->send($proc['stdin'], $this->processCall(3, $project . '/src/Caller.php'));
+            $second = $this->readResponse($proc['stdout'], 3);
+            self::assertStringContainsString(
+                'public function bar(Dependency $dependency): string',
+                $this->diffOf($second),
+                'warm container must see the edited Dependency::foo(): string, not the cached int' . $this->stderrTail($proc['stderr']),
+            );
+        } finally {
+            fclose($proc['stdin']);
+            stream_get_contents($proc['stdout']);
+            fclose($proc['stdout']);
+            proc_close($proc['handle']);
+        }
+    }
+
+    /**
+     * --config must be honoured. The project holds its config under a non-default
+     * name and no rector.php, so the rule can only fire if the flag reaches Rector.
+     */
+    public function testNonDefaultConfigNameIsHonoured(): void
+    {
+        $project = $this->makeProject(withChange: true);
+        rename($project . '/rector.php', $project . '/custom-rector.php');
+        $proc = $this->spawnServer($project, 'custom-rector.php');
+
+        try {
+            $this->send($proc['stdin'], ['jsonrpc' => '2.0', 'id' => 1, 'method' => 'initialize', 'params' => [
+                'protocolVersion' => '2024-11-05',
+                'capabilities'    => new \stdClass(),
+                'clientInfo'      => ['name' => 'phpunit', 'version' => '1.0.0'],
+            ]]);
+            $this->send($proc['stdin'], ['jsonrpc' => '2.0', 'method' => 'notifications/initialized']);
+
+            $this->send($proc['stdin'], $this->processCall(2, $project . '/src/RectorProbe.php'));
+            $response = $this->readResponse($proc['stdout'], 2);
+            self::assertSame(
+                1,
+                $this->changedFiles($response),
+                'ReadOnlyClassRector from custom-rector.php should apply, got: ' . json_encode($response['result']['structuredContent'] ?? []) . $this->stderrTail($proc['stderr']),
+            );
+        } finally {
+            fclose($proc['stdin']);
+            stream_get_contents($proc['stdout']);
+            fclose($proc['stdout']);
+            proc_close($proc['handle']);
+        }
+    }
+
+    /**
+     * @param array<string,mixed> $response
+     */
+    private function diffOf(array $response): string
+    {
+        $output = $response['result']['structuredContent']['output'] ?? '';
+        $decoded = is_string($output) && $output !== '' ? json_decode($output, true) : [];
+
+        return implode("\n", array_column($decoded['file_diffs'] ?? [], 'diff'));
+    }
+
+    private function makeDependencyProject(): string
+    {
+        $dir = sys_get_temp_dir() . '/rector_mcp_dep_' . bin2hex(random_bytes(6));
+        mkdir($dir . '/src', 0777, true);
+        $this->tmpDirs[] = $dir;
+
+        file_put_contents($dir . '/src/Dependency.php', $this->dependencyClass('int', '1'));
+        file_put_contents(
+            $dir . '/src/Caller.php',
+            "<?php\n\ndeclare(strict_types=1);\n\nnamespace Probe;\n\n"
+            . "final class Caller\n{\n    public function bar(Dependency \$dependency)\n    {\n        return \$dependency->foo();\n    }\n}\n"
+        );
+        file_put_contents(
+            $dir . '/rector.php',
+            "<?php\n\ndeclare(strict_types=1);\n\n"
+            . "use Rector\\Config\\RectorConfig;\n"
+            . "use Rector\\TypeDeclaration\\Rector\\ClassMethod\\ReturnTypeFromStrictTypedCallRector;\n\n"
+            . "return RectorConfig::configure()->withPaths([__DIR__ . '/src'])->withAutoloadPaths([__DIR__ . '/src'])"
+            . "->withRules([ReturnTypeFromStrictTypedCallRector::class]);\n"
+        );
+
+        return $dir;
+    }
+
+    private function dependencyClass(string $returnType, string $returnValue): string
+    {
+        return "<?php\n\ndeclare(strict_types=1);\n\nnamespace Probe;\n\n"
+            . "final class Dependency\n{\n    public function foo(): {$returnType}\n    {\n        return {$returnValue};\n    }\n}\n";
+    }
+
+    /**
      * @param array<string,mixed> $response
      */
     private function changedFiles(array $response): int
