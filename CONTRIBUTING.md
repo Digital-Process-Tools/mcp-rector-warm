@@ -128,5 +128,8 @@ directory, `xfail: "#N: ..."` marks a scenario that hits a filed issue, and
 `oracle: false` skips the cold-`rector process` comparison for every in-tree call --
 only for a fix whose whole point is that warm deliberately no longer matches what a
 cold, unpatched Rector does on the same tree (e.g. #14: a missing config's own default
-behaviour is exactly the bug). The full format is in the docstring of
+behaviour is exactly the bug). `php_ini: {default_socket_timeout: 3}` passes
+`php -d key=value` to the server process only (the cold oracle keeps PHP defaults), so a
+limit that takes a minute at its default can be reproduced in seconds (e.g. #32). The
+full format is in the docstring of
 `tests/E2E/test_scenarios.py`; unknown keys fail loudly.

@@ -1,3 +1,4 @@
+xfail: "#30: the warm server never loads the project vendor/autoload.php, so the parent class is not found"
 description: The project vendor/autoload.php (no withAutoloadPaths) is how a single-file run sees the parent class; cold Rector loads it from the working dir.
 config: |
   <?php

@@ -1,3 +1,4 @@
+xfail: "#34: withPhpSets() reads composer.json once at boot, so a raised PHP constraint does not change the sets"
 description: withPhpSets() with no argument picks its sets from composer.json; raising the PHP constraint mid-session must bring the PHP 8.2 set in.
 config: |
   <?php

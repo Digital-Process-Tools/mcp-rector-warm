@@ -63,14 +63,22 @@ class ServerRun:
 
 
 @asynccontextmanager
-async def open_server(project: Path, record_dir: Path, config: Path | None = None) -> AsyncIterator[ServerRun]:
+async def open_server(
+    project: Path,
+    record_dir: Path,
+    config: Path | None = None,
+    php_ini: dict[str, Any] | None = None,
+) -> AsyncIterator[ServerRun]:
     """Launch bin/mcp-rector-warm over stdio and complete the initialize handshake.
 
     The server runs behind stdio_tap.py, which forwards bytes unchanged and keeps a
     copy of stdout; see stdio_tap.py for why.
     """
     record_dir.mkdir(parents=True, exist_ok=True)
-    args = [str(TAP), str(record_dir), "--", php_binary(), str(BIN), f"--working-dir={project}"]
+    # php_ini: `-d key=value` for the SERVER process only (e.g. a short
+    # default_socket_timeout, #32). The cold oracle runs with PHP defaults.
+    ini_flags = [f"-d{key}={value}" for key, value in (php_ini or {}).items()]
+    args = [str(TAP), str(record_dir), "--", php_binary(), *ini_flags, str(BIN), f"--working-dir={project}"]
     if config is not None:
         args.append(f"--config={config}")
     params = StdioServerParameters(command=sys.executable, args=args, cwd=str(project))

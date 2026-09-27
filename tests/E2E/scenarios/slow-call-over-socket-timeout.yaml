@@ -1,4 +1,8 @@
-description: A call whose analysis runs longer than PHP default_socket_timeout (60s) must still return its result, as cold Rector does.
+xfail: "#32: runForked() reads the child result with the socket read timeout, so a call longer than default_socket_timeout reports no output"
+description: A call whose analysis outlasts default_socket_timeout must still return its result, as cold Rector does.
+# The server gets a 3s socket timeout so a 5s rule reproduces the 60s default in seconds.
+php_ini:
+  default_socket_timeout: 3
 config: |
   <?php
 
@@ -11,7 +15,7 @@ config: |
   use Rector\Rector\AbstractRector;
   use Rector\ValueObject\PhpVersion;
 
-  // Stands in for a large file or a slow rule set: any analysis over 60 seconds.
+  // Stands in for a large file or a slow rule set: an analysis longer than the socket timeout.
   final class SlowRector extends AbstractRector
   {
       public function getNodeTypes(): array
@@ -21,7 +25,7 @@ config: |
 
       public function refactor(Node $node): ?Node
       {
-          sleep(65);
+          sleep(5);
 
           return null;
       }

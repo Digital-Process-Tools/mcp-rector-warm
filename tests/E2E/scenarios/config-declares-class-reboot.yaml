@@ -1,3 +1,4 @@
+xfail: "#31: a second boot re-requires rector.php, so a class it declares is redeclared (fatal, server exits 255)"
 description: A rector.php that declares a class fails to boot, is fixed, and the next call boots again; re-requiring the config must not kill the server.
 # Oracle off: the failing first call is a tool error warm and a CLI fatal_errors report cold, by design.
 oracle: false

@@ -1,0 +1,46 @@
+xfail: "#31: the #20 reboot on a changed rector.php re-requires it, so a class it declares is redeclared (fatal, server exits 255)"
+description: A valid rector.php that declares a class is edited mid-session; the forced reboot (#20) must not kill the server.
+config: |
+  <?php
+
+  declare(strict_types=1);
+
+  use Rector\Config\RectorConfig;
+  use Rector\Php82\Rector\Class_\ReadOnlyClassRector;
+  use Rector\Php83\Rector\ClassMethod\AddOverrideAttributeToOverriddenMethodsRector;
+  use Rector\ValueObject\PhpVersion;
+
+  // Any class or function declared at the top level of rector.php (an inline custom rule, a helper).
+  final class HelperDeclaredInConfig
+  {
+  }
+
+  return RectorConfig::configure()
+      ->withPaths([__DIR__ . "/src"])
+      ->withPhpVersion(PhpVersion::PHP_83)
+      ->withRules([AddOverrideAttributeToOverriddenMethodsRector::class]);
+files:
+  src/Money.php: |
+    <?php
+
+    declare(strict_types=1);
+
+    final class Money
+    {
+        public function __construct(private readonly int $amount)
+        {
+        }
+    }
+steps:
+  # Positive control: the config boots and runs; the only rule has nothing to do here.
+  - call: src/Money.php
+    expect: {changed: 0}
+  - edit:
+      path: rector.php
+      old: "->withRules([AddOverrideAttributeToOverriddenMethodsRector::class]);"
+      new: "->withRules([AddOverrideAttributeToOverriddenMethodsRector::class, ReadOnlyClassRector::class]);"
+  - call: src/Money.php
+    expect:
+      is_error: false
+      changed: 1
+      diff_contains: "+final readonly class Money"
