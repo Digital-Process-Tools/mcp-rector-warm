@@ -71,8 +71,12 @@ methods.
 
 ## Consequence for #53
 
-#53 is unblocked on the library question. Its own two other blockers (#48,
-#52's siblings #32 and #43) are already resolved on `main` as of this
-decision -- see the tracking issue #51's own researched note. Diagnostics,
-code actions, and the `RectorTool::process()` wiring are #53's scope, not
-built here.
+#53 is unblocked on the library question only. It is still blocked by #48
+(open: PR #57's timeout check probably fixes it, but that has not been verified
+by listing the daemon's children after a slow call) and #58 (open: PR #57
+removed the only upper bound on a call, so a wedged worker now blocks the caller
+forever). #32 is closed. Diagnostics, code actions, and the
+`RectorTool::process()` wiring are #53's scope, not built here.
+
+`bin/rector-warm-lsp` is deliberately left out of `composer.json`'s `bin` until
+#53 ships, so no release installs a server that only answers the handshake.
