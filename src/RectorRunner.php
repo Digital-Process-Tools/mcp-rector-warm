@@ -11,7 +11,7 @@ use Rector\DependencyInjection\RectorContainerFactory;
  * Holds a warm Rector container + Application across multiple analyse calls.
  * Boot happens lazily on first call; subsequent calls reuse the live container.
  */
-final class RectorRunner implements RunnerInterface
+class RectorRunner implements RunnerInterface
 {
     private ?object $application = null;
     private ?object $container = null;
@@ -87,7 +87,7 @@ final class RectorRunner implements RunnerInterface
         return $this->execute($argv, $warmBoot);
     }
 
-    private function canFork(): bool
+    protected function canFork(): bool
     {
         return \function_exists('pcntl_fork')
             && \function_exists('pcntl_waitpid')
@@ -170,7 +170,7 @@ final class RectorRunner implements RunnerInterface
      * @param list<string> $argv
      * @return array{exit_code: int, output: string, warm_boot: bool}
      */
-    private function execute(array $argv, bool $warmBoot): array
+    protected function execute(array $argv, bool $warmBoot): array
     {
         $inputClass = $this->inputClass;
         $outputClass = $this->outputClass;
@@ -215,7 +215,7 @@ final class RectorRunner implements RunnerInterface
         ];
     }
 
-    private function boot(): void
+    protected function boot(): void
     {
         // Load rector's scoped autoload lazily. Find it by reflecting on a Rector class:
         // works whether mcp-rector-warm is installed as a local clone (nested vendor) or as
