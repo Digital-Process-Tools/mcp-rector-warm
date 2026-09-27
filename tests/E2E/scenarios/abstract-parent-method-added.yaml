@@ -1,0 +1,52 @@
+description: An abstract parent gains an abstract method the child already implements.
+# By default the rule skips a method that only implements an abstract one;
+# ALLOW_OVERRIDE_EMPTY_METHOD makes an abstract parent method count.
+config: |
+  <?php
+
+  declare(strict_types=1);
+
+  use Rector\Config\RectorConfig;
+  use Rector\Php83\Rector\ClassMethod\AddOverrideAttributeToOverriddenMethodsRector;
+  use Rector\ValueObject\PhpVersion;
+
+  return RectorConfig::configure()
+      ->withPaths([__DIR__ . '/src'])
+      ->withAutoloadPaths([__DIR__ . '/src'])
+      ->withPhpVersion(PhpVersion::PHP_83)
+      ->withConfiguredRule(AddOverrideAttributeToOverriddenMethodsRector::class, [
+          AddOverrideAttributeToOverriddenMethodsRector::ALLOW_OVERRIDE_EMPTY_METHOD => true,
+      ]);
+files:
+  src/Base.php: |
+    <?php
+
+    declare(strict_types=1);
+
+    abstract class Base
+    {
+    }
+  src/Child.php: |
+    <?php
+
+    declare(strict_types=1);
+
+    final class Child extends Base
+    {
+        public function run(): void
+        {
+            echo 'child';
+        }
+    }
+steps:
+  - call: src/Child.php
+    expect: {changed: 0}
+  - edit:
+      path: src/Base.php
+      old: "abstract class Base\n{\n}"
+      new: "abstract class Base\n{\n    abstract public function run(): void;\n}"
+  # Only the parent changed on disk; Child.php is byte-identical to the first call.
+  - call: src/Child.php
+    expect:
+      changed: 1
+      diff_contains: '+    #[\Override]'

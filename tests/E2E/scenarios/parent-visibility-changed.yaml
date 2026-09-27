@@ -1,0 +1,38 @@
+description: The parent method goes from private to protected mid-session; a private parent method is not overridden, a protected one is.
+files:
+  src/Base.php: |
+    <?php
+
+    declare(strict_types=1);
+
+    class Base
+    {
+        private function foo(): void
+        {
+            echo 'base';
+        }
+    }
+  src/Child.php: |
+    <?php
+
+    declare(strict_types=1);
+
+    final class Child extends Base
+    {
+        protected function foo(): void
+        {
+            echo 'child';
+        }
+    }
+steps:
+  - call: src/Child.php
+    expect: {changed: 0}
+  - edit:
+      path: src/Base.php
+      old: "private function foo()"
+      new: "protected function foo()"
+  # Only the parent changed on disk; Child.php is byte-identical to the first call.
+  - call: src/Child.php
+    expect:
+      changed: 1
+      diff_contains: '+    #[\Override]'
