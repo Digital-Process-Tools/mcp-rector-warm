@@ -1,0 +1,11 @@
+description: A call the server refuses (path outside the working dir) is reported to the host with isError true.
+xfail: "#16: failed calls come back with isError false"
+fixture: tests/Fixtures/project
+steps:
+  # Positive control: the session is alive and refactors an in-tree path.
+  - call: src/Money.php
+    expect: {changed: 1}
+  - call: /definitely/not/in/the/working/dir/Outside.php
+    expect:
+      error_class: SecurityError
+      is_error: true

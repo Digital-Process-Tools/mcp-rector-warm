@@ -1,0 +1,10 @@
+# End-to-end suite: a real MCP client against bin/mcp-rector-warm.
+# The official Python MCP SDK is used on purpose: it shares no code with the PHP
+# SDK the server is built on, so a bug in one cannot hide behind the same bug in
+# the other. Pinned; bump deliberately and rerun tests/E2E/run.sh.
+mcp==2.2.0
+mcp-types==2.2.0
+anyio==4.15.1
+pytest==9.1.1
+pytest-timeout==2.4.0
+PyYAML==6.0.3

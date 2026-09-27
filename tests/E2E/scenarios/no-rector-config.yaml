@@ -1,0 +1,14 @@
+description: A project with no rector.php; the call still answers, and nothing but JSON-RPC reaches stdout.
+xfail: "#14: with no rector.php, Rector writes a warning block to stdout"
+config: null
+files:
+  src/Probe.php: |
+    <?php
+
+    declare(strict_types=1);
+
+    final class Probe
+    {
+    }
+steps:
+  - call: src/Probe.php

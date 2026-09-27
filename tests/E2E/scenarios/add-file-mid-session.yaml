@@ -1,0 +1,35 @@
+description: A file created mid-session is picked up when the same directory is processed again.
+xfail: "#8 (reasoned, not verified): a file the session's first run did not see is not refactored -- the #8 symptom, reached through a directory run"
+files:
+  src/Existing.php: |
+    <?php
+
+    declare(strict_types=1);
+
+    final class Existing
+    {
+        public function name(): string
+        {
+            return 'existing';
+        }
+    }
+steps:
+  - call: src
+    expect: {changed: 0}
+  - write:
+      path: src/Added.php
+      content: |
+        <?php
+
+        declare(strict_types=1);
+
+        final class Added
+        {
+            public function __construct(private readonly string $name)
+            {
+            }
+        }
+  - call: src
+    expect:
+      changed_files: [src/Added.php]
+      diff_contains: "+final readonly class Added"

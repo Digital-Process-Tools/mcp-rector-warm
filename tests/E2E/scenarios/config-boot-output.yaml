@@ -1,0 +1,30 @@
+description: A rector.php that prints while it boots; that output must not reach the MCP stdout.
+xfail: "#15: rector.php boot output reaches stdout"
+config: |
+  <?php
+
+  declare(strict_types=1);
+
+  use Rector\Config\RectorConfig;
+  use Rector\Php82\Rector\Class_\ReadOnlyClassRector;
+
+  echo "rector.php is booting\n";
+
+  return RectorConfig::configure()
+      ->withPaths([__DIR__ . '/src'])
+      ->withRules([ReadOnlyClassRector::class]);
+files:
+  src/Probe.php: |
+    <?php
+
+    declare(strict_types=1);
+
+    final class Probe
+    {
+        public function __construct(private readonly int $value)
+        {
+        }
+    }
+steps:
+  - call: src/Probe.php
+    expect: {changed: 1}

@@ -1,0 +1,18 @@
+# The example in CONTRIBUTING.md ("Adding a scenario"), kept as a real scenario so the
+# documented example cannot drift from a working one. Change both together.
+description: Editing a file between two calls is seen by the warm container.
+files:
+  src/Probe.php: |
+    <?php
+    final class Probe
+    {
+        public function __construct(private int $value) {}
+    }
+steps:
+  - call: src/Probe.php
+  - edit:
+      path: src/Probe.php
+      old: "private int"
+      new: "private readonly int"
+  - call: src/Probe.php
+    expect: {changed: 1}   # optional: pin a fact on top of the warm == cold check

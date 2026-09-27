@@ -1,0 +1,10 @@
+description: Applying changes (dryRun false) on the fixture project writes the same files as a cold run, and a second pass finds nothing left.
+fixture: tests/Fixtures/project
+steps:
+  - call: src/Money.php
+    dry_run: false
+    expect:
+      changed: 1
+      diff_contains: "+final readonly class Money"
+  - call: src/Money.php
+    expect: {changed: 0}
