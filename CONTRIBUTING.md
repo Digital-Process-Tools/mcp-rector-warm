@@ -133,3 +133,30 @@ behaviour is exactly the bug). `php_ini: {default_socket_timeout: 3}` passes
 limit that takes a minute at its default can be reproduced in seconds (e.g. #32). The
 full format is in the docstring of
 `tests/E2E/test_scenarios.py`; unknown keys fail loudly.
+
+## Checking against a real project
+
+The scenarios use small synthetic trees. `tools/warm-vs-cold.py` asks the same question
+of a real codebase: on a seeded sample of files, does one warm session return what a
+fresh `rector process` returns for each file?
+
+```bash
+pip install -r tests/E2E/requirements.txt          # the official MCP client
+tools/warm-vs-cold.py --project ../app --project-autoload ../app/vendor/autoload.php \
+    --files 'src/**/*.php' --files 'tests/**/*Test.php' --limit 300 --seed 1 \
+    --jobs 4 --php "$(command -v php)" --out /tmp/wvc
+```
+
+- Every call is a dry run on both sides. A generated wrapper config loads the project's
+  `rector.php` once and sends Rector's cache to `--out`, so the project's cache is never
+  written and cannot hide a difference.
+- `--project-autoload` runs this checkout's `bin/` and `src/` on top of the project's own
+  Composer autoloader, the way a project with the package in `require-dev` runs it.
+  Without it, the checkout's own `vendor/` is used.
+- If the project's `rector.php` writes anything when it loads (clears a cache, creates a
+  directory), run against a copy of the project, not the original.
+- The report is `report.md` (plus `report.json`): matches, mismatches with both diffs and
+  the rules each side applied, warm and cold errors, and per-call p50/p95 timings. The
+  exit code is 1 on any mismatch and 2 when only errors were found.
+- A mismatch is a finding. Reduce it to one rule and one cross-file dependency, check it
+  against the open issues, and file it with an xfail scenario (see above).

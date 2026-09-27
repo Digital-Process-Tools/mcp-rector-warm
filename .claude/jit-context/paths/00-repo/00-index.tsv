@@ -1,2 +1,3 @@
 tests/E2E/	e2e-harness.md
 (^|/)(src|bin)/	src-fix-workflow.md
+tools/warm-vs-cold	warm-vs-cold.md
