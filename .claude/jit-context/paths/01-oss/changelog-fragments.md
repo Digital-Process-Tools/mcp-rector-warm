@@ -44,7 +44,7 @@ invocation, and each audits its own thing completely.
 
 ```bash
 python3 .oss/assemble_changelog.py --check --dir 'changelog.d' --changelog CHANGELOG.md
-python3 .oss/assemble_changelog.py --check-links --dir 'changelog.d' --changelog CHANGELOG.md
+python3 .oss/assemble_changelog.py --check-links --untagged '0.3.0' --dir 'changelog.d' --changelog CHANGELOG.md
 ```
 
 Those are the same two commands the scaffolded changelog workflow runs as its own two
@@ -56,7 +56,6 @@ version it names was never tagged, the missing link is the correct state: there 
 page to point at, and a `releases/tag/vX.Y.Z` URL written for one is a 404 that renders as a
 working link.
 
-This repository declares no untagged versions in `.oss.json`, so every `## [x.y.z]`
-section is expected to carry a link ref. If one of them was never tagged, add it to
-`changelog_untagged` and re-run `/oss:scaffold --apply` — the CI leg reads the same key,
-so the two cannot disagree. Declaring `[]` says the same thing deliberately.
+The declaration above is not written here: `changelog_untagged` in `.oss.json` names 0.3.0,
+and the CI leg reads the same key, so the command you run and the one that gates the pull
+request cannot disagree. Add a version there and re-run `/oss:scaffold --apply`.

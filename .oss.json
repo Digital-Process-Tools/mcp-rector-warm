@@ -7,7 +7,9 @@
     "CHANGELOG.md"
   ],
   "changelog_dir": "changelog.d",
-  "changelog_untagged": null,
+  "changelog_untagged": [
+    "0.3.0"
+  ],
   "docs_targets": [
     "README.md"
   ],

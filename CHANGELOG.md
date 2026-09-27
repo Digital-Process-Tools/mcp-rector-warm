@@ -99,3 +99,16 @@ MCP `output` field now contains `file_diffs[].applied_rectors` + `diff` so consu
 - Parallel mode forcibly disabled (`--debug`) so workers don't try to re-spawn the MCP binary.
 - PHPUnit unit + integration tests covering boot, tool listing, warm reuse (`warm_boot: true` on second call).
 - Standalone CLI: `--working-dir`, `--config` flags pinned at server start.
+
+[Unreleased]: https://github.com/Digital-Process-Tools/mcp-rector-warm/compare/v0.4.2...HEAD
+[0.4.2]: https://github.com/Digital-Process-Tools/mcp-rector-warm/releases/tag/v0.4.2
+[0.4.0]: https://github.com/Digital-Process-Tools/mcp-rector-warm/releases/tag/v0.4.0
+[0.2.1]: https://github.com/Digital-Process-Tools/mcp-rector-warm/releases/tag/v0.2.1
+[0.2.0]: https://github.com/Digital-Process-Tools/mcp-rector-warm/releases/tag/v0.2.0
+[0.1.6]: https://github.com/Digital-Process-Tools/mcp-rector-warm/releases/tag/v0.1.6
+[0.1.5]: https://github.com/Digital-Process-Tools/mcp-rector-warm/releases/tag/v0.1.5
+[0.1.4]: https://github.com/Digital-Process-Tools/mcp-rector-warm/releases/tag/v0.1.4
+[0.1.3]: https://github.com/Digital-Process-Tools/mcp-rector-warm/releases/tag/v0.1.3
+[0.1.2]: https://github.com/Digital-Process-Tools/mcp-rector-warm/releases/tag/v0.1.2
+[0.1.1]: https://github.com/Digital-Process-Tools/mcp-rector-warm/releases/tag/v0.1.1
+[0.1.0]: https://github.com/Digital-Process-Tools/mcp-rector-warm/releases/tag/v0.1.0
