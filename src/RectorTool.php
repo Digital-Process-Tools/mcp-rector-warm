@@ -52,6 +52,28 @@ final class RectorTool
     )]
     public function process(string $path, bool $dryRun = true): array|CallToolResult
     {
+        return $this->processWith($path, $dryRun, []);
+    }
+
+    /**
+     * #106 (LSP unsaved buffers): a dry run on $tempPath, a temp copy of an
+     * editor buffer, with Rector's skip rules applied as if it were
+     * $originalPath (RectorRunner::applySkipsOfOriginalPath()). Not an MCP
+     * tool: only process() carries the attribute.
+     *
+     * @return array{exit_code: int, output: string, warm_boot: bool}|CallToolResult
+     */
+    public function processBufferCopy(string $tempPath, string $originalPath): array|CallToolResult
+    {
+        return $this->processWith($tempPath, true, [RectorRunner::SKIP_AS_OPTION . '=' . $originalPath]);
+    }
+
+    /**
+     * @param list<string> $extraOptions options inserted before `--`
+     * @return array{exit_code: int, output: string, warm_boot: bool}|CallToolResult
+     */
+    private function processWith(string $path, bool $dryRun, array $extraOptions): array|CallToolResult
+    {
         // Containment: rector reads (dry-run) or rewrites (non-dry) PHP files at
         // $path. Reject paths outside realpath(cwd) — set at boot via --working-dir.
         // Prevents a hostile MCP caller from triggering refactor writes or content
@@ -100,6 +122,7 @@ final class RectorTool
         }
         // '--' marks the end of options so a path that happens to start with '-'
         // (e.g. a file named "-rf") is never parsed as a Rector CLI flag.
+        array_push($argv, ...$extraOptions);
         $argv[] = '--';
         $argv[] = $path;
 

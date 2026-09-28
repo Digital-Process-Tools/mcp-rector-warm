@@ -82,7 +82,7 @@ final class RectorDiagnosticsSourceBufferTest extends TestCase
 
             public function run(array $argv, bool $dryRun = true): array
             {
-                return ['exit_code' => 0, 'output' => ($this->behaviour)(end($argv)), 'warm_boot' => false];
+                return ['exit_code' => 0, 'output' => ($this->behaviour)(end($argv), $argv), 'warm_boot' => false];
             }
 
             public function isWarm(): bool
@@ -132,6 +132,58 @@ final class RectorDiagnosticsSourceBufferTest extends TestCase
         self::assertSame(['SomeRector'], $result['fixes'][0]['rectors']);
         self::assertSame(['src', 'src/Sample.php'], $this->projectEntries());
         self::assertSame("<?php\n\nclass Sample\n{\n}\n", file_get_contents($this->original));
+    }
+
+    public function testTheRunIsToldWhichOriginalPathTheTempCopyStandsFor(): void
+    {
+        // #106 E2E finding: Rector's skip matching compares the processed
+        // path, so an exact-path, relative-path, parent-dir glob or
+        // rule-scoped skip of the original never matched the temp copy. The
+        // worker applies the ORIGINAL path's skips to the copy, and needs the
+        // original path for that: passed as an option before `--`, with the
+        // temp copy still the one path Rector processes.
+        $argvSeen = null;
+        $this->source(function (string $path, array $argv) use (&$argvSeen): string {
+            $argvSeen = $argv;
+
+            return '{"totals":{"changed_files":0,"errors":0}}';
+        })->diagnoseBuffer($this->original, "<?php\n");
+
+        self::assertNotNull($argvSeen);
+        $separator = array_search('--', $argvSeen, true);
+        self::assertIsInt($separator);
+        self::assertContains('--rector-warm-skip-as=' . $this->original, array_slice($argvSeen, 0, $separator));
+        self::assertCount(1, array_slice($argvSeen, $separator + 1));
+        self::assertStringContainsString('.rector-warm-', end($argvSeen));
+    }
+
+    public function testAPlainProcessCallCarriesNoSkipAsOption(): void
+    {
+        // Negative control: the disk path (and the MCP tool) never passes it.
+        $argvSeen = null;
+        $this->source(function (string $path, array $argv) use (&$argvSeen): string {
+            $argvSeen = $argv;
+
+            return '{"totals":{"changed_files":0,"errors":0}}';
+        })->diagnose($this->original);
+
+        self::assertNotNull($argvSeen);
+        self::assertSame([], array_values(array_filter($argvSeen, static fn (string $a): bool => str_starts_with($a, '--rector-warm-skip-as'))));
+    }
+
+    public function testABufferRunCleansUpADeadServersLeftoverBesideIt(): void
+    {
+        $process = proc_open([PHP_BINARY, '-r', ''], [], $pipes);
+        $deadPid = proc_get_status($process)['pid'];
+        proc_close($process);
+        $leftover = $this->workDir . '/src/.rector-warm-' . $deadPid;
+        mkdir($leftover);
+        file_put_contents($leftover . '/Sample.php', "<?php\n");
+
+        $this->source(fn (): string => '{"totals":{"changed_files":0,"errors":0}}')
+            ->diagnoseBuffer($this->original, "<?php\n");
+
+        self::assertSame(['src', 'src/Sample.php'], $this->projectEntries());
     }
 
     public function testASyntaxErrorBufferReportsTheErrorAgainstTheOriginalAndLeavesNothingBehind(): void

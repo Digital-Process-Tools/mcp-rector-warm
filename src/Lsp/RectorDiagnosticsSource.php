@@ -18,10 +18,20 @@ final class RectorDiagnosticsSource implements BufferDiagnosticsSource
     {
     }
 
+    /** #106: the hidden per-server directory an unsaved buffer's temp copy lives in */
+    public const TEMP_DIRECTORY_PREFIX = '.rector-warm-';
+
     public function diagnose(string $absolutePath): array
     {
-        $result = $this->tool->process($absolutePath, true);
+        return $this->interpret($this->tool->process($absolutePath, true), $absolutePath);
+    }
 
+    /**
+     * @param array<string, mixed>|CallToolResult $result
+     * @return array{fixes: list<array<string, mixed>>, errors: list<array{message: string, line: int}>}
+     */
+    private function interpret(array|CallToolResult $result, string $absolutePath): array
+    {
         if ($result instanceof CallToolResult) {
             $error = is_array($result->structuredContent) ? ($result->structuredContent['error'] ?? null) : null;
             $message = is_string($error) && $error !== '' ? $error : 'unknown error';
@@ -79,17 +89,19 @@ final class RectorDiagnosticsSource implements BufferDiagnosticsSource
      * - inside the project (a hidden `.rector-warm-<pid>` directory in the
      *   original's own directory), so autoload, rector.php discovery and
      *   RectorTool's path containment all apply exactly as for the original;
-     * - under the original's own basename, so Rector's path-based skips
-     *   (`withSkip([...])` globs on the basename such as `*Test.php` or a
-     *   pattern ending in `/Foo.php`, a skipped directory, a rule skipped
-     *   for such a glob) match the copy as they match the original. Checked
-     *   against rector/rector 2.x: all of those hold. The one that cannot
-     *   hold is a skip naming the original's EXACT path
-     *   (`__DIR__ . '/src/Foo.php'`) -- the copy's path differs, so such a
-     *   file IS diagnosed while unsaved. Documented in the README.
+     * - under the original's own basename, so globs on the file name keep
+     *   matching it;
+     * - with the ORIGINAL path passed alongside (RectorTool::
+     *   processBufferCopy()), so the worker applies every `withSkip()` entry
+     *   that matches the original -- exact path, relative path, a glob on
+     *   its parent directories, a rule skipped for it -- to the copy too
+     *   (RectorRunner::applySkipsOfOriginalPath()).
      *
      * The copy (and its directory) is removed in a `finally`, so a Rector
-     * error, a refused call or a throwing runner leaves nothing behind.
+     * error, a refused call or a throwing runner leaves nothing behind. A
+     * server killed outright (kill -9) cannot run that `finally`; its
+     * leftover is removed by TempCopySweeper, at the next server's startup
+     * and before any run in the same directory.
      */
     public function diagnoseBuffer(string $absolutePath, string $content): array
     {
@@ -107,6 +119,11 @@ final class RectorDiagnosticsSource implements BufferDiagnosticsSource
         $tempDirectory = $directory . DIRECTORY_SEPARATOR . self::tempDirectoryName();
         $tempPath = $tempDirectory . DIRECTORY_SEPARATOR . basename($absolutePath);
 
+        // A server killed mid-run (kill -9) never reached its `finally`; its
+        // leftover next to this file goes now, whatever the startup sweep's
+        // depth limit or skipped directories let through.
+        TempCopySweeper::sweepDirectory($directory);
+
         try {
             if (!is_dir($tempDirectory) && !@mkdir($tempDirectory, 0o700) && !is_dir($tempDirectory)) {
                 return self::failure(sprintf('rector-warm-lsp: could not create a temp directory in %s', $directory));
@@ -116,7 +133,12 @@ final class RectorDiagnosticsSource implements BufferDiagnosticsSource
                 return self::failure(sprintf('rector-warm-lsp: could not write the unsaved buffer to a temp file in %s', $directory));
             }
 
-            $result = $this->diagnose($tempPath);
+            // #106: Rector matches `withSkip()` against the path it
+            // processes; processBufferCopy() has the worker apply the
+            // ORIGINAL path's skips to the copy (RectorRunner::
+            // applySkipsOfOriginalPath()), so exact-path, relative, glob and
+            // rule-scoped skips behave as on the saved file.
+            $result = $this->interpret($this->tool->processBufferCopy($tempPath, $absolutePath), $tempPath);
         } catch (\Throwable $e) {
             $result = self::failure($e->getMessage());
         } finally {
@@ -133,7 +155,7 @@ final class RectorDiagnosticsSource implements BufferDiagnosticsSource
 
     private static function tempDirectoryName(): string
     {
-        return '.rector-warm-' . getmypid();
+        return self::TEMP_DIRECTORY_PREFIX . getmypid();
     }
 
     /**

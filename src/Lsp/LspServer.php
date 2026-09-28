@@ -255,7 +255,10 @@ final class LspServer
 
         // Only a file: URI has a directory in the project to put the temp
         // copy in; an `untitled:` buffer has no path Rector could resolve.
-        if (!$isFullText || strncasecmp($uri, 'file:', 5) !== 0) {
+        // rector.php and composer.lock are configuration, not source Rector
+        // refactors: they are reloaded from disk on save (and through the
+        // watcher), never diagnosed as buffers.
+        if (!$isFullText || strncasecmp($uri, 'file:', 5) !== 0 || self::isWatchedConfigFile($uri)) {
             unset($this->buffers[$uri], $this->pendingDeadlines[$uri]);
 
             return [];
@@ -380,8 +383,17 @@ final class LspServer
 
     private static function isWatchedConfigFile(string $uri): bool
     {
-        $path = self::uriToPath($uri);
-        $basename = basename(str_replace('\\', '/', $path));
+        $path = str_replace('\\', '/', self::uriToPath($uri));
+
+        // #106: a `.rector-warm-<pid>` directory holds this server's own
+        // temp copy of a buffer. An event for a rector.php in there is not a
+        // config change -- treating it as one re-queued every buffer, whose
+        // runs wrote new temp copies, and so on (the reload loop).
+        if (str_contains($path, '/' . RectorDiagnosticsSource::TEMP_DIRECTORY_PREFIX)) {
+            return false;
+        }
+
+        $basename = basename($path);
 
         // oss:auditor self-review finding: a case-SENSITIVE compare here
         // silently misses a differently-cased URI on a case-insensitive

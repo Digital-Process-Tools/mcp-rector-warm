@@ -775,3 +775,143 @@ def test_a_result_for_version_n_is_not_published_once_n_plus_1_arrived(server, p
     assert notification["params"]["version"] == 3, notification
     assert notification["params"]["diagnostics"] == []
     assert temp_leftovers(project) == []
+
+
+# --- #106 follow-up: independent E2E findings (reload loop, skips, leftovers) --
+
+WATCHING_CLIENT = {"workspace": {"didChangeWatchedFiles": {"dynamicRegistration": True}}}
+
+
+def start_watching_server(project: Path):
+    """A server whose client declared file watching, with its
+    registerCapability request answered, as a real editor would."""
+    proc = start_server(project, WATCHING_CLIENT)
+    request = read_frame(proc.stdout)
+    assert request["method"] == "client/registerCapability"
+    proc.stdin.write(frame({"jsonrpc": "2.0", "id": request["id"], "result": None}))
+    proc.stdin.flush()
+    return proc
+
+
+def watched_change(server, uri: str) -> None:
+    server.stdin.write(frame({
+        "jsonrpc": "2.0",
+        "method": "workspace/didChangeWatchedFiles",
+        "params": {"changes": [{"uri": uri, "type": 2}]},
+    }))
+    server.stdin.flush()
+
+
+def test_an_unsaved_rector_php_is_not_diagnosed(project):
+    # Must not fire: rector.php's buffer used to be diagnosed through a temp
+    # copy at <root>/.rector-warm-<pid>/rector.php, which the client's own
+    # **/rector.php watcher reported back as a config change -- the reload
+    # loop. The rector.php change is sent FIRST, so if it were diagnosed its
+    # publish would arrive first. Positive control: Clean.php's publish does.
+    proc = start_watching_server(project)
+    try:
+        rector = project / "rector.php"
+        did_change(proc, rector.as_uri(), 2, rector.read_bytes().decode("utf-8") + "\n// unsaved\n")
+        clean_uri = (project / "src" / "Clean.php").as_uri()
+        did_change(proc, clean_uri, 2, FIXABLE_BUFFER_FOR_CLEAN)
+
+        first = read_frame(proc.stdout)
+        assert first["params"]["uri"] == clean_uri, first
+        assert temp_leftovers(project) == []
+    finally:
+        stop_server(proc)
+
+
+def test_a_watched_event_for_a_temp_copy_does_not_rediagnose(project):
+    # Must not fire: an event for <root>/.rector-warm-<pid>/rector.php is the
+    # server's own temp file, not a config change. If it re-queued the open
+    # Clean.php buffer, Clean's publish (due at once) would arrive before
+    # Fixable's (due after the 500 ms debounce). Positive control: the real
+    # rector.php event does re-queue Clean.php.
+    proc = start_watching_server(project)
+    try:
+        clean_uri = (project / "src" / "Clean.php").as_uri()
+        fixable_uri = (project / "src" / "Fixable.php").as_uri()
+        did_change(proc, clean_uri, 2, FIXABLE_BUFFER_FOR_CLEAN)
+        assert read_frame(proc.stdout)["params"]["uri"] == clean_uri
+
+        watched_change(proc, (project / ".rector-warm-99999" / "rector.php").as_uri())
+        did_change(proc, fixable_uri, 2, (project / "src" / "Fixable.php").read_bytes().decode("utf-8"))
+        assert read_frame(proc.stdout)["params"]["uri"] == fixable_uri
+
+        watched_change(proc, (project / "rector.php").as_uri())
+        assert read_frame(proc.stdout)["params"]["uri"] == clean_uri
+    finally:
+        stop_server(proc)
+
+
+SKIP_FORMS = {
+    "exact path": ("__DIR__ . '/src/Fixable.php'", 0),
+    "relative path": ("'src/Fixable.php'", 0),
+    "parent-dir glob": ("'*/src/Fixable.php'", 0),
+    "rule-scoped exact path": (
+        "\\Rector\\CodeQuality\\Rector\\If_\\SimplifyIfReturnBoolRector::class => [__DIR__ . '/src/Fixable.php']",
+        0,
+    ),
+    "control: unrelated glob": ("'*/Other.php'", 1),
+    "control: no skip": (None, 1),
+}
+
+
+@pytest.mark.parametrize("form", list(SKIP_FORMS))
+def test_unsaved_diagnostics_honour_the_original_paths_skips(project, form):
+    # Unsaved == saved == cold, for each withSkip() form that names the
+    # ORIGINAL path, with two controls that must still report the fix.
+    skip, expected = SKIP_FORMS[form]
+    config = project / "rector.php"
+    text = config.read_bytes().decode("utf-8")
+    if skip is not None:
+        text = text.replace(
+            "->withPreparedSets(codeQuality: true);",
+            f"->withPreparedSets(codeQuality: true)\n    ->withSkip([{skip}]);",
+        )
+    config.write_bytes(text.encode("utf-8"))
+
+    path = project / "src" / "Fixable.php"
+    content = path.read_bytes().decode("utf-8")
+    uri = path.as_uri()
+    proc = start_server(project, {})
+    try:
+        saved = len(did_open(proc, uri)["params"]["diagnostics"])
+        did_change(proc, uri, 2, content)
+        unsaved = len(read_frame(proc.stdout)["params"]["diagnostics"])
+    finally:
+        stop_server(proc)
+
+    cold = subprocess.run(
+        [php_binary(), str(REPO / "vendor" / "bin" / "rector"), "process", "--dry-run",
+         "--config=rector.php", "--no-progress-bar", "--output-format=json", "--", "src/Fixable.php"],
+        cwd=project, capture_output=True, text=True, timeout=120,
+    )
+    cold_changed = json.loads(cold.stdout[cold.stdout.index("{"):])["totals"]["changed_files"]
+
+    assert (unsaved, saved, cold_changed) == (expected, expected, expected)
+    assert temp_leftovers(project) == []
+
+
+def test_startup_removes_a_dead_servers_temp_dir_and_keeps_a_live_ones(project):
+    # A server killed mid-run (kill -9) never reaches its `finally`. The next
+    # server sweeps .rector-warm-<pid> dirs whose pid is gone; one whose pid
+    # is alive (here: this pytest process, standing in for another editor's
+    # server) is kept.
+    exited = subprocess.Popen([sys.executable, "-c", "pass"])
+    exited.wait()
+    dead = project / "src" / f".rector-warm-{exited.pid}"
+    live = project / "src" / f".rector-warm-{os.getpid()}"
+    for directory in (dead, live):
+        directory.mkdir()
+        (directory / "Clean.php").write_bytes(b"<?php\n")
+
+    proc = start_server(project, {})
+    try:
+        # Any reply proves startup finished: initialize was answered.
+        assert did_open(proc, (project / "src" / "Clean.php").as_uri())["method"] == "textDocument/publishDiagnostics"
+        assert not dead.exists()
+        assert live.exists()
+    finally:
+        stop_server(proc)

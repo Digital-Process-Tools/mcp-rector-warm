@@ -218,12 +218,26 @@ what is saved. After each `didChange` it waits for 500 ms of quiet, then runs
 Rector on the buffer: the text is written to a temp copy **inside the
 project**, in a hidden `.rector-warm-<pid>/` directory next to the original
 and under the original's file name, so autoload, `rector.php` and the
-working-directory containment apply exactly as for the saved file. The copy
-and its directory are deleted as soon as the run ends, including when Rector
-reports an error. Diagnostics and quick fixes come back on the original URI,
-and error messages name the original path. The result is the one a cold
-`vendor/bin/rector process --dry-run` gives on a file with the same content
-at the same path.
+working-directory containment apply exactly as for the saved file. The
+server also passes the original path along, and the worker asks Rector's own
+`Skipper` about it: a `withSkip()` entry that matches the original (exact
+path, relative path, a glob, or a rule skipped for that path) is applied to
+the copy too. The copy and its directory are deleted when the run ends,
+including when Rector reports an error. A server killed outright
+(`kill -9`) cannot do that, so each server removes, at startup, any
+`.rector-warm-<pid>` directory whose pid is no longer running. The startup
+walk goes 8 levels deep and skips `vendor/`, `node_modules/` and VCS
+directories. Before each run, the server also removes such directories next
+to the file it is diagnosing. A directory whose pid is still running belongs
+to another server and is kept. Diagnostics and quick fixes come back on the
+original URI, and error messages name the original path. The result is the
+one a cold `vendor/bin/rector process --dry-run` gives on a file with the
+same content at the same path.
+
+`rector.php` and `composer.lock` are configuration, not code Rector
+refactors, so their unsaved buffers are not diagnosed. They take effect when
+saved. A file-watcher event for a path inside a `.rector-warm-<pid>/`
+directory is the server's own temp copy and is ignored.
 
 Every result carries the document `version` it was computed for. A result is
 published only if that version is still the latest: a change that arrives
@@ -237,12 +251,10 @@ the buffer.
 
 Limits of the buffer mode:
 
-- A `withSkip()` entry that names the file's **exact path**
-  (`__DIR__ . '/src/Foo.php'`) does not match the temp copy, so that file is
-  diagnosed while it has unsaved changes. Globs on the file name
-  (`*Test.php`, `*/Foo.php`), skipped directories and rules skipped for such
-  patterns do match, because the copy keeps the file name and sits below the
-  original's directory. This was checked against Rector 2.x.
+- Applying the original path's skips relies on two private lists in
+  Rector's skip resolvers (checked against Rector 2.x). If a future Rector
+  renames them, the server logs this on stderr and diagnoses the buffer
+  without those skips, rather than failing.
 - `didOpen` still reads the file from disk. A buffer that is already
   modified when it is opened is diagnosed from its first change.
 - Only `file:` URIs are diagnosed. An `untitled:` buffer has no project
@@ -254,8 +266,8 @@ Limits of the buffer mode:
   change sent while Rector runs supersedes that run, and it passes there. If
   a pipe could not report waiting bytes, the debounce would still fire on
   time, and the only loss would be that superseding.
-- Editors, watchers and `git status` can see the temp directory for the
-  length of one run.
+- Editors, watchers and `git status` can see the temp directory while a run
+  is in progress.
 
 On `initialized` the server also asks the client (via
 `client/registerCapability`) to watch `rector.php` and `composer.lock` and

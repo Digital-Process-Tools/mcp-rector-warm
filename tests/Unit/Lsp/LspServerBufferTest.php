@@ -278,4 +278,75 @@ final class LspServerBufferTest extends TestCase
         $server->runDueDiagnostics(self::LATER);
         self::assertCount(1, $source->calls);
     }
+
+    /**
+     * @return list<array<string, mixed>>
+     */
+    private static function watchedChange(LspServer $server, string $uri): array
+    {
+        return $server->handle([
+            'jsonrpc' => '2.0',
+            'method' => 'workspace/didChangeWatchedFiles',
+            'params' => ['changes' => [['uri' => $uri, 'type' => 2]]],
+        ]);
+    }
+
+    public function testAWatchedEventForTheTempCopyOfRectorPhpDoesNotRequeueBuffers(): void
+    {
+        // Must not fire (#106 E2E finding, reload loop): the temp copy of an
+        // unsaved rector.php lives at <dir>/.rector-warm-<pid>/rector.php,
+        // which a client watching **/rector.php reports as a config change.
+        // Treating it as one re-queued every buffer, including rector.php's,
+        // which wrote a new temp copy, and so on forever.
+        $source = self::source();
+        $server = new LspServer('1.0.0', $source);
+        self::change($server, 1, "<?php\nfixable\n");
+        $server->runDueDiagnostics(self::LATER);
+        $server->takeReadyDiagnostics();
+
+        self::assertSame([], self::watchedChange($server, 'file:///tmp/.rector-warm-4242/rector.php'));
+        self::assertNull($server->nextDiagnosticsDeadline());
+        $server->runDueDiagnostics(self::LATER);
+        self::assertCount(1, $source->calls);
+
+        // Positive control: the real rector.php re-queues the buffer.
+        self::watchedChange($server, 'file:///tmp/rector.php');
+        self::assertNotNull($server->nextDiagnosticsDeadline());
+        $server->runDueDiagnostics(self::LATER);
+        self::assertCount(2, $source->calls);
+    }
+
+    /**
+     * @return iterable<string, array{string}>
+     */
+    public static function configFileUris(): iterable
+    {
+        yield 'rector.php' => ['file:///tmp/rector.php'];
+        yield 'composer.lock' => ['file:///tmp/composer.lock'];
+        yield 'differently cased' => ['file:///tmp/Rector.PHP'];
+    }
+
+    #[\PHPUnit\Framework\Attributes\DataProvider('configFileUris')]
+    public function testAnUnsavedConfigFileIsNotBufferDiagnosed(string $uri): void
+    {
+        // Must not fire: rector.php and composer.lock are configuration, not
+        // source Rector refactors; diagnosing their buffers is what wrote the
+        // temp copy the watcher then reported. The must-fire control is
+        // testADidChangeWithFixableContentPublishesADiagnosticWithoutAnySave.
+        $source = self::source();
+        $server = new LspServer('1.0.0', $source);
+
+        $server->handle([
+            'jsonrpc' => '2.0',
+            'method' => 'textDocument/didChange',
+            'params' => [
+                'textDocument' => ['uri' => $uri, 'version' => 2],
+                'contentChanges' => [['text' => "<?php\nfixable\n"]],
+            ],
+        ]);
+
+        self::assertNull($server->nextDiagnosticsDeadline());
+        $server->runDueDiagnostics(self::LATER);
+        self::assertSame([], $source->calls);
+    }
 }

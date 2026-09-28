@@ -29,6 +29,13 @@ use Rector\DependencyInjection\RectorContainerFactory;
  */
 class RectorRunner implements RunnerInterface
 {
+    /**
+     * #106: `--rector-warm-skip-as=<original path>` marks a call on a temp
+     * copy of an unsaved editor buffer. It never reaches Rector: execute()
+     * strips it and applies the original path's skip rules to the copy.
+     */
+    public const SKIP_AS_OPTION = '--rector-warm-skip-as';
+
     private ?object $application = null;
     private ?object $container = null;
     private ?string $appClass = null;
@@ -1089,6 +1096,11 @@ class RectorRunner implements RunnerInterface
             }
         }
 
+        [$argv, $skipAs] = self::extractSkipAs($argv);
+        if ($skipAs !== null) {
+            $this->applySkipsOfOriginalPath($skipAs, (string) end($argv));
+        }
+
         // ArgvInput expects $_SERVER['argv'] semantics: [scriptName, ...args]
         $input = new $inputClass($argv);
         $output = new $outputClass();
@@ -1125,6 +1137,94 @@ class RectorRunner implements RunnerInterface
             'output' => $combined,
             'warm_boot' => $warmBoot,
         ];
+    }
+
+    /**
+     * @param list<string> $argv
+     * @return array{0: list<string>, 1: ?string} argv without the option, and its value
+     */
+    private static function extractSkipAs(array $argv): array
+    {
+        $skipAs = null;
+        $kept = [];
+        $prefix = self::SKIP_AS_OPTION . '=';
+        $optionsEnded = false;
+
+        foreach ($argv as $arg) {
+            if (!$optionsEnded && $arg === '--') {
+                $optionsEnded = true;
+            } elseif (!$optionsEnded && str_starts_with($arg, $prefix)) {
+                $skipAs = substr($arg, strlen($prefix));
+                continue;
+            }
+            $kept[] = $arg;
+        }
+
+        return [$kept, $skipAs];
+    }
+
+    /**
+     * #106: Rector decides skips by matching the path it processes against
+     * `withSkip()` (FileInfoMatcher: exact path, prefix, suffix, fnmatch).
+     * The temp copy of an unsaved buffer lives at a different path, so a skip
+     * naming the original -- `__DIR__ . '/src/Foo.php'`, `'src/Foo.php'`, a
+     * glob ending in `/src/Foo.php`, or `Rule::class => [that path]` --
+     * never matched it.
+     *
+     * Asks Rector's own Skipper about the ORIGINAL path, and extends the
+     * resolved skip lists so the copy is skipped the same way: the whole file
+     * if the original is path-skipped, otherwise each rule skipped for the
+     * original. This runs only in a process that dies after this one call
+     * (the forked grandchild, or the no-pcntl cold subprocess), so the warm
+     * worker's own container is never changed. It writes the two resolvers'
+     * cached lists, which are private: if Rector ever renames them, this
+     * fails open (the copy is diagnosed without those skips) and says so on
+     * stderr, rather than failing the call.
+     */
+    private function applySkipsOfOriginalPath(string $originalPath, string $copyPath): void
+    {
+        \assert($this->container !== null);
+
+        try {
+            $skipper = $this->container->get(\Rector\Skipper\Skipper\Skipper::class);
+            $copyPaths = \array_values(\array_unique(\array_filter([$copyPath, \realpath($copyPath) ?: null])));
+
+            if ($skipper->shouldSkipFilePath($originalPath)) {
+                $pathsResolver = $this->container->get(\Rector\Skipper\SkipCriteriaResolver\SkippedPathsResolver::class);
+                self::overwriteResolved($pathsResolver, 'skippedPaths', \array_merge($pathsResolver->resolve(), $copyPaths));
+
+                return;
+            }
+
+            $classResolver = $this->container->get(\Rector\Skipper\SkipCriteriaResolver\SkippedClassResolver::class);
+            $classes = $classResolver->resolve();
+            $changed = false;
+            foreach ($classes as $class => $files) {
+                if ($files === null) {
+                    continue; // skipped everywhere, the copy included
+                }
+                if ($skipper->matchSkip($class, $originalPath) !== null && $skipper->matchSkip($class, $copyPath) === null) {
+                    $classes[$class] = \array_merge($files, $copyPaths);
+                    $changed = true;
+                }
+            }
+
+            if ($changed) {
+                self::overwriteResolved($classResolver, 'skippedClassesToFiles', $classes);
+            }
+        } catch (\Throwable $e) {
+            \fwrite(\STDERR, \sprintf(
+                "mcp-rector-warm: could not apply the skip rules of %s to its buffer copy: %s\n",
+                $originalPath,
+                $e->getMessage(),
+            ));
+        }
+    }
+
+    private static function overwriteResolved(object $resolver, string $property, array $value): void
+    {
+        $reflection = new \ReflectionProperty($resolver, $property);
+        $reflection->setValue($resolver, $value);
     }
 
     /**
