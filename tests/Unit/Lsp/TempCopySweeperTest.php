@@ -71,7 +71,10 @@ final class TempCopySweeperTest extends TestCase
         $removed = TempCopySweeper::sweepTree($this->root);
 
         self::assertDirectoryDoesNotExist($dead);
-        self::assertSame([$dead], $removed);
+        // The sweeper joins with DIRECTORY_SEPARATOR, the test with '/':
+        // compare separator-neutral (Windows).
+        $normalize = static fn (string $path): string => str_replace('\\', '/', $path);
+        self::assertSame([$normalize($dead)], array_map($normalize, $removed));
         self::assertDirectoryExists($live);
         self::assertDirectoryExists($notOurs);
         self::assertFileExists($this->root . '/src');
