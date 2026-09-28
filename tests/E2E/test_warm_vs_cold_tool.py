@@ -39,8 +39,8 @@ def test_php_str_quotes_and_escapes():
 
 def test_select_files_glob(tmp_path):
     (tmp_path / "src").mkdir()
-    (tmp_path / "src" / "A.php").write_text("<?php")
-    (tmp_path / "src" / "B.txt").write_text("not php")
+    (tmp_path / "src" / "A.php").write_text("<?php", encoding="utf-8", newline="")
+    (tmp_path / "src" / "B.txt").write_text("not php", encoding="utf-8", newline="")
     files, candidates = warm_vs_cold.select_files(tmp_path, ["src/*"], None, seed=1)
     assert candidates == 1
     assert [f.name for f in files] == ["A.php"]
@@ -50,7 +50,7 @@ def test_select_files_limit_is_deterministic_and_bounded(tmp_path):
     for d in "abc":
         (tmp_path / d).mkdir()
         for i in range(5):
-            (tmp_path / d / f"F{i}.php").write_text("<?php")
+            (tmp_path / d / f"F{i}.php").write_text("<?php", encoding="utf-8", newline="")
     files1, candidates = warm_vs_cold.select_files(tmp_path, ["**/*.php"], 6, seed=42)
     files2, _ = warm_vs_cold.select_files(tmp_path, ["**/*.php"], 6, seed=42)
     assert candidates == 15
@@ -63,10 +63,10 @@ def test_select_files_limit_is_deterministic_and_bounded(tmp_path):
 
 def test_select_files_listfile(tmp_path):
     (tmp_path / "src").mkdir()
-    (tmp_path / "src" / "A.php").write_text("<?php")
-    (tmp_path / "src" / "B.php").write_text("<?php")
+    (tmp_path / "src" / "A.php").write_text("<?php", encoding="utf-8", newline="")
+    (tmp_path / "src" / "B.php").write_text("<?php", encoding="utf-8", newline="")
     listfile = tmp_path / "list.txt"
-    listfile.write_text("src/B.php\nsrc/A.php\n")
+    listfile.write_text("src/B.php\nsrc/A.php\n", encoding="utf-8", newline="")
     files, candidates = warm_vs_cold.select_files(tmp_path, [f"@{listfile}"], None, seed=1)
     assert candidates == 2
     # @LISTFILE keeps its own order -- not sorted like a glob.
@@ -146,7 +146,7 @@ def test_smoke_run_against_fixture_project(tmp_path):
         capture_output=True, text=True, timeout=120,
     )
     assert done.returncode == 0, f"stdout={done.stdout!r} stderr={done.stderr!r}"
-    report = json.loads((out / "report.json").read_text())
+    report = json.loads((out / "report.json").read_bytes().decode("utf-8"))
     assert report["summary"]["mismatch"] == 0
     assert report["summary"]["warm_error"] == 0
     assert report["summary"]["cold_error"] == 0
@@ -169,5 +169,5 @@ def test_smoke_run_rerun_into_same_out_does_not_reuse_stale_cache(tmp_path):
             capture_output=True, text=True, timeout=120,
         )
         assert done.returncode == 0, f"stdout={done.stdout!r} stderr={done.stderr!r}"
-    report = json.loads((out / "report.json").read_text())
+    report = json.loads((out / "report.json").read_bytes().decode("utf-8"))
     assert report["summary"]["mismatch"] == 0

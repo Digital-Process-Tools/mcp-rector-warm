@@ -37,7 +37,7 @@ def main() -> int:
     record = Path(sys.argv[1])
     record.mkdir(parents=True, exist_ok=True)
     child = subprocess.Popen(sys.argv[3:], stdin=subprocess.PIPE, stdout=subprocess.PIPE, bufsize=0)
-    (record / "started.json").write_text(json.dumps({"pid": child.pid, "argv": sys.argv[3:]}))
+    (record / "started.json").write_text(json.dumps({"pid": child.pid, "argv": sys.argv[3:]}), encoding="utf-8", newline="")
 
     raw = open(record / "stdout.raw", "wb")
     out_fd = sys.stdout.fileno()
@@ -92,7 +92,7 @@ def main() -> int:
         child.wait()
     reader.join(timeout=2)
     raw.close()
-    (record / "exit.json").write_text(json.dumps(status))
+    (record / "exit.json").write_text(json.dumps(status), encoding="utf-8", newline="")
     return 0
 
 

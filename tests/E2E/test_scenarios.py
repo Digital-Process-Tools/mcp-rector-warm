@@ -70,8 +70,11 @@ reports warm_boot = true (so the oracle compares a warm container, not a reboot)
 UNLESS a write/edit/delete/rename on rector.php/rector.dist.php, or on a path listed
 in the scenario's own 'bootstrap_files' (#33), happened since the previous call, in
 which case that one call must report warm_boot = false (a forced reboot, #20/#33) and
-warm_boot returns to true from the call after. stdout carries nothing but JSON-RPC,
-and the server exits 0 when the client closes.
+warm_boot returns to true from the call after. On a platform with no pcntl (Windows,
+#97) none of the above applies: RectorRunner never forks a warm worker there at all,
+so warm_boot is false for every call regardless of expect_reboot or config edits --
+see mcp_harness.NO_PCNTL_PLATFORM and call_step()'s own branch on it below. stdout
+carries nothing but JSON-RPC, and the server exits 0 when the client closes.
 """
 
 from __future__ import annotations
@@ -87,6 +90,7 @@ import pytest
 import yaml
 
 from mcp_harness import (
+    NO_PCNTL_PLATFORM,
     REPO,
     assert_no_zombie_descendants,
     exit_record,
@@ -138,7 +142,7 @@ EXPECT_KEYS = {
 def load(path: Path) -> dict[str, Any]:
     """Parse and validate one scenario. A typo in a key fails collection loudly
     rather than silently testing less than the file says."""
-    data = yaml.safe_load(path.read_text())
+    data = yaml.safe_load(path.read_bytes().decode("utf-8"))
     where = path.name
     if not isinstance(data, dict):
         raise ValueError(f"{where}: top level must be a mapping")
@@ -204,11 +208,11 @@ class Tree:
     def write(self, rel: str, content: str) -> None:
         target = self.path(rel)
         target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(content)
+        target.write_text(content, encoding="utf-8", newline="")
         self.touch_forward(target)
 
     def edit(self, rel: str, old: str, new: str) -> None:
-        text = self.path(rel).read_text()
+        text = self.path(rel).read_bytes().decode("utf-8")
         count = text.count(old)
         if count != 1:
             raise ValueError(f"edit {rel}: 'old' occurs {count} times, expected exactly once: {old!r}")
@@ -290,7 +294,15 @@ async def call_step(
 
     if cold_tree is not None:
         if not first_call:
-            if expect_reboot:
+            if NO_PCNTL_PLATFORM:
+                # #97/#31: no pcntl here means RectorRunner never forks a warm worker at
+                # all, so warm_boot is False for every call regardless of expect_reboot --
+                # asserting it stays meaningful (pins that runCold() is really what ran)
+                # rather than being skipped outright.
+                assert payload.get("warm_boot") is False, (
+                    f"{where}: no pcntl on this platform (#97) -- every call must be a cold boot: {payload}"
+                )
+            elif expect_reboot:
                 assert payload.get("warm_boot") is False, (
                     f"{where}: the resolved config changed since the last call, so this call must "
                     f"reboot (warm_boot=False) rather than reuse the container the old config built: {payload}"
