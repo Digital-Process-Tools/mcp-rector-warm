@@ -25,6 +25,14 @@ which kill message it asserts (worker-side vs. daemon-side) under ordinary CPU c
 running `tests/Unit/` back-to-back, confirmed by re-running the suite several times (the same test
 alone never flakes) -- see #81.
 
+**#81's own fix took the test-assertion route, not the grace-value route.** Both wedge tests now
+assert the message substring common to BOTH kill sites ("rector call exceeded" / "--call-timeout")
+instead of pinning which one fired, plus a new deterministic regression test
+(`testReadExactlyOuterBackstopMessageSharesPatternButNotFigureWithInnerKillSite`) that reaches the
+outer kill site directly via Reflection on an already-expired deadline, independent of contention.
+**This closes the flake, not the underlying gap**: the 5s value is still a guess, not a derived
+bound, and the paragraph above still applies in full to anyone touching either deadline.
+
 **Before touching either deadline in this file:** any change to `$callTimeoutSeconds`,
 `RUN_FORKED_DEADLINE_GRACE_SECONDS`, or either loop's timing needs the grace gap re-examined
 against the cleanup step's real worst case, not just the happy path -- and this file has no test
