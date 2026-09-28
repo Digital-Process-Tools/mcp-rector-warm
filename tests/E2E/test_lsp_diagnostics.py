@@ -71,6 +71,32 @@ def server(project):
         proc.wait(timeout=10)
 
 
+def start_server(project: Path, capabilities: dict):
+    """A server past `initialize` AND `initialized`, the way a real client
+    drives it -- the `server` fixture above stops after `initialize`, so it
+    never sees what `initialized` sends (#105)."""
+    proc = subprocess.Popen(
+        [php_binary(), str(BIN), f"--working-dir={project}"],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    proc.stdin.write(frame({
+        "jsonrpc": "2.0", "id": 1, "method": "initialize",
+        "params": {"processId": None, "rootUri": None, "capabilities": capabilities},
+    }))
+    proc.stdin.write(frame({"jsonrpc": "2.0", "method": "initialized", "params": {}}))
+    proc.stdin.flush()
+    read_frame(proc.stdout)
+    return proc
+
+
+def stop_server(proc) -> None:
+    if proc.poll() is None:
+        proc.kill()
+    proc.wait(timeout=10)
+
+
 def did_open(server, uri: str, version: int = 1):
     server.stdin.write(frame({
         "jsonrpc": "2.0",
@@ -158,6 +184,66 @@ def test_code_action_edit_matches_a_cold_rector_apply(server, project):
     cold_applied = (cold_copy / "src" / "Fixable.php").read_bytes().decode("utf-8")
 
     assert warm_applied == cold_applied
+
+
+def test_registration_is_sent_and_the_clients_reply_is_not_answered(project):
+    # #105, must fire: a client that declares dynamic registration for
+    # watched files gets the client/registerCapability request. Its reply
+    # (a RESPONSE: id + result, no method) must then produce no frame at
+    # all -- the next frame on the wire has to be didOpen's diagnostics,
+    # not a -32601 error aimed at the reply.
+    proc = start_server(project, {
+        "workspace": {"didChangeWatchedFiles": {"dynamicRegistration": True}},
+    })
+    try:
+        request = read_frame(proc.stdout)
+        assert request["method"] == "client/registerCapability"
+        proc.stdin.write(frame({"jsonrpc": "2.0", "id": request["id"], "result": None}))
+        proc.stdin.flush()
+
+        uri = (project / "src" / "Fixable.php").as_uri()
+        notification = did_open(proc, uri)
+
+        assert "error" not in notification, notification
+        assert notification["method"] == "textDocument/publishDiagnostics"
+        assert len(notification["params"]["diagnostics"]) == 1
+    finally:
+        stop_server(proc)
+
+
+def test_without_the_capability_nothing_is_registered_and_save_still_reloads_config(project):
+    # #105, must not fire: `capabilities: {}` declares no dynamic
+    # registration, so `initialized` must send nothing -- the first frame
+    # after it is didOpen's diagnostics. The config still reloads without
+    # the watcher: RectorRunner::configFileChanged() compares a content
+    # hash of rector.php on every call, so the next didSave after an edit
+    # to it publishes diagnostics under the NEW config.
+    proc = start_server(project, {})
+    try:
+        uri = (project / "src" / "Fixable.php").as_uri()
+        opened = did_open(proc, uri)
+        assert opened["method"] == "textDocument/publishDiagnostics", opened
+        assert len(opened["params"]["diagnostics"]) == 1
+
+        config = project / "rector.php"
+        config.write_text(config.read_text().replace(
+            "->withPreparedSets(codeQuality: true);",
+            "->withPreparedSets(codeQuality: true)\n"
+            "    ->withSkip([\\Rector\\CodeQuality\\Rector\\If_\\SimplifyIfReturnBoolRector::class]);",
+        ))
+
+        proc.stdin.write(frame({
+            "jsonrpc": "2.0",
+            "method": "textDocument/didSave",
+            "params": {"textDocument": {"uri": uri}},
+        }))
+        proc.stdin.flush()
+        saved = read_frame(proc.stdout)
+
+        assert saved["method"] == "textDocument/publishDiagnostics", saved
+        assert saved["params"]["diagnostics"] == []
+    finally:
+        stop_server(proc)
 
 
 def test_did_close_clears_diagnostics(server, project):
