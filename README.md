@@ -216,6 +216,15 @@ document finishes first -- inert in the current strictly-synchronous stdio
 loop (nothing can race it there today), kept as defense-in-depth for a future
 async/pipelined transport.
 
+On `initialized` the server also asks the client (via
+`client/registerCapability`) to watch `rector.php` and `composer.lock` and
+report changes through `workspace/didChangeWatchedFiles`. When one of those
+files changes, every currently-open document is re-diagnosed -- the warm
+worker already reloads the config on its next call on its own, but nothing
+else would trigger that next call for a document the editor is not also
+re-saving, so diagnostics would otherwise keep reflecting the old config
+until the editor restarted the server (#101).
+
 Out of v1 scope: unsaved buffers (Rector reads from disk), workspace-wide
 scans, and `workspace/configuration`. Editor-specific setup snippets are
 tracked in a follow-up issue ([#55](https://github.com/Digital-Process-Tools/mcp-rector-warm/issues/55)).

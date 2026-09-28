@@ -58,7 +58,7 @@ final class RectorTool
         // disclosure on arbitrary files (e.g. ~/projects/*.php, /etc/php/*.php).
         $cwd = realpath(getcwd() ?: '.');
         $real = realpath($path);
-        if ($cwd === false || $real === false || ($real !== $cwd && !str_starts_with($real, $cwd . DIRECTORY_SEPARATOR))) {
+        if ($cwd === false || $real === false || !self::isWithinRoot($real, $cwd)) {
             return self::errorResult([
                 'exit_code'   => -1,
                 'output'      => '',
@@ -147,6 +147,37 @@ final class RectorTool
             isError: true,
             structuredContent: $details,
         );
+    }
+
+    /**
+     * #99: on Windows the filesystem is case-insensitive, so realpath()
+     * comparing a $cwd-derived drive letter against a $real-derived one can
+     * legitimately differ only in case for the SAME file (verified: no
+     * Windows here -- see the developer report's platform-band note; the
+     * string comparison this drives is exercised directly by
+     * RectorToolContainmentTest via reflection, independent of the host
+     * OS). A bare str_starts_with() there would misjudge an in-root file as
+     * out-of-root. $caseInsensitive defaults from the running OS's own
+     * DIRECTORY_SEPARATOR so production behaviour needs no wiring; a test
+     * can still force either branch to pin the string logic on any
+     * platform.
+     */
+    private static function isWithinRoot(string $real, string $cwd, ?bool $caseInsensitive = null): bool
+    {
+        $caseInsensitive ??= DIRECTORY_SEPARATOR === '\\';
+        // #99: the case-insensitive branch is by definition the Windows
+        // one (that is exactly what $caseInsensitive means here), so it
+        // uses the Windows separator explicitly rather than the host's own
+        // DIRECTORY_SEPARATOR -- otherwise a test forcing this branch on a
+        // POSIX CI runner would build a mismatched "C:\...\\..." prefix.
+        $separator = $caseInsensitive ? '\\' : DIRECTORY_SEPARATOR;
+        $prefix = $cwd . $separator;
+
+        if ($caseInsensitive) {
+            return strcasecmp($real, $cwd) === 0 || stripos($real, $prefix) === 0;
+        }
+
+        return $real === $cwd || str_starts_with($real, $prefix);
     }
 
     /**
