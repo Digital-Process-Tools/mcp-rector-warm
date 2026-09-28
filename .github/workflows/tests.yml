@@ -212,3 +212,106 @@ jobs:
         env:
           E2E_PYTHON: python
         run: tests/E2E/run.sh
+
+  # #109: the README's editor snippets rot silently unless something runs
+  # them for real -- #94 found the native Neovim `vim.lsp.config` snippet
+  # broken on every Neovim that HAS vim.lsp.config, and nothing before this
+  # job noticed. Extracts the snippet straight out of README.md (marker
+  # comments, tests/E2E/nvim/extract_snippet.py) rather than a frozen copy,
+  # so a future edit to the README is exactly what this job re-runs against.
+  # ubuntu only, per the issue's own "macOS if cheap" -- kept to the pinned
+  # minimum version plus whatever Neovim's own `stable` tap currently ships,
+  # not a full OS x version cross product.
+  headless-nvim:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        nvim_version: ['v0.11.3', 'stable']
+      fail-fast: false
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Setup PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.3'
+          coverage: none
+          tools: composer:v2
+          extensions: fileinfo, intl, mbstring
+
+      - name: Get composer cache directory
+        id: composer-cache
+        run: echo "dir=$(composer config cache-files-dir)" >> "$GITHUB_OUTPUT"
+
+      - name: Cache composer
+        uses: actions/cache@v6
+        with:
+          path: ${{ steps.composer-cache.outputs.dir }}
+          # Self-review finding: without matrix.nvim_version in the key, both
+          # concurrent legs of this matrix (fail-fast: false) race to save
+          # the same cache entry -- only one save wins, so the other leg
+          # never gets a durable cache. Same reasoning as the `tests` job's
+          # own os+php-qualified key above.
+          key: composer-headless-nvim-${{ matrix.nvim_version }}-${{ hashFiles('composer.json') }}
+
+      - name: Install dependencies
+        run: composer install --no-progress --prefer-dist
+
+      - name: Install Neovim (${{ matrix.nvim_version }})
+        uses: rhysd/action-setup-vim@v1
+        with:
+          neovim: true
+          version: ${{ matrix.nvim_version }}
+
+      - name: Run headless Neovim smoke test
+        run: tests/E2E/nvim/run_smoke.sh
+
+  # Same rationale as headless-nvim above, for Helix -- "at minimum" per the
+  # issue: one health check, one OS, no version matrix. `hx --health`
+  # never sets a non-zero exit code either way, so run_helix_health.sh
+  # asserts on the printed text instead (see its own comment).
+  headless-helix:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Setup PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.3'
+          coverage: none
+          tools: composer:v2
+          extensions: fileinfo, intl, mbstring
+
+      - name: Get composer cache directory
+        id: composer-cache
+        run: echo "dir=$(composer config cache-files-dir)" >> "$GITHUB_OUTPUT"
+
+      - name: Cache composer
+        uses: actions/cache@v6
+        with:
+          path: ${{ steps.composer-cache.outputs.dir }}
+          key: composer-headless-helix-${{ hashFiles('composer.json') }}
+
+      - name: Install dependencies
+        run: composer install --no-progress --prefer-dist
+
+      - name: Install Helix
+        # Self-review finding: this used to resolve "latest" via an
+        # unauthenticated api.github.com call (60 req/hour, shared across
+        # every runner on this IP) and float to whatever Helix released most
+        # recently -- a flaky/moving target unrelated to any README
+        # regression. Pinned instead, same convention as headless-nvim's own
+        # matrix.nvim_version, and bumped by hand like that job's own pin.
+        env:
+          HELIX_VERSION: '25.07.1'
+        run: |
+          curl -fsSL -o helix.tar.xz "https://github.com/helix-editor/helix/releases/download/${HELIX_VERSION}/helix-${HELIX_VERSION}-x86_64-linux.tar.xz"
+          tar -xJf helix.tar.xz
+          install_dir="$(find . -maxdepth 1 -type d -name 'helix-*' | head -1)"
+          echo "$PWD/$install_dir" >> "$GITHUB_PATH"
+
+      - name: Run Helix health check
+        run: tests/E2E/nvim/run_helix_health.sh
