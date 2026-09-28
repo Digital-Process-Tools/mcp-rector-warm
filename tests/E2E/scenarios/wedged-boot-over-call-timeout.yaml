@@ -1,0 +1,74 @@
+description: >
+  A call-timeout puts a hard upper bound on a genuinely wedged BOOT -- a rector.php
+  that hangs before it ever returns its config -- the same #58 kill/reap mechanism as
+  wedged-call-over-call-timeout.yaml, but wedged inside boot()'s own handshake rather
+  than inside a rule's refactor() against an already-warm container. Both paths route
+  through the same RectorRunner::killAndReap() helper (confirmed by reading
+  src/RectorRunner.php), so the boot-path kill was previously covered only by
+  tests/Unit/RectorRunnerTest.php::testWedgedBootIsKilledAtTheDeadline, which never
+  snapshots a real OS process tree. This scenario is what actually drives that
+  boot-path kill through the harness's real ps-based zombie check (#48/#80).
+oracle: false  # the wedged call deliberately diverges from a cold 'rector process',
+               # which has no such deadline and would simply finish it -- see the
+               # 'call_timeout' key's own doc comment in test_scenarios.py.
+call_timeout: 5
+config: |
+  <?php
+
+  declare(strict_types=1);
+
+  use Rector\Config\RectorConfig;
+
+  // The sleep is at the CONFIG's own top level, before RectorConfig::configure() is
+  // even reached -- this wedges the boot() handshake itself. Compare
+  // wedged-call-over-call-timeout.yaml, whose sleep sits inside a rule's refactor(),
+  // wedging a CALL against an already-booted container instead.
+  sleep(30);
+
+  return RectorConfig::configure()
+      ->withPaths([__DIR__ . "/src"]);
+files:
+  src/Fast.php: |
+    <?php
+
+    declare(strict_types=1);
+
+    final class Fast
+    {
+        public function __construct(private readonly int $amount)
+        {
+        }
+    }
+steps:
+  - call: src/Fast.php
+    expect:
+      is_error: true
+      error_contains: "--call-timeout"
+      # #48/#80: the actual "list the daemon's children" check, run right after the
+      # kill+reap a wedged BOOT triggers -- no zombie descendant, no more than the
+      # one persistent worker left.
+      no_zombie_children: true
+  # The wedged rector.php never changes on disk, so every call against it would
+  # wedge again identically -- unlike the call-path scenario, where a DIFFERENT
+  # in-tree file sidesteps the wedge. Replacing rector.php forces the next call to
+  # reboot against a config that no longer hangs, proving the daemon self-heals
+  # instead of staying stuck after the kill (same shape as
+  # RectorRunnerTest::testWedgedBootIsKilledAtTheDeadline's second half).
+  - write:
+      path: rector.php
+      content: |
+        <?php
+
+        declare(strict_types=1);
+
+        use Rector\Config\RectorConfig;
+        use Rector\Php82\Rector\Class_\ReadOnlyClassRector;
+
+        return RectorConfig::configure()
+            ->withPaths([__DIR__ . "/src"])
+            ->withRules([ReadOnlyClassRector::class]);
+  - call: src/Fast.php
+    expect:
+      is_error: false
+      changed: 1
+      diff_contains: "+final readonly class Fast"

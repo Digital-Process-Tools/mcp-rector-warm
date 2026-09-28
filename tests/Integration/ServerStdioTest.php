@@ -47,6 +47,24 @@ final class ServerStdioTest extends TestCase
      * RectorRunner::canFork() checks. When false, RectorRunner falls back to a
      * full reboot before every call (#8), so no later call is ever reported
      * warm — that is the fallback's whole point, not a bug in it.
+     *
+     * #70: reproducing the CI `no-pcntl` leg locally with `php -d
+     * disable_functions=... vendor/bin/phpunit` does NOT reproduce this gate going
+     * false. `-d` only changes the OUTER phpunit process's ini; testWarmBootOnSecondCall
+     * and testEditedSourceIsReprocessedAcrossCalls spawn bin/mcp-rector-warm as a
+     * fresh subprocess via proc_open(), which starts its own PHP runtime and reads
+     * the DEFAULT php.ini, so pcntl stays enabled there even while this method
+     * returns false in the test process. The result is a real assertion mismatch
+     * (this method expects a forced reboot; the subprocess actually forks and warms
+     * up) that looks like a product bug but is a test-harness environment mismatch.
+     * CI's `no-pcntl` job does not have this gap: shivammathur/setup-php's
+     * `ini-values` rewrites the actual loaded php.ini, so every php invocation in
+     * that job — including the subprocess — has pcntl disabled, and both tests pass
+     * there (confirmed: green as of 1b837e0, and reproduced locally with the two
+     * disable_functions entries applied via PHPRC to a real php.ini instead of `-d`,
+     * which propagates to the subprocess exactly like CI's setup-php mechanism).
+     * To actually exercise this path locally, disable the three functions in a real
+     * php.ini (or via PHPRC) before running phpunit, not with `-d`.
      */
     private static function expectsForkedWarmth(): bool
     {

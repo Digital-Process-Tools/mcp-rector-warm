@@ -159,9 +159,23 @@ def process_descendants(root_pid: int) -> list[tuple[int, int, str]]:
     (not `ps --ppid`, which some `ps` builds refuse for a pid with no children at
     all rather than returning empty) walked as a tree from root_pid, POSIX `ps`
     output, portable across the ubuntu-latest runners this repo's CI actually
-    uses; not verified against a BSD/macOS `ps` column layout beyond "this
-    machine's -eo pid,ppid,stat happens to parse the same way", since CI never
-    runs this on anything but ubuntu-latest.
+    uses; CI itself never runs this on anything but ubuntu-latest (#79).
+
+    #79 follow-up, observed rather than reasoned: `ps -eo pid,ppid,stat` was run
+    directly against a real macOS (Darwin/BSD `ps`) process tree, including one
+    deliberately left as a zombie (a fork()ed child that exited without being
+    wait()ed on by its parent). BSD `ps` accepts the same `-eo pid,ppid,stat` flag
+    combination and produces the same three left-to-right columns; the only
+    difference observed is that its STAT column is fixed-width and carries
+    trailing padding spaces (e.g. `"Z   "` instead of procps-ng's bare `"Z"`).
+    `line.split(None, 2)` still yields exactly 3 parts (maxsplit=2 leaves the
+    padding inside parts[2] rather than splitting on it), and `"Z" in d[2]`
+    membership checks below are unaffected by trailing whitespace, so zombie
+    detection was confirmed working on this platform. This does not extend to
+    every BSD/macOS `ps` build or flag ordering, and CI still only runs Linux, so
+    the gap this issue names — no CI leg ever exercises this — remains real; only
+    the "does the parsing itself break" half of the reasoning has now been
+    checked on one real BSD-family `ps`, not merely assumed.
     """
     proc = subprocess.run(["ps", "-eo", "pid,ppid,stat"], capture_output=True, text=True, timeout=10)
     # A failed `ps` invocation (nonzero exit, e.g. a sandboxed/restricted
