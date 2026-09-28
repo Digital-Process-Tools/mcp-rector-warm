@@ -23,9 +23,11 @@ use Rector\DependencyInjection\RectorContainerFactory;
  * the config changes, for the life of the daemon.
  *
  * Without pcntl (no fork at all -- Windows, or #18's disable_functions case),
- * there is no OS-process boundary available to isolate a reboot in, so warming
- * is not attempted at all: every call boots and runs in its own fresh `php`
- * subprocess (runCold()), correct but without the warm speedup.
+ * there is no copy-on-write snapshot of a booted container to isolate each call
+ * in, so each call gets a whole fresh `php` process instead -- booted AHEAD of
+ * the call as a standby (#108, runViaStandbyWorker()), so the caller pays only
+ * for the analysis, as with the fork. MCP_RECTOR_WARM_NO_PCNTL=cold restores the
+ * pre-#108 behaviour: boot and run in one fresh subprocess per call (runCold()).
  */
 class RectorRunner implements RunnerInterface
 {
@@ -130,7 +132,7 @@ class RectorRunner implements RunnerInterface
 
     public function isWarm(): bool
     {
-        return $this->workerPid !== null;
+        return $this->workerPid !== null || $this->procWorker !== null;
     }
 
     /** @inheritDoc */
@@ -149,6 +151,11 @@ class RectorRunner implements RunnerInterface
      */
     public function reboot(): void
     {
+        // #108 (no pcntl): the standby, and any worker still exiting after its call.
+        // Synchronous, so no process is left holding the project dir as its cwd
+        // (which on Windows blocks removing it).
+        $this->discardProcWorker(false);
+        $this->stopRetiredProcWorkers();
         if ($this->workerPid === null) {
             return;
         }
@@ -211,11 +218,17 @@ class RectorRunner implements RunnerInterface
     public function run(array $argv, bool $dryRun = true): array
     {
         if (!$this->canFork()) {
-            // No pcntl at all: there is no OS-process boundary available to isolate a
-            // boot/reboot in (#31), so warming is never attempted -- every call is a
-            // fresh, correct-by-construction cold run. warm_boot is always false: this
-            // call never benefits from reuse.
-            return $this->runCold($argv, $dryRun);
+            // No pcntl (Windows, or #18's disable_functions case): no fork, so no
+            // copy-on-write snapshot of a booted container to isolate each call in.
+            // #108: a pre-booted, single-use worker PROCESS stands in for the fork --
+            // see runViaStandbyWorker(). MCP_RECTOR_WARM_NO_PCNTL=cold is the escape
+            // hatch back to the pre-#108 cold subprocess per call.
+            $mode = $this->noPcntlMode();
+            if ($mode === self::NO_PCNTL_MODE_COLD) {
+                return $this->runCold($argv, $dryRun);
+            }
+
+            return $this->runViaStandbyWorker($argv, $dryRun);
         }
 
         $warmBoot = $this->isWarm();
@@ -892,6 +905,501 @@ class RectorRunner implements RunnerInterface
         }
     }
 
+    // ------------------------------------------------------------------ #108
+    // Warm path without pcntl: a worker PROCESS instead of a forked worker.
+
+    /** Env var selecting the no-pcntl strategy (#108). Unset = standby. */
+    public const NO_PCNTL_MODE_ENV = 'MCP_RECTOR_WARM_NO_PCNTL';
+
+    /** Default: one pre-booted worker process per call, each serving exactly one call. */
+    public const NO_PCNTL_MODE_STANDBY = 'standby';
+
+    /** Escape hatch: the pre-#108 cold `php` subprocess per call (runCold()). */
+    public const NO_PCNTL_MODE_COLD = 'cold';
+
+    /** Recorded for a bootstrap file modified while the container booted: matches no
+     *  real hash, so the next check always reboots. See resolveBootstrapFileHashes(). */
+    private const BOOT_RACE_HASH = 'modified-during-boot';
+
+    /** serveProcessWorker()'s exit code when its daemon died while it waited. */
+    public const WORKER_EXIT_ORPHANED = 3;
+
+    /** How often an idle standby checks that its daemon is alive. 2s, not less: on
+     *  Windows each check starts a `tasklist`. */
+    private const ORPHAN_POLL_SECONDS = 2;
+
+    /** The no-pcntl worker this instance talks to, or null.
+     *  @var array{proc: resource, pid: int, server: resource|null, socket: resource|null, token: string, stderr: string, ready: bool}|null */
+    private ?array $procWorker = null;
+
+    /** Workers that served their one call and are exiting on their own; reaped lazily
+     *  so a call never waits on a process's shutdown.
+     *  @var list<array{proc: resource, stderr: string}> */
+    private array $retiredProcWorkers = [];
+
+    /** Resolve the no-pcntl strategy. Overridable so tests can pin one. */
+    protected function noPcntlMode(): string
+    {
+        $mode = \getenv(self::NO_PCNTL_MODE_ENV);
+
+        return \is_string($mode) && \strtolower(\trim($mode)) === self::NO_PCNTL_MODE_COLD
+            ? self::NO_PCNTL_MODE_COLD
+            : self::NO_PCNTL_MODE_STANDBY;
+    }
+
+    /**
+     * #108: the no-pcntl warm path. Without fork there is no copy-on-write snapshot of a
+     * booted container to run each call in, and running a second call in a container a
+     * first call already used is NOT equivalent to cold: measured in #108 with one
+     * long-lived worker process serving every call, 25 of the 55 E2E oracle scenarios
+     * diverged -- a dependency's edited method signature still answered with the old
+     * type (#8's own bug), and even a second, unedited file in the same container was
+     * reported unchanged when cold changes it. So each call still gets a container
+     * nothing was analysed in, exactly like the forked grandchild: what moves is WHEN it
+     * boots. A standby worker process is started right after a call returns and boots
+     * while the caller is busy elsewhere; the next call finds it booted and only pays for
+     * the analysis. The worker serves that one call and exits.
+     *
+     * @param list<string> $argv
+     * @return array{exit_code: int, output: string, warm_boot: bool}
+     */
+    protected function runViaStandbyWorker(array $argv, bool $dryRun): array
+    {
+        $this->reapRetiredProcWorkers();
+
+        // warm_boot: this call is served by a worker booted before it started
+        // (the standby a previous call left behind), not one booted on demand.
+        $warmBoot = $this->procWorker !== null;
+        if ($warmBoot) {
+            try {
+                // Normally already booted; a burst of calls may find it still
+                // booting, and then waits for the rest of the boot only.
+                $this->awaitProcWorkerReady($this->bootDeadlineNs());
+            } catch (\Throwable) {
+                // A standby that died or failed to boot is not this call's error:
+                // boot a fresh one below, which reports its own failure if any.
+                $this->discardProcWorker(true);
+                $warmBoot = false;
+            }
+        }
+        if ($warmBoot && !$this->procWorkerAlive()) {
+            $this->discardProcWorker(false);
+            $warmBoot = false;
+        }
+        if ($warmBoot && $this->configFileChanged()) {
+            // Compared against the snapshot THIS worker took before it booted
+            // (awaitProcWorkerReady() stored its handshake), so an edit that raced
+            // its boot always forces a fresh one (#20/#33/#34).
+            $this->discardProcWorker(false);
+            $warmBoot = false;
+        }
+        if (!$warmBoot) {
+            $this->spawnProcWorker();
+            try {
+                $this->awaitProcWorkerReady($this->bootDeadlineNs());
+            } catch (\Throwable $e) {
+                $this->discardProcWorker(true);
+                throw $e;
+            }
+        }
+
+        try {
+            return $this->callProcWorker($argv, $warmBoot, $dryRun);
+        } finally {
+            // Still set unless the call killed it: its container has now analysed
+            // something (or failed trying), so retire it -- it exits on its own after
+            // its one call -- and start the next call's standby now, so that boot
+            // overlaps the caller's think time.
+            if ($this->procWorker !== null) {
+                $this->retireProcWorker();
+                try {
+                    $this->spawnProcWorker();
+                } catch (\Throwable) {
+                    // No standby: the next call boots on demand instead.
+                    $this->procWorker = null;
+                }
+            }
+        }
+    }
+
+    /**
+     * Start a worker process (bin/rector-warm-worker.php) without waiting for it. It
+     * connects back over loopback TCP -- not a pipe: stream_set_timeout() and a
+     * non-blocking wait on proc_open() pipes do not work on Windows, which is the
+     * platform this path exists for, while sockets behave the same everywhere.
+     */
+    private function spawnProcWorker(): void
+    {
+        $server = @\stream_socket_server('tcp://127.0.0.1:0', $errno, $errstr);
+        if ($server === false) {
+            throw new \RuntimeException("Could not listen on loopback for the warm worker process: {$errstr}");
+        }
+        $address = (string) \stream_socket_get_name($server, false);
+        $token = \bin2hex(\random_bytes(16));
+        $stderrFile = \tempnam(\sys_get_temp_dir(), 'rector-warm-worker-stderr-');
+        if ($stderrFile === false) {
+            \fclose($server);
+            throw new \RuntimeException('Could not allocate a temp file for the warm worker process stderr.');
+        }
+        $descriptors = [
+            0 => ['pipe', 'r'],
+            // Never the daemon's own stdout: that is the MCP/LSP transport.
+            1 => ['file', \PHP_OS_FAMILY === 'Windows' ? 'NUL' : '/dev/null', 'w'],
+            2 => ['file', $stderrFile, 'w'],
+        ];
+        $proc = \proc_open([\PHP_BINARY, \dirname(__DIR__) . '/bin/rector-warm-worker.php'], $descriptors, $pipes);
+        if (!\is_resource($proc)) {
+            \fclose($server);
+            @\unlink($stderrFile);
+            throw new \RuntimeException('Could not spawn the warm worker process (no-pcntl path, #108).');
+        }
+        \fwrite($pipes[0], (string) \json_encode(
+            [
+                'daemon_argv' => $_SERVER['argv'] ?? [],
+                'cwd' => \getcwd(),
+                'address' => $address,
+                'token' => $token,
+                'daemon_pid' => \getmypid(),
+                'stderr_file' => $stderrFile,
+            ],
+            \JSON_INVALID_UTF8_SUBSTITUTE,
+        ));
+        \fclose($pipes[0]);
+        $status = \proc_get_status($proc);
+
+        $this->procWorker = [
+            'proc' => $proc,
+            'pid' => (int) $status['pid'],
+            'server' => $server,
+            'socket' => null,
+            'token' => $token,
+            'stderr' => $stderrFile,
+            'ready' => false,
+        ];
+    }
+
+    /**
+     * Wait until the current worker process has connected back (and proved it is ours
+     * with the token) and sent its boot handshake, then adopt the config snapshot the
+     * handshake carries. Idempotent once ready.
+     */
+    private function awaitProcWorkerReady(?int $deadlineNs): void
+    {
+        \assert($this->procWorker !== null);
+        if ($this->procWorker['ready']) {
+            return;
+        }
+        $timedOut = fn (): bool => $deadlineNs !== null && \hrtime(true) >= $deadlineNs;
+
+        while ($this->procWorker['socket'] === null) {
+            // Checked on EVERY pass, not only when nobody connected: a local process
+            // that keeps connecting must not keep this wait alive past the deadline.
+            if ($timedOut()) {
+                throw new \RuntimeException(
+                    "rector call exceeded its configured --call-timeout ({$this->callTimeoutSeconds}s) before the "
+                    . 'warm worker finished booting; the worker was killed',
+                );
+            }
+            $server = $this->procWorker['server'];
+            \assert($server !== null);
+            $connection = @\stream_socket_accept($server, 1);
+            if ($connection !== false) {
+                // Loopback is reachable by any local process: only a peer that
+                // sends the token first is our worker. Fixed length, so a stranger
+                // cannot make this read allocate more; and at most 5s, never past
+                // the call's own deadline.
+                \stream_set_timeout($connection, 1);
+                $expected = \pack('N', 32) . $this->procWorker['token'];
+                $helloDeadline = \hrtime(true) + 5_000_000_000;
+                if ($deadlineNs !== null) {
+                    $helloDeadline = \min($helloDeadline, $deadlineNs);
+                }
+                try {
+                    $hello = $this->readExactly($connection, \strlen($expected), $helloDeadline);
+                } catch (RectorCallTimeoutException) {
+                    $hello = null;
+                }
+                if ($hello !== null && \hash_equals($expected, $hello)) {
+                    $this->procWorker['socket'] = $connection;
+                    \fclose($server);
+                    $this->procWorker['server'] = null;
+                    break;
+                }
+                \fclose($connection);
+                continue;
+            }
+            if (!$this->procWorkerAlive()) {
+                throw new \RuntimeException('the warm worker process exited before it connected: ' . $this->procWorkerStderrTail());
+            }
+        }
+
+        $socket = $this->procWorker['socket'];
+        \stream_set_timeout($socket, 1);
+        try {
+            $handshake = $this->readFrame($socket, $deadlineNs);
+        } catch (RectorCallTimeoutException) {
+            throw new \RuntimeException(
+                "rector call exceeded its configured --call-timeout ({$this->callTimeoutSeconds}s) before the "
+                . 'warm worker finished booting; the worker was killed',
+            );
+        }
+        $decoded = $handshake === null ? null : \json_decode($handshake, true);
+        if (!\is_array($decoded) || ($decoded['ok'] ?? false) !== true) {
+            throw new \RuntimeException(
+                \is_array($decoded) && isset($decoded['error'])
+                    ? (string) $decoded['error']
+                    : 'the warm worker process failed to boot: ' . $this->procWorkerStderrTail(),
+            );
+        }
+
+        $this->procWorker['ready'] = true;
+        $this->configFile = \is_string($decoded['config_file'] ?? null) ? $decoded['config_file'] : null;
+        $this->configFileHash = \is_string($decoded['config_file_hash'] ?? null) ? $decoded['config_file_hash'] : null;
+        $this->composerFile = \is_string($decoded['composer_file'] ?? null) ? $decoded['composer_file'] : null;
+        $this->composerFileHash = \is_string($decoded['composer_file_hash'] ?? null) ? $decoded['composer_file_hash'] : null;
+        $this->bootstrapFileHashes = \is_array($decoded['bootstrap_files'] ?? null) ? $decoded['bootstrap_files'] : [];
+    }
+
+    /**
+     * Send one call to the ready worker process and wait for its result. One deadline
+     * layer only: the analysis runs in the worker's own process, so there is no inner
+     * kill site to give a head start to (unlike runForked()'s grace period).
+     *
+     * @param list<string> $argv
+     * @return array{exit_code: int, output: string, warm_boot: bool}
+     */
+    private function callProcWorker(array $argv, bool $warmBoot, bool $dryRun): array
+    {
+        \assert($this->procWorker !== null && $this->procWorker['socket'] !== null);
+        $socket = $this->procWorker['socket'];
+        $payload = (string) \json_encode(
+            ['argv' => $argv, 'warm_boot' => $warmBoot, 'dry_run' => $dryRun],
+            \JSON_INVALID_UTF8_SUBSTITUTE,
+        );
+        $deadline = $dryRun ? $this->callDeadlineNs() : null;
+        \stream_set_timeout($socket, 1);
+        try {
+            $this->writeFrame($socket, $payload);
+            $raw = $this->readFrame($socket, $deadline);
+        } catch (RectorCallTimeoutException) {
+            // #112: the whole tree -- the worker and anything the analysis spawned
+            // (Rector's parallel workers). The next call boots a fresh worker.
+            $this->discardProcWorker(true);
+            throw new \RuntimeException(
+                "rector call exceeded {$this->callTimeoutSeconds}s (--call-timeout); "
+                . 'the warm worker process was killed',
+            );
+        } catch (\RuntimeException $e) {
+            $this->discardProcWorker(true);
+            throw $e;
+        }
+        $decoded = $raw === null ? null : \json_decode($raw, true);
+        if (!\is_array($decoded)) {
+            $message = 'the warm worker process closed its connection unexpectedly: ' . $this->procWorkerStderrTail();
+            $this->discardProcWorker(true);
+            throw new \RuntimeException($message);
+        }
+        if (isset($decoded['error'])) {
+            throw new \RuntimeException((string) $decoded['error']);
+        }
+
+        /** @var array{exit_code: int, output: string, warm_boot: bool} $decoded */
+        return $decoded;
+    }
+
+    private function procWorkerAlive(): bool
+    {
+        if ($this->procWorker === null) {
+            return false;
+        }
+        $status = \proc_get_status($this->procWorker['proc']);
+
+        return $status['running'];
+    }
+
+    private function procWorkerStderrTail(): string
+    {
+        if ($this->procWorker === null || !\is_file($this->procWorker['stderr'])) {
+            return '(no stderr)';
+        }
+        $text = \trim((string) \file_get_contents($this->procWorker['stderr']));
+
+        return $text === '' ? '(no stderr)' : \substr($text, -2000);
+    }
+
+    /** Hand the current worker to the retired list: it exits on its own after its one call. */
+    private function retireProcWorker(): void
+    {
+        \assert($this->procWorker !== null);
+        if (\is_resource($this->procWorker['socket'])) {
+            \fclose($this->procWorker['socket']);
+        }
+        if (\is_resource($this->procWorker['server'])) {
+            \fclose($this->procWorker['server']);
+        }
+        $this->retiredProcWorkers[] = ['proc' => $this->procWorker['proc'], 'stderr' => $this->procWorker['stderr']];
+        $this->procWorker = null;
+    }
+
+    /**
+     * Stop the current worker now. $tree: kill its whole process tree first (#112) --
+     * the call-timeout path; otherwise the worker alone, which holds nothing worth a
+     * graceful shutdown.
+     */
+    private function discardProcWorker(bool $tree): void
+    {
+        if ($this->procWorker === null) {
+            return;
+        }
+        $worker = $this->procWorker;
+        $this->procWorker = null;
+        foreach (['socket', 'server'] as $key) {
+            if (\is_resource($worker[$key])) {
+                @\fclose($worker[$key]);
+            }
+        }
+        $status = \proc_get_status($worker['proc']);
+        if ($status['running']) {
+            if ($tree) {
+                // Before proc_terminate(): taskkill /T must find the root alive.
+                ProcessTree::killTree($worker['pid']);
+            }
+            // 9, not \SIGKILL: that constant belongs to pcntl, absent here.
+            \proc_terminate($worker['proc'], 9);
+        }
+        \proc_close($worker['proc']);
+        @\unlink($worker['stderr']);
+    }
+
+    private function reapRetiredProcWorkers(): void
+    {
+        foreach ($this->retiredProcWorkers as $i => $retired) {
+            $status = \proc_get_status($retired['proc']);
+            if (!$status['running']) {
+                \proc_close($retired['proc']);
+                @\unlink($retired['stderr']);
+                unset($this->retiredProcWorkers[$i]);
+            }
+        }
+        $this->retiredProcWorkers = \array_values($this->retiredProcWorkers);
+    }
+
+    /**
+     * The daemon exiting must not leave a booted standby behind -- on Windows a child
+     * holding inherited handles can also keep the host's pipes open.
+     */
+    public function __destruct()
+    {
+        $this->discardProcWorker(false);
+        $this->stopRetiredProcWorkers();
+    }
+
+    /** Stop and reap every retired worker now, rather than waiting for it to exit on
+     *  its own -- they have all served their call already. */
+    private function stopRetiredProcWorkers(): void
+    {
+        foreach ($this->retiredProcWorkers as $retired) {
+            $status = \proc_get_status($retired['proc']);
+            if ($status['running']) {
+                \proc_terminate($retired['proc'], 9);
+            }
+            \proc_close($retired['proc']);
+            @\unlink($retired['stderr']);
+        }
+        $this->retiredProcWorkers = [];
+    }
+
+    /**
+     * Worker-process side of #108, run by bin/rector-warm-worker.php: prove identity,
+     * boot once, report the config snapshot, serve exactly ONE call in this process,
+     * and return -- a second call here would run in a container a first one already
+     * used, which #108 measured to diverge from cold. The config/composer hashes are
+     * taken BEFORE the boot requires anything, so an edit that races the boot can only
+     * make the daemon's next check see a change (a needless reboot), never hide one.
+     *
+     * $daemonPid: the daemon that spawned this worker. While idle, the worker checks it
+     * is still alive and exits (WORKER_EXIT_ORPHANED) once it is not: a daemon killed
+     * without cleaning up (kill -9, a crash) never closes this connection, because a
+     * standby waits in the daemon's accept backlog and holds an inherited copy of
+     * that very listening socket -- so EOF alone never comes, and without this check
+     * the booted standby lived on forever.
+     *
+     * @param resource $socket
+     * @return int exit code
+     */
+    public function serveProcessWorker($socket, string $token, ?int $daemonPid = null): int
+    {
+        $this->writeFrame($socket, $token);
+
+        try {
+            $mainConfigFile = $this->resolveMainConfigFile();
+        } catch (\Throwable) {
+            $mainConfigFile = null;
+        }
+        $snapshot = [
+            'config_file' => $mainConfigFile,
+            'config_file_hash' => $this->hashConfigFile($mainConfigFile),
+            'composer_file' => $this->resolveComposerFile(),
+        ];
+        $snapshot['composer_file_hash'] = $this->hashConfigFile($snapshot['composer_file']);
+
+        try {
+            $this->bootInPlace();
+        } catch (\Throwable $e) {
+            $this->writeFrame($socket, $this->encodeHandshakeFrame([
+                'ok' => false,
+                'error' => $e->getMessage(),
+                'error_class' => $e::class,
+            ]));
+
+            return 1;
+        }
+        $this->writeFrame($socket, $this->encodeHandshakeFrame(
+            ['ok' => true, 'bootstrap_files' => $this->bootstrapFileHashes] + $snapshot,
+        ));
+
+        // Idle until the call arrives: a standby legitimately waits here for as long
+        // as the caller takes, so no deadline -- but not past its daemon's death.
+        // EOF = the daemon discarded it.
+        while ($daemonPid !== null) {
+            $read = [$socket];
+            $write = $except = null;
+            $ready = @\stream_select($read, $write, $except, self::ORPHAN_POLL_SECONDS);
+            if ($ready !== 0) {
+                break; // readable (a frame, or EOF), or select failed: readFrame() decides
+            }
+            // POSIX: the daemon is this worker's direct parent (proc_open() with an
+            // array command, no shell between them). A dead daemon's children are
+            // reparented at once, while the daemon itself can linger as a zombie its
+            // own parent has not reaped yet -- and a zombie still answers kill(pid, 0),
+            // so asking whether the daemon is alive would keep waiting on a corpse.
+            // Windows (and POSIX without the posix extension): no reparenting to
+            // watch, so ask whether it still runs. An unknown answer (null) keeps
+            // waiting -- never exit on a guess.
+            $orphaned = \function_exists('posix_getppid')
+                ? \posix_getppid() !== $daemonPid
+                : ProcessTree::isAlive($daemonPid) === false;
+            if ($orphaned) {
+                return self::WORKER_EXIT_ORPHANED;
+            }
+        }
+        $frame = $this->readFrame($socket);
+        if ($frame === null) {
+            return 0;
+        }
+        $request = \json_decode($frame, true);
+        $argv = \is_array($request) && \is_array($request['argv'] ?? null) ? $request['argv'] : [];
+        $warmBoot = \is_array($request) && ($request['warm_boot'] ?? false) === true;
+        try {
+            $result = $this->execute($argv, $warmBoot);
+        } catch (\Throwable $e) {
+            $result = ['error' => $e->getMessage(), 'error_class' => $e::class];
+        }
+        $this->writeFrame($socket, $this->encodeForkResult($result));
+
+        return 0;
+    }
+
     /**
      * Encode a forked/cold call's result for its transport. Rector's own JSON output
      * embeds raw source-derived text; a genuinely successful analysis of a file
@@ -1158,6 +1666,8 @@ class RectorRunner implements RunnerInterface
      */
     private function bootInPlace(): void
     {
+        // Before anything is required: see resolveBootstrapFileHashes().
+        $bootStartedAt = \time();
         $this->ensureRectorAutoloaded();
         $this->ensureProjectAutoloaded();
 
@@ -1203,7 +1713,7 @@ class RectorRunner implements RunnerInterface
             throw new \RuntimeException('Could not detect Rector prefix namespace.');
         }
 
-        $this->bootstrapFileHashes = $this->resolveBootstrapFileHashes();
+        $this->bootstrapFileHashes = $this->resolveBootstrapFileHashes($bootStartedAt);
 
         $this->appClass = $this->resolvePrefixed('Symfony\\Component\\Console\\Application');
         $this->inputClass = $this->resolvePrefixed('Symfony\\Component\\Console\\Input\\ArgvInput');
@@ -1265,9 +1775,19 @@ class RectorRunner implements RunnerInterface
      * return to pre-#33 behaviour indistinguishable from "this config simply
      * registers no bootstrap files".
      *
+     * Hashed AFTER the boot that required them, so an edit landing between Rector's
+     * require and this hash would be recorded as the version the container holds --
+     * no reboot, a stale container, a silent wrong answer (#108 review; the no-pcntl
+     * standby boots in the background after every call, which reopens this window
+     * after every call). A file modified at or after $bootStartedAt is therefore
+     * recorded as BOOT_RACE_HASH, which no real hash equals: the next
+     * configFileChanged() reports it changed. filemtime() has 1s resolution, so an
+     * edit in the same second just before the boot costs one needless reboot --
+     * the safe direction.
+     *
      * @return array<string, string|null>
      */
-    private function resolveBootstrapFileHashes(): array
+    private function resolveBootstrapFileHashes(int $bootStartedAt): array
     {
         try {
             $bootstrapFiles = \Rector\Configuration\Parameter\SimpleParameterProvider::provideArrayParameter('bootstrap_files');
@@ -1283,9 +1803,14 @@ class RectorRunner implements RunnerInterface
 
         $hashes = [];
         foreach ($bootstrapFiles as $bootstrapFile) {
-            if (is_string($bootstrapFile)) {
-                $hashes[$bootstrapFile] = $this->hashConfigFile($bootstrapFile);
+            if (!is_string($bootstrapFile)) {
+                continue;
             }
+            \clearstatcache(true, $bootstrapFile);
+            $mtime = @\filemtime($bootstrapFile);
+            $hashes[$bootstrapFile] = $mtime !== false && $mtime >= $bootStartedAt
+                ? self::BOOT_RACE_HASH
+                : $this->hashConfigFile($bootstrapFile);
         }
 
         return $hashes;

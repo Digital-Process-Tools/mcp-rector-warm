@@ -40,6 +40,13 @@ final class RectorRunnerTest extends TestCase
                 return false;
             }
 
+            // #108: the cold escape hatch (MCP_RECTOR_WARM_NO_PCNTL=cold) -- the
+            // default no-pcntl path is RectorRunnerStandbyWorkerTest's subject.
+            protected function noPcntlMode(): string
+            {
+                return self::NO_PCNTL_MODE_COLD;
+            }
+
             public function reboot(): void
             {
                 $this->log[] = 'reboot';
@@ -227,15 +234,13 @@ final class RectorRunnerTest extends TestCase
      * refuses identically rather than silently reusing a "warm" state that
      * can never do anything.
      *
-     * isWarm() afterwards depends on whether THIS environment can fork (#31): with
-     * pcntl, boot() still builds a real container in a worker before execute()
-     * refuses it, so isWarm() is true; without pcntl, run() never boots or forks
-     * anything any more -- every call, including this one, goes through the
-     * disposable-subprocess fallback (runCold()) -- so isWarm() stays false, exactly
-     * as testRunWithoutForkSupportAlwaysRunsColdAndNeverBootsInPlace pins for the
-     * stubbed case. Asserting a hardcoded `true` here would fail on this repo's own
-     * `no-pcntl` CI job (#31 follow-up: caught by actually running this test with
-     * pcntl disabled, not by reading the assertion).
+     * isWarm() afterwards: with pcntl, boot() still builds a real container in a
+     * worker before execute() refuses it, so isWarm() is true. Without pcntl it is
+     * true too since #108: the refused call's worker process is retired and a fresh
+     * standby is already booting for the next call. Only the
+     * MCP_RECTOR_WARM_NO_PCNTL=cold escape hatch keeps it false there (every call a
+     * disposable runCold() subprocess, #31) -- so the expectation is computed, not
+     * hardcoded, and this test runs on the no-pcntl CI job as it is.
      */
     public function testRunThrowsWhenZeroRulesRegistered(): void
     {
@@ -250,6 +255,9 @@ final class RectorRunnerTest extends TestCase
         $canFork = \function_exists('pcntl_fork')
             && \function_exists('pcntl_waitpid')
             && \function_exists('stream_socket_pair');
+        $expectWarm = $canFork
+            || \strtolower(\trim((string) \getenv(RectorRunner::NO_PCNTL_MODE_ENV))) !== RectorRunner::NO_PCNTL_MODE_COLD;
+        $runner = null;
 
         try {
             chdir($tmp);
@@ -266,11 +274,11 @@ final class RectorRunnerTest extends TestCase
             }
 
             self::assertSame(
-                $canFork,
+                $expectWarm,
                 $runner->isWarm(),
-                $canFork
-                    ? 'boot() built a real container from a config that genuinely loaded; only execute() refused'
-                    : 'without pcntl every call is a disposable cold subprocess (#31); nothing is ever warm',
+                $expectWarm
+                    ? 'a real container was built from a config that genuinely loaded (forked worker, or #108 standby); only execute() refused'
+                    : 'MCP_RECTOR_WARM_NO_PCNTL=cold: every call is a disposable cold subprocess (#31); nothing is ever warm',
             );
 
             // The refusal is not a one-off: the same still-empty config refuses
@@ -283,6 +291,9 @@ final class RectorRunnerTest extends TestCase
                 self::assertStringContainsString('registers no rules', $e->getMessage());
             }
         } finally {
+            // A worker (or #108 standby) with its cwd in $tmp would keep Windows
+            // from removing the directory.
+            $runner?->reboot();
             chdir($previousCwd);
             $_SERVER['argv'] = $previousArgv;
             unlink($tmp . '/rector.php');
@@ -1255,6 +1266,12 @@ final class RectorRunnerTest extends TestCase
                 {
                     return false;
                 }
+
+                // runCold() is under test: since #108 only the escape hatch reaches it.
+                protected function noPcntlMode(): string
+                {
+                    return self::NO_PCNTL_MODE_COLD;
+                }
             };
 
             $start = microtime(true);
@@ -1341,6 +1358,12 @@ final class RectorRunnerTest extends TestCase
                 {
                     return false;
                 }
+
+                // runCold() is under test: since #108 only the escape hatch reaches it.
+                protected function noPcntlMode(): string
+                {
+                    return self::NO_PCNTL_MODE_COLD;
+                }
             };
 
             // Not self::fail() inside this try: PHPUnit's AssertionFailedError
@@ -1416,7 +1439,7 @@ final class RectorRunnerTest extends TestCase
         self::assertNotFalse($filter);
 
         try {
-            $result = $method->invoke($runner);
+            $result = $method->invoke($runner, \time());
         } finally {
             stream_filter_remove($filter);
             \Rector\Configuration\Parameter\SimpleParameterProvider::setParameter('bootstrap_files', []);

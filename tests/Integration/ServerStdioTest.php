@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Dpt\McpRectorWarm\Tests\Integration;
 
+use Dpt\McpRectorWarm\RectorRunner;
 use PHPUnit\Framework\TestCase;
 
 /**
@@ -43,10 +44,12 @@ final class ServerStdioTest extends TestCase
     }
 
     /**
-     * True when this PHP process can fork, i.e. the same gate
-     * RectorRunner::canFork() checks. When false, RectorRunner falls back to a
-     * full reboot before every call (#8), so no later call is ever reported
-     * warm — that is the fallback's whole point, not a bug in it.
+     * True when the server's second call is expected to report warm_boot: with pcntl
+     * (the forked worker), and since #108 also without it (a pre-booted standby worker
+     * process). Only the escape hatch MCP_RECTOR_WARM_NO_PCNTL=cold on a no-pcntl PHP
+     * brings back a cold subprocess per call, and with it warm_boot false every time.
+     * The server subprocess inherits this process's environment, so the env var read
+     * here is the one it sees.
      *
      * #70: reproducing the CI `no-pcntl` leg locally with `php -d
      * disable_functions=... vendor/bin/phpunit` does NOT reproduce this gate going
@@ -66,11 +69,14 @@ final class ServerStdioTest extends TestCase
      * To actually exercise this path locally, disable the three functions in a real
      * php.ini (or via PHPRC) before running phpunit, not with `-d`.
      */
-    private static function expectsForkedWarmth(): bool
+    private static function expectsWarmth(): bool
     {
-        return \function_exists('pcntl_fork')
+        $canFork = \function_exists('pcntl_fork')
             && \function_exists('pcntl_waitpid')
             && \function_exists('stream_socket_pair');
+        $forcedCold = \strtolower(\trim((string) \getenv(RectorRunner::NO_PCNTL_MODE_ENV))) === RectorRunner::NO_PCNTL_MODE_COLD;
+
+        return $canFork || !$forcedCold;
     }
 
     public static function setUpBeforeClass(): void
@@ -164,11 +170,11 @@ final class ServerStdioTest extends TestCase
         self::assertNotNull($third, 'no response for id=3');
         $structured = $third['result']['structuredContent'];
         self::assertSame(
-            self::expectsForkedWarmth(),
+            self::expectsWarmth(),
             $structured['warm_boot'],
-            self::expectsForkedWarmth()
+            self::expectsWarmth()
                 ? 'second tools/call should reuse warm container'
-                : 'without pcntl, RectorRunner reboots before every call, so the second call is cold too',
+                : 'MCP_RECTOR_WARM_NO_PCNTL=cold without pcntl: every call is a cold subprocess, the second too',
         );
     }
 
@@ -219,7 +225,7 @@ final class ServerStdioTest extends TestCase
             $this->send($proc['stdin'], $this->processCall(3, $file));
             $second = $this->readResponse($proc['stdout'], 3);
             self::assertSame(
-                self::expectsForkedWarmth(),
+                self::expectsWarmth(),
                 $second['result']['structuredContent']['warm_boot'],
                 'second call warm_boot mismatch' . $this->stderrTail($proc['stderr'])
             );

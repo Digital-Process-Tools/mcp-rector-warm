@@ -98,6 +98,30 @@ final class ProcessTree
     }
 
     /**
+     * Whether $pid is a live process: true, false, or null when that cannot be told
+     * (no posix, no proc_open, no tasklist/ps). A caller deciding to give up on a
+     * peer must treat null as "alive" -- this is a best-effort probe, never proof.
+     */
+    public static function isAlive(int $pid): ?bool
+    {
+        if ($pid <= 0) {
+            return false;
+        }
+        if (\PHP_OS_FAMILY === 'Windows') {
+            $out = self::run(['tasklist', '/FI', 'PID eq ' . $pid, '/NH', '/FO', 'CSV']);
+
+            return $out === null ? null : \str_contains($out, '"' . $pid . '"');
+        }
+        if (\function_exists('posix_kill')) {
+            // Signal 0 probes without sending; EPERM (1) still means it exists.
+            return @\posix_kill($pid, 0) || \posix_get_last_error() === 1;
+        }
+        $out = self::run(['ps', '-o', 'pid=', '-p', (string) $pid]);
+
+        return $out === null ? null : \trim($out) !== '';
+    }
+
+    /**
      * @param list<int> $pids
      * @param 'STOP'|'KILL' $name
      */

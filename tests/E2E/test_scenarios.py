@@ -70,10 +70,10 @@ reports warm_boot = true (so the oracle compares a warm container, not a reboot)
 UNLESS a write/edit/delete/rename on rector.php/rector.dist.php, or on a path listed
 in the scenario's own 'bootstrap_files' (#33), happened since the previous call, in
 which case that one call must report warm_boot = false (a forced reboot, #20/#33) and
-warm_boot returns to true from the call after. On a platform with no pcntl (Windows,
-#97) none of the above applies: RectorRunner never forks a warm worker there at all,
-so warm_boot is false for every call regardless of expect_reboot or config edits --
-see mcp_harness.NO_PCNTL_PLATFORM and call_step()'s own branch on it below. stdout
+warm_boot returns to true from the call after. The same holds without pcntl (Windows,
+or E2E_DISABLE_PCNTL=1) since #108, where a pre-booted standby worker process stands in
+for the fork; only the MCP_RECTOR_WARM_NO_PCNTL=cold escape hatch makes every call cold
+-- see mcp_harness.EXPECT_COLD_EVERY_CALL and call_step()'s own branch on it below. stdout
 carries nothing but JSON-RPC, and the server exits 0 when the client closes.
 """
 
@@ -90,7 +90,7 @@ import pytest
 import yaml
 
 from mcp_harness import (
-    NO_PCNTL_PLATFORM,
+    EXPECT_COLD_EVERY_CALL,
     REPO,
     assert_no_zombie_descendants,
     exit_record,
@@ -294,13 +294,12 @@ async def call_step(
 
     if cold_tree is not None:
         if not first_call:
-            if NO_PCNTL_PLATFORM:
-                # #97/#31: no pcntl here means RectorRunner never forks a warm worker at
-                # all, so warm_boot is False for every call regardless of expect_reboot --
-                # asserting it stays meaningful (pins that runCold() is really what ran)
-                # rather than being skipped outright.
+            if EXPECT_COLD_EVERY_CALL:
+                # MCP_RECTOR_WARM_NO_PCNTL=cold on a no-pcntl platform: the escape hatch
+                # back to runCold(), so warm_boot is False for every call -- asserted
+                # rather than skipped, it pins that runCold() is really what ran.
                 assert payload.get("warm_boot") is False, (
-                    f"{where}: no pcntl on this platform (#97) -- every call must be a cold boot: {payload}"
+                    f"{where}: MCP_RECTOR_WARM_NO_PCNTL=cold -- every call must be a cold boot: {payload}"
                 )
             elif expect_reboot:
                 assert payload.get("warm_boot") is False, (
