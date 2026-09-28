@@ -23,6 +23,16 @@ final class LspServer
     private array $documentVersions = [];
 
     /**
+     * @var list<string> URIs in the order they were last diagnosed
+     *   (didOpen/didSave), oldest first. #115: when a config change
+     *   re-diagnoses every open document, the one the developer is
+     *   actively working in should not queue behind ones that merely
+     *   happened to open earlier -- array_reverse() of this gives
+     *   most-recently-active first.
+     */
+    private array $activityOrder = [];
+
+    /**
      * @var array<string, list<array{range: array{start: array{line:int,character:int}, end: array{line:int,character:int}}, newText: string, rectors: list<string>}>>
      *   URI -> the fixes behind its currently-published diagnostics, so
      *   codeAction can build a WorkspaceEdit without re-running Rector.
@@ -201,11 +211,16 @@ final class LspServer
             return [];
         }
 
+        // #115: most-recently-active document first, not open-order -- see
+        // the $activityOrder property doc. array_reverse() snapshots the
+        // order before the loop starts, so a call's own touchActivity()
+        // (inside diagnoseDocument, below) mutating $this->activityOrder
+        // mid-loop cannot reorder an iteration already under way.
         $frames = [];
-        foreach (array_keys($this->documentVersions) as $uri) {
+        foreach (array_reverse($this->activityOrder) as $uri) {
             $frames = array_merge($frames, $this->diagnoseDocument([
                 'uri' => $uri,
-                'version' => $this->documentVersions[$uri],
+                'version' => $this->documentVersions[$uri] ?? 0,
             ]));
         }
 
@@ -239,6 +254,7 @@ final class LspServer
 
         $version = $textDocument['version'] ?? ($this->documentVersions[$uri] ?? 0);
         $this->documentVersions[$uri] = $version;
+        $this->touchActivity($uri);
 
         $path = self::uriToPath($uri);
         $result = $this->diagnostics->diagnose($path);
@@ -305,8 +321,23 @@ final class LspServer
         }
 
         unset($this->fixesByUri[$uri], $this->documentVersions[$uri]);
+        $this->removeFromActivityOrder($uri);
 
         return [$this->publishDiagnostics($uri, [])];
+    }
+
+    private function touchActivity(string $uri): void
+    {
+        $this->removeFromActivityOrder($uri);
+        $this->activityOrder[] = $uri;
+    }
+
+    private function removeFromActivityOrder(string $uri): void
+    {
+        $index = array_search($uri, $this->activityOrder, true);
+        if ($index !== false) {
+            array_splice($this->activityOrder, $index, 1);
+        }
     }
 
     /**

@@ -235,6 +235,16 @@ final class RectorDiffParser
                 $rectors = $appliedRectors;
             } elseif ($useLeftover) {
                 $rectors = $leftover;
+            } elseif (count($appliedRectors) === 1) {
+                // #100 reopen: a single rule can produce two (or more)
+                // hunks while `changes[]` reports only one line for it --
+                // closest-hunk matching then attributes that one line to
+                // ONE hunk, which puts the rule into $attributed and takes
+                // it out of $leftover, so the branch above never reaches
+                // the other hunk. When the whole file applied exactly one
+                // rule, there is no ambiguity to guard against: no other
+                // rule exists that could have produced this hunk instead.
+                $rectors = $appliedRectors;
             } else {
                 $rectors = [];
             }

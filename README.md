@@ -219,7 +219,10 @@ async/pipelined transport.
 On `initialized` the server also asks the client (via
 `client/registerCapability`) to watch `rector.php` and `composer.lock` and
 report changes through `workspace/didChangeWatchedFiles`. When one of those
-files changes, every currently-open document is re-diagnosed -- the warm
+files changes, every currently-open document is re-diagnosed, most-recently
+opened-or-saved first (#115) -- so the document you are actively working in
+gets fresh diagnostics before ones that merely happened to be opened
+earlier; the total time across every open document is unchanged. The warm
 worker already reloads the config on its next call on its own, but nothing
 else would trigger that next call for a document the editor is not also
 re-saving, so diagnostics would otherwise keep reflecting the old config

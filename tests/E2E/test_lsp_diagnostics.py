@@ -27,6 +27,7 @@ HERE = Path(__file__).resolve().parent
 REPO = HERE.parents[1]
 FIXTURE = REPO / "tests" / "Fixtures" / "lsp-project"
 INSERT_ONLY_FIXTURE = REPO / "tests" / "Fixtures" / "lsp-insert-only-project"
+MULTI_HUNK_SINGLE_RULE_FIXTURE = REPO / "tests" / "Fixtures" / "lsp-multi-hunk-single-rule-project"
 
 
 def copy_fixture(dest: Path, source: Path = FIXTURE) -> None:
@@ -502,6 +503,91 @@ def test_shutdown_then_exit_leaves_no_warm_worker_process(server, project):
         if still_alive:
             time.sleep(0.1)
     assert still_alive == [], f"warm worker pid(s) {still_alive} are still alive after shutdown+exit"
+
+
+@pytest.fixture
+def multi_hunk_single_rule_project(tmp_path):
+    dest = tmp_path / "multi-hunk-single-rule-project"
+    copy_fixture(dest, source=MULTI_HUNK_SINGLE_RULE_FIXTURE)
+    return dest
+
+
+@pytest.fixture
+def multi_hunk_single_rule_server(multi_hunk_single_rule_project):
+    proc = subprocess.Popen(
+        [php_binary(), str(BIN), f"--working-dir={multi_hunk_single_rule_project}"],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    proc.stdin.write(frame({
+        "jsonrpc": "2.0", "id": 1, "method": "initialize",
+        "params": {"processId": None, "rootUri": None, "capabilities": {}},
+    }))
+    proc.stdin.flush()
+    read_frame(proc.stdout)
+    try:
+        yield proc
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+        proc.wait(timeout=10)
+
+
+def test_two_hunks_from_one_rule_both_get_the_specific_label(
+    multi_hunk_single_rule_server, multi_hunk_single_rule_project,
+):
+    # #100 (reopened -- #103's fallback did not cover this case): verified
+    # empirically while writing this test -- RemoveUnusedPrivatePropertyRector
+    # on a file with two unused private properties far enough apart to land
+    # in separate diff hunks produces exactly this shape from a real, cold
+    # `vendor/bin/rector process --output-format=json` run: 2 hunks,
+    # `applied_rectors` naming the one rule, and `changes[]` naming it only
+    # ONCE (attributed to the first hunk by closest-hunk matching). Both
+    # hunks must get the specific rule name, not "Rector fix" for the second.
+    uri = (multi_hunk_single_rule_project / "src" / "TwoUnusedProperties.php").as_uri()
+
+    notification = did_open(multi_hunk_single_rule_server, uri)
+
+    diagnostics = notification["params"]["diagnostics"]
+    assert len(diagnostics) == 2, notification
+    for diagnostic in diagnostics:
+        assert "RemoveUnusedPrivatePropertyRector" in diagnostic["message"], diagnostic
+
+
+def test_watched_config_change_re_diagnoses_the_most_recently_active_document_first(project):
+    # #115: verified over the real stdio transport and the real LspServer
+    # (not just the unit-level DiagnosticsSource fake in LspServerTest) --
+    # opening A then B, then a rector.php watched-file change, must
+    # republish B (the more recently active document) before A.
+    proc = start_server(project, {
+        "workspace": {"didChangeWatchedFiles": {"dynamicRegistration": True}},
+    })
+    try:
+        request = read_frame(proc.stdout)
+        assert request["method"] == "client/registerCapability"
+        proc.stdin.write(frame({"jsonrpc": "2.0", "id": request["id"], "result": None}))
+        proc.stdin.flush()
+
+        uri_a = (project / "src" / "Fixable.php").as_uri()
+        uri_b = (project / "src" / "Clean.php").as_uri()
+        did_open(proc, uri_a)
+        did_open(proc, uri_b)
+
+        proc.stdin.write(frame({
+            "jsonrpc": "2.0",
+            "method": "workspace/didChangeWatchedFiles",
+            "params": {"changes": [{"uri": (project / "rector.php").as_uri(), "type": 2}]},
+        }))
+        proc.stdin.flush()
+
+        first = read_frame(proc.stdout)
+        second = read_frame(proc.stdout)
+
+        assert first["params"]["uri"] == uri_b, (first, second)
+        assert second["params"]["uri"] == uri_a, (first, second)
+    finally:
+        stop_server(proc)
 
 
 def _pid_is_alive(pid: int) -> bool:
