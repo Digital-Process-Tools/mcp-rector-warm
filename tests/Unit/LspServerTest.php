@@ -166,6 +166,52 @@ final class LspServerTest extends TestCase
         self::assertSame('Rector\\CodeQuality\\Rector\\If_\\SimplifyIfReturnBoolRector', $diagnostic['message']);
     }
 
+    public function testDidOpenPublishesAnErrorDiagnosticForAnErrorsEntryWithNoQuickfix(): void
+    {
+        // #90: an `errors` entry (e.g. a syntax error) has no fix behind it
+        // -- it must still reach the editor as an Error-severity diagnostic,
+        // and must NOT be offered as a quickfix (no `data.hunkIndex`, and it
+        // never enters fixesByUri, so codeAction cannot build a
+        // WorkspaceEdit for it that would do nothing when applied).
+        $source = new class implements DiagnosticsSource {
+            public function diagnose(string $absolutePath): array
+            {
+                return ['fixes' => [], 'errors' => [['message' => 'Syntax error, unexpected token', 'line' => 7]]];
+            }
+        };
+        $server = new LspServer('1.0.0', $source);
+
+        $responses = $server->handle([
+            'jsonrpc' => '2.0',
+            'method' => 'textDocument/didOpen',
+            'params' => ['textDocument' => ['uri' => 'file:///tmp/Broken.php', 'version' => 1]],
+        ]);
+
+        self::assertCount(1, $responses);
+        $diagnostics = $responses[0]['params']['diagnostics'];
+        self::assertCount(1, $diagnostics);
+        self::assertSame(1, $diagnostics[0]['severity']);
+        self::assertSame('Syntax error, unexpected token', $diagnostics[0]['message']);
+        self::assertSame(['line' => 6, 'character' => 0], $diagnostics[0]['range']['start']);
+        self::assertArrayNotHasKey('data', $diagnostics[0]);
+
+        $codeActionResponses = $server->handle([
+            'jsonrpc' => '2.0',
+            'id' => 2,
+            'method' => 'textDocument/codeAction',
+            'params' => [
+                'textDocument' => ['uri' => 'file:///tmp/Broken.php'],
+                'range' => ['start' => ['line' => 6, 'character' => 0], 'end' => ['line' => 6, 'character' => 0]],
+                'context' => ['diagnostics' => []],
+            ],
+        ]);
+
+        // No quickfix at all for the error line -- fixesByUri is empty, so
+        // only the (in this case pointless, but harmless) whole-file action
+        // would be offered if there were any fixes; there are none.
+        self::assertSame([], $codeActionResponses[0]['result']);
+    }
+
     public function testDidSaveOnAnUnchangedFilePublishesEmptyDiagnostics(): void
     {
         // Positive control for the case above, and the negative control the

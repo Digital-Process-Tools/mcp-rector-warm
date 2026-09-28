@@ -24,28 +24,73 @@ final class RectorDiagnosticsSource implements DiagnosticsSource
 
         if ($result instanceof CallToolResult) {
             $error = is_array($result->structuredContent) ? ($result->structuredContent['error'] ?? null) : null;
+            $message = is_string($error) && $error !== '' ? $error : 'unknown error';
             fwrite(STDERR, sprintf(
                 "rector-warm-lsp: diagnostics failed for %s: %s\n",
                 $absolutePath,
-                $error ?? 'unknown error',
+                $message,
             ));
 
-            return ['fixes' => []];
+            // #90: a refused call (out-of-root path, SecurityError) used to
+            // come back looking identical to "nothing to report" -- the
+            // stderr line above was the only trace. Surface it as an error
+            // diagnostic too, since stderr is not where an editor looks.
+            return ['fixes' => [], 'errors' => [['message' => $message, 'line' => 0]]];
         }
 
         $report = self::extractReport($result['output'] ?? '');
+        $errors = self::buildErrors($report['errors'] ?? []);
         $fileDiffs = $report['file_diffs'] ?? [];
         if ($fileDiffs === []) {
-            return ['fixes' => []];
+            return ['fixes' => [], 'errors' => $errors];
         }
 
         $entry = $fileDiffs[0];
 
-        return ['fixes' => RectorDiffParser::buildFixes(
-            $entry['diff'] ?? '',
-            $entry['applied_rectors'] ?? [],
-            $entry['changes'] ?? [],
-        )];
+        return [
+            'fixes' => RectorDiffParser::buildFixes(
+                $entry['diff'] ?? '',
+                $entry['applied_rectors'] ?? [],
+                $entry['changes'] ?? [],
+            ),
+            'errors' => $errors,
+        ];
+    }
+
+    /**
+     * #90: `report['errors']` (a syntax error, or any other per-file Rector
+     * failure) used to be read nowhere at all -- a file that goes from
+     * "1 fixable diagnostic" to "does not even parse" dropped to zero
+     * diagnostics, the same silent-clean shape as the CallToolResult branch
+     * above. Tolerant of both the documented shape (`{"message":...,
+     * "line":...}`) and a bare string entry, since nothing upstream pins
+     * Rector's own error-entry shape across versions.
+     *
+     * @param mixed $rawErrors
+     * @return list<array{message: string, line: int}>
+     */
+    private static function buildErrors(mixed $rawErrors): array
+    {
+        if (!is_array($rawErrors)) {
+            return [];
+        }
+
+        $errors = [];
+        foreach ($rawErrors as $raw) {
+            if (is_array($raw)) {
+                $message = is_string($raw['message'] ?? null) ? $raw['message'] : 'Rector reported an error.';
+                $line = is_int($raw['line'] ?? null) ? $raw['line'] : 0;
+            } elseif (is_string($raw)) {
+                $message = $raw;
+                $line = 0;
+            } else {
+                continue;
+            }
+
+            $errors[] = ['message' => $message, 'line' => $line];
+        }
+
+        return $errors;
     }
 
     /**

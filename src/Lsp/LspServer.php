@@ -150,6 +150,23 @@ final class LspServer
             ];
         }
 
+        // #90: an `errors` entry (syntax error, out-of-root refusal, ...) has
+        // no fix behind it -- no quickfix, so no `data.hunkIndex` -- but must
+        // still reach the editor as a diagnostic, at Error severity, rather
+        // than being dropped on the floor the way it was before this fix.
+        foreach (($result['errors'] ?? []) as $error) {
+            $line = max(0, (int) ($error['line'] ?? 0) - 1);
+            $diagnostics[] = [
+                'range' => [
+                    'start' => ['line' => $line, 'character' => 0],
+                    'end' => ['line' => $line, 'character' => 0],
+                ],
+                'severity' => 1,
+                'source' => 'rector',
+                'message' => (string) ($error['message'] ?? 'Rector reported an error.'),
+            ];
+        }
+
         return [$this->publishDiagnostics($uri, $diagnostics)];
     }
 
