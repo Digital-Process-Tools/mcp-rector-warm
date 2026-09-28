@@ -248,7 +248,12 @@ jobs:
         uses: actions/cache@v6
         with:
           path: ${{ steps.composer-cache.outputs.dir }}
-          key: composer-headless-nvim-${{ hashFiles('composer.json') }}
+          # Self-review finding: without matrix.nvim_version in the key, both
+          # concurrent legs of this matrix (fail-fast: false) race to save
+          # the same cache entry -- only one save wins, so the other leg
+          # never gets a durable cache. Same reasoning as the `tests` job's
+          # own os+php-qualified key above.
+          key: composer-headless-nvim-${{ matrix.nvim_version }}-${{ hashFiles('composer.json') }}
 
       - name: Install dependencies
         run: composer install --no-progress --prefer-dist
@@ -294,9 +299,16 @@ jobs:
         run: composer install --no-progress --prefer-dist
 
       - name: Install Helix
+        # Self-review finding: this used to resolve "latest" via an
+        # unauthenticated api.github.com call (60 req/hour, shared across
+        # every runner on this IP) and float to whatever Helix released most
+        # recently -- a flaky/moving target unrelated to any README
+        # regression. Pinned instead, same convention as headless-nvim's own
+        # matrix.nvim_version, and bumped by hand like that job's own pin.
+        env:
+          HELIX_VERSION: '25.07.1'
         run: |
-          version="$(curl -fsSL https://api.github.com/repos/helix-editor/helix/releases/latest | python3 -c 'import json,sys; print(json.load(sys.stdin)["tag_name"])')"
-          curl -fsSL -o helix.tar.xz "https://github.com/helix-editor/helix/releases/download/${version}/helix-${version}-x86_64-linux.tar.xz"
+          curl -fsSL -o helix.tar.xz "https://github.com/helix-editor/helix/releases/download/${HELIX_VERSION}/helix-${HELIX_VERSION}-x86_64-linux.tar.xz"
           tar -xJf helix.tar.xz
           install_dir="$(find . -maxdepth 1 -type d -name 'helix-*' | head -1)"
           echo "$PWD/$install_dir" >> "$GITHUB_PATH"

@@ -84,10 +84,38 @@ run_case() {
         return
     fi
 
+    # Self-review finding: `tail -1` trusts the LAST line starting with "{"
+    # to be driver.lua's own JSON -- almost always true, but a deferred LSP
+    # notification flushed after `qall!` could in principle also start with
+    # "{". Parse everything in one python call and report a malformed line
+    # as an ordinary per-case failure (status=1) rather than letting a
+    # `json.loads` exception under `set -e` abort the whole script with a
+    # raw traceback.
+    local parsed
+    if ! parsed="$("$python" -c '
+import json, sys
+try:
+    data = json.loads(sys.argv[1])
+    print(data["ok"])
+    print(data["diagnostic_count"])
+    print(data["has_code_action"])
+except Exception as exc:
+    print("PARSE_ERROR:" + str(exc))
+' "$json_line")"; then
+        echo "run_smoke.sh: $label: could not invoke python to parse driver output: $json_line" >&2
+        status=1
+        return
+    fi
+    if [[ "$parsed" == PARSE_ERROR:* ]]; then
+        echo "run_smoke.sh: $label: driver output was not the expected JSON (${parsed#PARSE_ERROR:}): $json_line" >&2
+        status=1
+        return
+    fi
+
     local ok diagnostic_count has_code_action
-    ok="$("$python" -c "import json,sys; print(json.loads(sys.argv[1])['ok'])" "$json_line")"
-    diagnostic_count="$("$python" -c "import json,sys; print(json.loads(sys.argv[1])['diagnostic_count'])" "$json_line")"
-    has_code_action="$("$python" -c "import json,sys; print(json.loads(sys.argv[1])['has_code_action'])" "$json_line")"
+    ok="$(sed -n '1p' <<<"$parsed")"
+    diagnostic_count="$(sed -n '2p' <<<"$parsed")"
+    has_code_action="$(sed -n '3p' <<<"$parsed")"
 
     if [ "$ok" != "True" ]; then
         echo "run_smoke.sh: $label: driver reported failure: $json_line" >&2
