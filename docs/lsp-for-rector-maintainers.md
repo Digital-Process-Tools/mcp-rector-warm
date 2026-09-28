@@ -43,7 +43,7 @@ scans, and `workspace/configuration`.
 
 **The forked warm worker.** Every call to Rector -- from the MCP tool or the
 LSP -- runs inside a forked child process (`RectorRunner::boot()`,
-`src/RectorRunner.php:203`), never in the long-lived daemon itself. The
+`src/RectorRunner.php:358`), never in the long-lived daemon itself. The
 parent blocks on a socket read until the child answers or times out. This
 means re-editing `rector.php` between calls, or a warm container that
 corrupts mid-session, can never crash the daemon -- only the forked child,
