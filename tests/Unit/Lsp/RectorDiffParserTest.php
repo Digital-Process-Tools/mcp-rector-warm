@@ -228,10 +228,44 @@ final class RectorDiffParserTest extends TestCase
 
     public function testBuildFixesLeavesGenericWhenNoLeftoverRuleRemains(): void
     {
-        // A second negative control: one unattributed hunk, but nothing is
-        // actually leftover (every applied rule was already matched
-        // elsewhere) -- must stay unattributed rather than reusing a rule
-        // that DID produce another hunk.
+        // A second negative control: two applied rules, both already
+        // matched to the SAME hunk (so nothing is genuinely leftover), and
+        // a second hunk with no per-change attribution at all -- must stay
+        // unattributed rather than reusing a rule that DID produce another
+        // hunk. Unlike the reopened #100 case below, this file applied MORE
+        // than one rule, so which of them (if either) produced the second
+        // hunk is genuinely ambiguous.
+        $diff = "--- Original\n+++ New\n"
+            . "@@ -70,10 +70,10 @@\n"
+            . " c1\n c2\n c3\n c4\n c5\n-removed_A\n+added_A\n c6\n c7\n c8\n c9\n"
+            . "@@ -90,5 +90,5 @@\n"
+            . " d1\n d2\n d3\n-removed_B\n+added_B\n d4\n";
+
+        $changes = [
+            ['rector' => 'RectorA', 'line' => 74],
+            ['rector' => 'RectorB', 'line' => 75],
+        ];
+
+        $fixes = RectorDiffParser::buildFixes($diff, ['RectorA', 'RectorB'], $changes);
+
+        self::assertCount(2, $fixes);
+        self::assertSame(['RectorA', 'RectorB'], $fixes[0]['rectors']);
+        self::assertSame([], $fixes[1]['rectors']);
+    }
+
+    public function testBuildFixesAttributesTheSoleAppliedRuleToEveryUnattributedHunk(): void
+    {
+        // #100 reopen (PR #103 did not fix this): a single rule can produce
+        // TWO hunks while `changes[]` reports only one line for it --
+        // closest-hunk matching attributes that one line to hunk0, leaving
+        // hunk1 with no per-change attribution and, critically, the rule is
+        // now in `$attributed` so the OLD leftover fallback (which only
+        // fires for a rule unaccounted for ANYWHERE) never reaches it
+        // either. When the file applied exactly one rule, there is no other
+        // candidate: any active hunk in the diff must be that rule's work.
+        // Observed on real consumer files for NewlineAfterStatementRector
+        // and RemoveUnusedPrivatePropertyRector (see the issue's reopen
+        // comment).
         $diff = "--- Original\n+++ New\n"
             . "@@ -70,10 +70,10 @@\n"
             . " c1\n c2\n c3\n c4\n c5\n-removed_A\n+added_A\n c6\n c7\n c8\n c9\n"
@@ -244,7 +278,8 @@ final class RectorDiffParserTest extends TestCase
 
         $fixes = RectorDiffParser::buildFixes($diff, ['RectorA'], $changes);
 
+        self::assertCount(2, $fixes);
         self::assertSame(['RectorA'], $fixes[0]['rectors']);
-        self::assertSame([], $fixes[1]['rectors']);
+        self::assertSame(['RectorA'], $fixes[1]['rectors']);
     }
 }

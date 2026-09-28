@@ -648,6 +648,193 @@ final class LspServerTest extends TestCase
         self::assertSame([], $responses[0]['params']['diagnostics']);
     }
 
+    public function testWatchedConfigChangeReDiagnosesTheMostRecentlyActiveDocumentFirst(): void
+    {
+        // #115: re-diagnosing every open document serially after a
+        // rector.php change measured ~45s end-to-end with 17 documents open
+        // on a real project, and whichever document the developer is
+        // actively editing queues behind every document that merely
+        // happened to open earlier. Re-diagnosing in most-recently-active
+        // order gets that document a fresh publishDiagnostics first, even
+        // though the total wall-clock across all documents is unchanged.
+        $source = new class implements DiagnosticsSource {
+            /** @var list<string> */
+            public array $order = [];
+
+            public function diagnose(string $absolutePath): array
+            {
+                $this->order[] = $absolutePath;
+
+                return ['fixes' => []];
+            }
+        };
+
+        $server = new LspServer('1.0.0', $source);
+        foreach (['A', 'B', 'C'] as $name) {
+            $server->handle([
+                'jsonrpc' => '2.0',
+                'method' => 'textDocument/didOpen',
+                'params' => ['textDocument' => ['uri' => "file:///tmp/{$name}.php", 'version' => 1]],
+            ]);
+        }
+        $source->order = []; // only the order triggered by the watched-file event matters below
+
+        $responses = $server->handle([
+            'jsonrpc' => '2.0',
+            'method' => 'workspace/didChangeWatchedFiles',
+            'params' => ['changes' => [['uri' => 'file:///tmp/rector.php', 'type' => 2]]],
+        ]);
+
+        self::assertSame(['/tmp/C.php', '/tmp/B.php', '/tmp/A.php'], $source->order);
+        self::assertCount(3, $responses);
+        $uris = array_map(static fn (array $r): string => $r['params']['uri'], $responses);
+        self::assertSame(['file:///tmp/C.php', 'file:///tmp/B.php', 'file:///tmp/A.php'], $uris);
+    }
+
+    public function testASecondConfigChangeWithNoInterveningActivityKeepsTheSameOrder(): void
+    {
+        // Self-review finding (independent oss:auditor review pass):
+        // diagnoseDocument() is also what watchedFilesChanged()'s own
+        // re-diagnose loop calls for every open document. If that call
+        // touched activity too, each re-diagnosis would re-append its own
+        // URI and leave $activityOrder REVERSED afterward -- a SECOND
+        // config change with no real didOpen/didSave in between would then
+        // process documents in exactly the wrong order, silently undoing
+        // the ordering fix for that second event. Two config-change events
+        // back to back, with nothing real happening between them, must
+        // re-diagnose in the SAME most-recently-active-first order both
+        // times.
+        $source = new class implements DiagnosticsSource {
+            /** @var list<string> */
+            public array $order = [];
+
+            public function diagnose(string $absolutePath): array
+            {
+                $this->order[] = $absolutePath;
+
+                return ['fixes' => []];
+            }
+        };
+
+        $server = new LspServer('1.0.0', $source);
+        $server->handle([
+            'jsonrpc' => '2.0',
+            'method' => 'textDocument/didOpen',
+            'params' => ['textDocument' => ['uri' => 'file:///tmp/A.php', 'version' => 1]],
+        ]);
+        $server->handle([
+            'jsonrpc' => '2.0',
+            'method' => 'textDocument/didOpen',
+            'params' => ['textDocument' => ['uri' => 'file:///tmp/B.php', 'version' => 1]],
+        ]);
+        $source->order = [];
+
+        $configChange = [
+            'jsonrpc' => '2.0',
+            'method' => 'workspace/didChangeWatchedFiles',
+            'params' => ['changes' => [['uri' => 'file:///tmp/rector.php', 'type' => 2]]],
+        ];
+        $server->handle($configChange);
+        $firstOrder = $source->order;
+        $source->order = [];
+
+        $server->handle($configChange);
+        $secondOrder = $source->order;
+
+        self::assertSame(['/tmp/B.php', '/tmp/A.php'], $firstOrder);
+        self::assertSame($firstOrder, $secondOrder);
+    }
+
+    public function testWatchedConfigChangeTreatsADidSaveAsRefreshingActivityOrder(): void
+    {
+        // Positive control: activity is not just "when was it opened" --
+        // saving an older document again must move it back to the front,
+        // since a save is exactly the signal that the developer is
+        // currently working in it.
+        $source = new class implements DiagnosticsSource {
+            /** @var list<string> */
+            public array $order = [];
+
+            public function diagnose(string $absolutePath): array
+            {
+                $this->order[] = $absolutePath;
+
+                return ['fixes' => []];
+            }
+        };
+
+        $server = new LspServer('1.0.0', $source);
+        $server->handle([
+            'jsonrpc' => '2.0',
+            'method' => 'textDocument/didOpen',
+            'params' => ['textDocument' => ['uri' => 'file:///tmp/A.php', 'version' => 1]],
+        ]);
+        $server->handle([
+            'jsonrpc' => '2.0',
+            'method' => 'textDocument/didOpen',
+            'params' => ['textDocument' => ['uri' => 'file:///tmp/B.php', 'version' => 1]],
+        ]);
+        $server->handle([
+            'jsonrpc' => '2.0',
+            'method' => 'textDocument/didSave',
+            'params' => ['textDocument' => ['uri' => 'file:///tmp/A.php', 'version' => 2]],
+        ]);
+        $source->order = [];
+
+        $server->handle([
+            'jsonrpc' => '2.0',
+            'method' => 'workspace/didChangeWatchedFiles',
+            'params' => ['changes' => [['uri' => 'file:///tmp/rector.php', 'type' => 2]]],
+        ]);
+
+        self::assertSame(['/tmp/A.php', '/tmp/B.php'], $source->order);
+    }
+
+    public function testWatchedConfigChangeDoesNotReDiagnoseAClosedDocument(): void
+    {
+        // Negative control for the two tests above: a document that was
+        // closed must drop out of the activity order entirely, not merely
+        // move to the back of it.
+        $source = new class implements DiagnosticsSource {
+            /** @var list<string> */
+            public array $order = [];
+
+            public function diagnose(string $absolutePath): array
+            {
+                $this->order[] = $absolutePath;
+
+                return ['fixes' => []];
+            }
+        };
+
+        $server = new LspServer('1.0.0', $source);
+        $server->handle([
+            'jsonrpc' => '2.0',
+            'method' => 'textDocument/didOpen',
+            'params' => ['textDocument' => ['uri' => 'file:///tmp/A.php', 'version' => 1]],
+        ]);
+        $server->handle([
+            'jsonrpc' => '2.0',
+            'method' => 'textDocument/didOpen',
+            'params' => ['textDocument' => ['uri' => 'file:///tmp/B.php', 'version' => 1]],
+        ]);
+        $server->handle([
+            'jsonrpc' => '2.0',
+            'method' => 'textDocument/didClose',
+            'params' => ['textDocument' => ['uri' => 'file:///tmp/B.php']],
+        ]);
+        $source->order = [];
+
+        $responses = $server->handle([
+            'jsonrpc' => '2.0',
+            'method' => 'workspace/didChangeWatchedFiles',
+            'params' => ['changes' => [['uri' => 'file:///tmp/rector.php', 'type' => 2]]],
+        ]);
+
+        self::assertSame(['/tmp/A.php'], $source->order);
+        self::assertCount(1, $responses);
+    }
+
     public function testDidCloseClearsDiagnostics(): void
     {
         $fixes = [self::fix(0, 1, "x\n", 'SomeRector')];
