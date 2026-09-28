@@ -53,7 +53,7 @@ final class RectorRunnerTest extends TestCase
              * @param list<string> $argv
              * @return array{exit_code: int, output: string, warm_boot: bool}
              */
-            protected function runCold(array $argv): array
+            protected function runCold(array $argv, bool $dryRun = true): array
             {
                 $this->log[] = 'runCold';
 
@@ -172,7 +172,7 @@ final class RectorRunnerTest extends TestCase
              * @param list<string> $argv
              * @return array{exit_code: int, output: string, warm_boot: bool}
              */
-            protected function runForked(array $argv, bool $warmBoot): array
+            protected function runForked(array $argv, bool $warmBoot, bool $dryRun = true): array
             {
                 return $this->execute($argv, $warmBoot);
             }
@@ -476,6 +476,165 @@ final class RectorRunnerTest extends TestCase
             unlink($tmp . '/rector.php');
             rmdir($tmp);
         }
+    }
+
+    /**
+     * #72 correction: a --call-timeout deadline must NEVER kill a dryRun:false
+     * (write) call, no matter how long it runs past what would have been the
+     * deadline -- the call must complete normally, exactly as it did before
+     * #58 introduced the deadline. Same wedge mechanism and fixture shape as
+     * testWedgedCallIsKilledAtTheDeadlineAndTheWorkerStaysUsable just above
+     * (execute() sleeps directly, isolating this from real Rector boot cost);
+     * the only difference is the $dryRun flag passed to run().
+     *
+     * The positive control lives in the same test, immediately after: the
+     * SAME wedge, the SAME 1s deadline, but dryRun:true -- proving the "must
+     * not kill" assertion above is not trivially true because nothing here
+     * ever fires at all.
+     */
+    public function testWedgedWriteCallIsNeverKilledButDryRunStillIsAtTheSameDeadline(): void
+    {
+        if (!\function_exists('posix_kill') || !\function_exists('pcntl_fork')) {
+            self::markTestSkipped('posix_kill/pcntl_fork unavailable in this environment');
+        }
+
+        $tmp = sys_get_temp_dir() . '/rector-runner-write-no-kill-test-' . bin2hex(random_bytes(8));
+        mkdir($tmp);
+        file_put_contents(
+            $tmp . '/rector.php',
+            "<?php\n\ndeclare(strict_types=1);\n\nuse Rector\\Config\\RectorConfig;\n\nreturn RectorConfig::configure();\n",
+        );
+        $previousCwd = getcwd();
+        $previousArgv = $_SERVER['argv'] ?? ['rector'];
+
+        try {
+            chdir($tmp);
+            $_SERVER['argv'] = ['rector'];
+
+            // 1s deadline, same as the sibling wedge test above; the wedge
+            // itself sleeps 3s -- comfortably past the deadline, but short
+            // enough that a passing test (dryRun:false must run to
+            // completion, unkilled) does not itself become the slowest test
+            // in the suite.
+            $runner = new class(1) extends RectorRunner {
+                protected function execute(array $argv, bool $warmBoot): array
+                {
+                    if (($argv[1] ?? null) === 'wedge') {
+                        sleep(3);
+                    }
+
+                    return ['exit_code' => 0, 'output' => '', 'warm_boot' => $warmBoot];
+                }
+            };
+
+            // dryRun:false: must run to completion, past its own deadline,
+            // never killed.
+            $start = microtime(true);
+            $result = $runner->run(['rector', 'wedge'], false);
+            $elapsed = microtime(true) - $start;
+            self::assertSame(0, $result['exit_code'], 'a write call must complete normally, never be killed');
+            self::assertGreaterThanOrEqual(
+                2.5,
+                $elapsed,
+                "a dryRun:false call must run to completion past its own 1s deadline (it slept 3s), not be "
+                . "killed at the deadline -- took only {$elapsed}s",
+            );
+            self::assertTrue($runner->isWarm(), 'the worker must still be usable after an unkilled write call');
+
+            // Positive control: the SAME wedge, the SAME deadline, but
+            // dryRun:true -- this must still be killed at roughly the 1s
+            // deadline, proving the guard above is not vacuously true.
+            $start = microtime(true);
+            try {
+                $runner->run(['rector', 'wedge'], true);
+                self::fail('expected the wedged dry-run call to throw a timeout error');
+            } catch (\RuntimeException $e) {
+                self::assertStringContainsString('exceeded 1s', $e->getMessage());
+                self::assertStringContainsString('--call-timeout', $e->getMessage());
+            }
+            $elapsed = microtime(true) - $start;
+            self::assertLessThan(
+                15.0,
+                $elapsed,
+                "a dryRun:true call must still be killed at roughly its 1s deadline -- took {$elapsed}s",
+            );
+            self::assertTrue($runner->isWarm(), 'only the wedged grandchild is killed; the worker itself survives');
+
+            // (c): no zombie left behind under THIS process after the
+            // dryRun:true kill above -- killAndReap()'s own reap must have
+            // run. A real call through the same (still-warm) worker
+            // succeeding proves it is not merely "isWarm() says true" but
+            // genuinely usable, and this process's own descendant list must
+            // show no zombie/defunct entry.
+            $result = $runner->run(['rector', 'process']);
+            self::assertSame(0, $result['exit_code']);
+            // Rooted at the WORKER's own pid, not this test process's pid:
+            // other tests in this same PHPUnit run boot their own workers,
+            // which linger as (unrelated, pre-existing, #58 trap.d-documented)
+            // zombies of this process once their test ends -- scanning from
+            // getmypid() would wrongly attribute those to this assertion.
+            // The wedged grandchild killAndReap() just reaped is a child of
+            // THIS worker specifically, so rooting here is exactly what #69
+            // (recon: real zombie check) was pinning.
+            $workerPidProperty = new \ReflectionProperty(RectorRunner::class, 'workerPid');
+            $workerPidProperty->setAccessible(true);
+            $workerPid = $workerPidProperty->getValue($runner);
+            self::assertIsInt($workerPid, 'the worker must have a known pid to scope the zombie check to');
+            self::assertNoZombieDescendants($workerPid);
+        } finally {
+            chdir($previousCwd);
+            $_SERVER['argv'] = $previousArgv;
+            unlink($tmp . '/rector.php');
+            rmdir($tmp);
+        }
+    }
+
+    /**
+     * Self-review finding: the three early-return arms below used to make a
+     * green test indistinguishable from "the ps probe was unavailable, so
+     * nothing was actually checked" -- markTestSkipped() instead, so an
+     * environment missing shell_exec()/ps (disable_functions hardening, a
+     * minimal container base image, or Windows) shows up as an honest skip
+     * rather than a silent, uninformative pass.
+     */
+    private static function assertNoZombieDescendants(int $rootPid): void
+    {
+        if (!\function_exists('shell_exec') || \stripos(\PHP_OS, 'WIN') === 0) {
+            self::markTestSkipped('shell_exec()/`ps` unavailable in this environment -- cannot confirm no zombie descendant');
+        }
+        $ps = @\shell_exec('ps -eo pid,ppid,stat 2>/dev/null');
+        if (!\is_string($ps) || $ps === '') {
+            self::markTestSkipped('`ps -eo pid,ppid,stat` produced no output in this environment -- cannot confirm no zombie descendant');
+        }
+        $byPpid = [];
+        foreach (\explode("\n", \trim($ps)) as $i => $line) {
+            if ($i === 0) {
+                continue; // header
+            }
+            $parts = \preg_split('/\s+/', \trim($line));
+            if (!\is_array($parts) || \count($parts) < 3) {
+                continue;
+            }
+            [$pid, $ppid, $stat] = [(int) $parts[0], (int) $parts[1], $parts[2]];
+            $byPpid[$ppid][] = [$pid, $stat];
+        }
+        $zombies = [];
+        $frontier = [$rootPid];
+        $seen = [];
+        while ($frontier !== []) {
+            $current = \array_pop($frontier);
+            foreach ($byPpid[$current] ?? [] as [$pid, $stat]) {
+                if (isset($seen[$pid])) {
+                    continue;
+                }
+                $seen[$pid] = true;
+                if (\str_contains($stat, 'Z')) {
+                    $zombies[] = "{$pid} (stat={$stat})";
+                }
+                $frontier[] = $pid;
+            }
+        }
+        self::assertSame([], $zombies, 'no zombie/defunct descendant must remain under pid ' . $rootPid);
     }
 
     /**

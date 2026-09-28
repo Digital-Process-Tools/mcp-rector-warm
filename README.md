@@ -97,7 +97,7 @@ Reads MCP JSON-RPC on stdin, writes responses on stdout.
 |------|---------|---------|
 | `--working-dir=PATH` | current directory | `chdir()`s here before anything else runs; `rector_process` refuses any path outside it. |
 | `--config=PATH` | Rector's own resolution (`rector.php`/`rector.dist.php` in `--working-dir`) | Passed straight through to Rector; not parsed by mcp-rector-warm itself. |
-| `--call-timeout=SECONDS` | `600` | Hard per-call deadline, independent of PHP's `default_socket_timeout` ([#32](https://github.com/Digital-Process-Tools/mcp-rector-warm/issues/32)): a call still working past `default_socket_timeout` keeps going, but one that outruns `--call-timeout` is killed and reported as an error instead of blocking the caller forever ([#58](https://github.com/Digital-Process-Tools/mcp-rector-warm/issues/58)). `0` disables it. Measured on a real project: 0.3-2.4s per warm call, ~10s for the first (container-building) call — 600s never cuts off real work. |
+| `--call-timeout=SECONDS` | `600` | Hard per-call deadline, independent of PHP's `default_socket_timeout` ([#32](https://github.com/Digital-Process-Tools/mcp-rector-warm/issues/32)), for a `dryRun: true` (analysis-only) call: a call still working past `default_socket_timeout` keeps going, but one that outruns `--call-timeout` is killed and reported as an error instead of blocking the caller forever ([#58](https://github.com/Digital-Process-Tools/mcp-rector-warm/issues/58)). `0` disables it. Measured on a real project: 0.3-2.4s per warm call, ~10s for the first (container-building) call — 600s never cuts off real work. **This deadline never applies to a `dryRun: false` (write) call** ([#72](https://github.com/Digital-Process-Tools/mcp-rector-warm/issues/72)): the kill is an unconditional SIGKILL with no grace for an in-flight file write, and Rector writes each changed file by truncating it and then writing the new content, so a kill landing mid-write would leave that file truncated with no backup. Rather than risk that, a write call is simply never bound by `--call-timeout` at all — trade-off: a genuinely wedged write call can hang indefinitely (the pre-#58 behaviour for every call), in exchange for never truncating a file it is writing. |
 
 ## Benchmark
 
@@ -145,7 +145,7 @@ Run Rector on a path.
 | Argument | Type | Default | Description |
 |----------|------|---------|-------------|
 | `path` | string | required | Absolute path to file or directory under the working dir |
-| `dryRun` | bool | `true` | Preview changes only. `false` writes them. |
+| `dryRun` | bool | `true` | Preview changes only. `false` writes them. `--call-timeout` never applies to a `dryRun: false` call ([#72](https://github.com/Digital-Process-Tools/mcp-rector-warm/issues/72)) — see the `--call-timeout` row above for the trade-off. |
 
 Returns:
 
@@ -202,7 +202,7 @@ Three decisions worth knowing:
 
 **Does this replace `vendor/bin/rector`?** No. Use it from MCP clients (Claude Desktop, agents). For one-off CLI calls the regular binary is still simpler.
 
-**Can it apply changes?** Yes — pass `dryRun: false`. (Rector itself has no `--fix` flag: it writes by default and only previews with `--dry-run`.)
+**Can it apply changes?** Yes — pass `dryRun: false`. (Rector itself has no `--fix` flag: it writes by default and only previews with `--dry-run`.) This always works, regardless of `--call-timeout` ([#72](https://github.com/Digital-Process-Tools/mcp-rector-warm/issues/72)): the deadline only ever bounds a `dryRun: true` call. A write call is never killed by it — see the `--call-timeout` row's trade-off.
 
 **Why not a phar?** Rector ships as a real Composer library. Phar packaging would just add a runtime cost without a benefit here.
 
