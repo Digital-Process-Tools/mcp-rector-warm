@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Dpt\McpRectorWarm;
 
+use Dpt\McpRectorWarm\Support\ProcessTree;
 use Rector\Bootstrap\RectorConfigsResolver;
 use Rector\DependencyInjection\RectorContainerFactory;
 
@@ -320,6 +321,10 @@ class RectorRunner implements RunnerInterface
     {
         $status = 0;
         if ($this->hasPosixKill()) {
+            // #112: the whole tree, not only $pid -- Rector's parallel workers
+            // (and anything a rector.php starts) are $pid's descendants, and a
+            // SIGKILL to $pid alone left them running as orphans.
+            ProcessTree::killTree($pid);
             @\posix_kill($pid, \SIGKILL);
             \pcntl_waitpid($pid, $status);
         } else {
@@ -534,12 +539,10 @@ class RectorRunner implements RunnerInterface
             // (#43) instead of waiting on a read that may never arrive. This
             // process only ever learns the worker's own pid (boot()'s
             // pcntl_fork() return) -- never its grandchild's, which is forked
-            // and reaped entirely inside the worker's own forkAndExecute() -- so
-            // an in-flight grandchild here is orphaned (reparented, not left a
-            // zombie under THIS process) rather than reaped directly; a real,
-            // narrower gap than the zombie-under-us case #48 described, and one
-            // that should be rare given forkAndExecute()'s own deadline already
-            // covers the common "grandchild alone is wedged" case.
+            // and reaped entirely inside the worker's own forkAndExecute().
+            // killAndReap() kills the worker's whole process tree (#112), so an
+            // in-flight grandchild and whatever it spawned go down with it
+            // (reparented and reaped by init, never a zombie under THIS process).
             if ($this->workerPid !== null) {
                 $this->killAndReap($this->workerPid);
             }
@@ -847,6 +850,13 @@ class RectorRunner implements RunnerInterface
                         // straight to a hard kill: a wedged process is, by
                         // definition, not responding to signals it could choose to
                         // handle.
+                        // #112: the whole tree first. proc_terminate() reaches
+                        // only the direct child; Rector's parallel workers
+                        // (spawned by it) kept running as orphans, and on
+                        // Windows kept the call's working directory locked.
+                        // `taskkill /T` must see the root alive to find the
+                        // tree, hence before proc_terminate(), never after.
+                        ProcessTree::killTree((int) $procStatus['pid']);
                         \proc_terminate($process, 9);
                         \proc_close($process);
 
