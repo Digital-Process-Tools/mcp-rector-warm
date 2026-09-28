@@ -34,8 +34,15 @@ final class RectorDiffParserTest extends TestCase
             ['start' => ['line' => 6, 'character' => 0], 'end' => ['line' => 10, 'character' => 0]],
             $fixes[0]['range'],
         );
+        // Self-review correction (post-merge CI failure -- warm-vs-cold
+        // divergence in test_code_action_edit_matches_a_cold_rector_apply):
+        // newText must be narrowed the same way the range was, or a narrow
+        // range applied with WIDE replacement text (the full hunk, context
+        // included) duplicates the context lines still on disk either side
+        // of the range. Only the actual replacement -- the `+` line -- goes
+        // in newText; the surrounding `{`/`}` context lines stay untouched.
         self::assertSame(
-            "{\n    public function isEmpty(array \$items): bool\n    {\n        return count(\$items) === 0;\n    }\n}\n",
+            "        return count(\$items) === 0;\n",
             $fixes[0]['newText'],
         );
         self::assertSame(

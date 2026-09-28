@@ -37,11 +37,49 @@ final class RectorDiffParser
         $hunks = [];
         $current = null;
         $oldLine = 0;
+        $rawNew = [];
+
+        $finalize = static function () use (&$current, &$rawNew): ?array {
+            if ($current === null) {
+                return null;
+            }
+
+            // Self-review correction (post-merge CI failure on #91): `newLines`
+            // used to carry EVERY context/added line in the hunk, matching the
+            // old WIDE range. Once hunkRange() narrows to changeFrom/
+            // changeToExclusive only, replacement text built from the full
+            // hunk duplicates the leading/trailing context lines that are now
+            // OUTSIDE the range but still present on disk either side of it.
+            // Every `+` line is genuine added content and always belongs in
+            // the replacement; a ` ` (context) line belongs only when it sits
+            // strictly between the first and last change (interior context --
+            // e.g. two edits three lines apart, kept in the same hunk) rather
+            // than being pure leading/trailing padding.
+            $changeFrom = $current['changeFrom'];
+            $changeToExclusive = $current['changeToExclusive'];
+            $core = [];
+            foreach ($rawNew as $entry) {
+                if ($entry['isAdd']) {
+                    $core[] = $entry['text'];
+                    continue;
+                }
+                if (
+                    $changeFrom !== null && $changeToExclusive !== null
+                    && $entry['pos'] >= $changeFrom && $entry['pos'] < $changeToExclusive
+                ) {
+                    $core[] = $entry['text'];
+                }
+            }
+            $current['newLines'] = $core;
+
+            return $current;
+        };
 
         foreach (explode("\n", $diff) as $line) {
             if (preg_match('/^@@ -(\d+)(?:,(\d+))? \+\d+(?:,\d+)? @@/', $line, $m) === 1) {
-                if ($current !== null) {
-                    $hunks[] = $current;
+                $finalized = $finalize();
+                if ($finalized !== null) {
+                    $hunks[] = $finalized;
                 }
                 $oldStart = (int) $m[1];
                 $current = [
@@ -52,6 +90,7 @@ final class RectorDiffParser
                     'changeFrom' => null,
                     'changeToExclusive' => null,
                 ];
+                $rawNew = [];
                 $oldLine = $oldStart;
                 continue;
             }
@@ -72,17 +111,18 @@ final class RectorDiffParser
                 $current['hasChange'] = true;
                 $current['changeFrom'] ??= $oldLine;
                 $current['changeToExclusive'] = max($current['changeToExclusive'] ?? $oldLine, $oldLine);
-                $current['newLines'][] = substr($line, 1);
+                $rawNew[] = ['pos' => $oldLine, 'text' => substr($line, 1), 'isAdd' => true];
                 continue;
             }
             if ($marker === ' ') {
-                $current['newLines'][] = substr($line, 1);
+                $rawNew[] = ['pos' => $oldLine, 'text' => substr($line, 1), 'isAdd' => false];
                 $oldLine++;
             }
         }
 
-        if ($current !== null) {
-            $hunks[] = $current;
+        $finalized = $finalize();
+        if ($finalized !== null) {
+            $hunks[] = $finalized;
         }
 
         return $hunks;
