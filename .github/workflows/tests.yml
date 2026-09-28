@@ -10,14 +10,38 @@ permissions:
   contents: read
 
 jobs:
+  # OS matrix rationale (#96/#97/#98): the ubuntu-latest legs keep the full
+  # PHP matrix (compatibility is what THAT axis tests); windows-latest and
+  # macos-latest each add exactly one PHP version via `include` -- their
+  # job is to exercise the OS, not re-run PHP-version compatibility a third
+  # and fourth time.
   tests:
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.os }}
     strategy:
       matrix:
+        os: [ubuntu-latest]
         php: ['8.2', '8.3', '8.4']
+        include:
+          # Windows: no pcntl, so RectorRunner::canFork() is false and the
+          # reboot-before-each-call fallback (#8) is the real path here --
+          # that is the point of this leg, not a gap in it (#97).
+          - os: windows-latest
+            php: '8.3'
+          # macOS: the maintainer's and the main consumer's actual platform,
+          # and where #79's BSD `ps` column parsing is observed rather than
+          # reasoned (#98).
+          - os: macos-latest
+            php: '8.3'
       fail-fast: false
 
     steps:
+      # #97: deliberate, not inherited -- a Windows runner's default
+      # core.autocrlf would rewrite every checked-out LF file to CRLF before
+      # a single test runs, making any line-ending result an accident of the
+      # runner rather than something this suite chose.
+      - name: Configure git line endings
+        run: git config --global core.autocrlf input
+
       - uses: actions/checkout@v7
 
       - name: Setup PHP ${{ matrix.php }}
@@ -31,7 +55,7 @@ jobs:
         uses: actions/cache@v6
         with:
           path: ~/.composer/cache
-          key: composer-${{ matrix.php }}-${{ hashFiles('composer.json') }}
+          key: composer-${{ matrix.os }}-${{ matrix.php }}-${{ hashFiles('composer.json') }}
 
       - name: Install dependencies
         run: composer install --no-progress --prefer-dist
@@ -47,6 +71,13 @@ jobs:
   # runs the fallback path for real, over a real subprocess. One PHP version:
   # it exercises the fallback branch, not PHP compatibility, which the matrix
   # above already covers.
+  #
+  # Deliberately kept ubuntu-only rather than also gaining OS legs (#97/#98
+  # asked about the unit/e2e jobs, not this one): windows-latest genuinely
+  # has no pcntl at all, so it already exercises this same fallback path for
+  # real, as a side effect of being Windows -- the `tests` job's own
+  # windows-latest leg covers that, and duplicating this job's ini-disabling
+  # trick there would test the identical thing a second way.
   no-pcntl:
     runs-on: ubuntu-latest
 
@@ -90,9 +121,18 @@ jobs:
   # it tests the protocol and the warm container, not PHP compatibility, which the
   # matrix above already covers. Known defects are strict xfails naming their issue.
   e2e:
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+      fail-fast: false
 
     steps:
+      # Same rationale as the tests job above (#97): deliberate, not
+      # inherited from the runner's own default.
+      - name: Configure git line endings
+        run: git config --global core.autocrlf input
+
       - uses: actions/checkout@v7
 
       - name: Setup PHP
@@ -113,7 +153,7 @@ jobs:
         uses: actions/cache@v6
         with:
           path: ~/.composer/cache
-          key: composer-e2e-${{ hashFiles('composer.json') }}
+          key: composer-e2e-${{ matrix.os }}-${{ hashFiles('composer.json') }}
 
       - name: Install dependencies
         run: |
@@ -121,6 +161,10 @@ jobs:
           python -m pip install -r tests/E2E/requirements.txt
 
       - name: Run end-to-end suite
+        # tests/E2E/run.sh is a bash script; windows-latest runners carry
+        # Git Bash, and `shell: bash` (#97) routes there instead of the
+        # runner's pwsh default, uniformly across all three OSes.
+        shell: bash
         env:
           E2E_PYTHON: python
         run: tests/E2E/run.sh

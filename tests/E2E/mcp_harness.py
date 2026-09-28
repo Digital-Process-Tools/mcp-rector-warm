@@ -18,6 +18,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, AsyncIterator
 
+import pytest
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 from mcp.types import Implementation
@@ -176,7 +177,16 @@ def process_descendants(root_pid: int) -> list[tuple[int, int, str]]:
     the gap this issue names — no CI leg ever exercises this — remains real; only
     the "does the parsing itself break" half of the reasoning has now been
     checked on one real BSD-family `ps`, not merely assumed.
+
+    #97: Windows has no `ps` at all (and no pcntl/fork either -- the daemon
+    never has a forked descendant to look for there in the first place, see
+    RectorRunner's own class docblock), so this is a named skip rather than
+    letting a bare `FileNotFoundError` from spawning "ps" stand in for a
+    result -- a crash there would abort the whole test, not read as "no
+    descendants found", so it cannot silently pass either.
     """
+    if sys.platform.startswith("win"):
+        pytest.skip("ps -eo pid,ppid,stat has no Windows equivalent this harness parses (#79, #97)")
     proc = subprocess.run(["ps", "-eo", "pid,ppid,stat"], capture_output=True, text=True, timeout=10)
     # A failed `ps` invocation (nonzero exit, e.g. a sandboxed/restricted
     # environment) must never be read as "the daemon has no descendants" --
