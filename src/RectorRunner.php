@@ -286,6 +286,20 @@ class RectorRunner implements RunnerInterface
     }
 
     /**
+     * Deadline for boot()'s handshake read: the bare call deadline, no grace
+     * (see the comment at its call site). Its own method only so a test can
+     * keep a real container build out of the short --call-timeout it measures
+     * a CALL against (#113) -- boot()'s deadline is computed here in the
+     * daemon process, after the worker has already forked with its own copy of
+     * $callTimeoutSeconds, so overriding this never changes the worker's
+     * forkAndExecute() deadline.
+     */
+    protected function bootDeadlineNs(): ?int
+    {
+        return $this->callDeadlineNs();
+    }
+
+    /**
      * Best-effort SIGKILL of a wedged $pid, then reap it -- the shared shape
      * behind every deadline-expiry path in this file (boot(), runForked(),
      * forkAndExecute()). Blocks on the reap ONLY when a kill signal was
@@ -368,7 +382,7 @@ class RectorRunner implements RunnerInterface
         // deadline layer over the boot handshake, there is no separate
         // worker-side sub-process boundary underneath it to give a head start
         // to, so the bare callDeadlineNs() (no grace) is the right one.
-        $bootDeadline = $this->callDeadlineNs();
+        $bootDeadline = $this->bootDeadlineNs();
         if ($bootDeadline !== null) {
             \stream_set_timeout($parentSocket, 1);
         }
@@ -381,7 +395,18 @@ class RectorRunner implements RunnerInterface
             // deadline-expiry path in this file.
             $this->killAndReap($pid);
             \fclose($parentSocket);
-            throw new \RuntimeException($e->getMessage());
+            // #113: never rethrow readExactly()'s own message here. That text
+            // ("... waiting on the warm worker") is runForked()'s outer
+            // backstop's, which only ever fires after the call deadline PLUS
+            // RUN_FORKED_DEADLINE_GRACE_SECONDS; reusing it for this ungraced
+            // boot deadline made a slow container build read as the outer
+            // backstop tripping at ~1s -- a kill site that cannot exist.
+            // Deliberately not "exceeded {N}s" either: that figure is how the
+            // wedge tests recognise forkAndExecute()'s inner kill site.
+            throw new \RuntimeException(
+                "rector call exceeded its configured --call-timeout ({$this->callTimeoutSeconds}s) before the "
+                . 'warm worker finished booting; the worker was killed',
+            );
         }
         $decoded = $handshake === null ? null : \json_decode($handshake, true);
         if (!\is_array($decoded) || ($decoded['ok'] ?? false) !== true) {
