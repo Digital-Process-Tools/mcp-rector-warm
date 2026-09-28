@@ -165,13 +165,22 @@ jobs:
           cache: pip
           cache-dependency-path: tests/E2E/requirements.txt
 
+      # Second-pass self-review finding: the same Windows-cache-path fix
+      # applied to the `tests` job above was missed here on the first pass,
+      # even though this job carries the identical exposure.
+      - name: Get composer cache directory
+        id: composer-cache
+        shell: bash
+        run: echo "dir=$(composer config cache-files-dir)" >> "$GITHUB_OUTPUT"
+
       - name: Cache composer
         uses: actions/cache@v6
         with:
-          path: ~/.composer/cache
+          path: ${{ steps.composer-cache.outputs.dir }}
           key: composer-e2e-${{ matrix.os }}-${{ hashFiles('composer.json') }}
 
       - name: Install dependencies
+        shell: bash
         run: |
           composer install --no-progress --prefer-dist
           python -m pip install -r tests/E2E/requirements.txt
