@@ -41,12 +41,25 @@ final class LspLoopTest extends TestCase
      */
     private static function pair(): array
     {
-        $pair = stream_socket_pair(STREAM_PF_UNIX, STREAM_SOCK_STREAM, STREAM_IPPROTO_IP);
-        if ($pair === false) {
-            self::markTestSkipped('stream_socket_pair unavailable');
+        // CI's no-pcntl leg disables stream_socket_pair() through
+        // disable_functions; a loopback TCP connection gives the loop the
+        // same selectable stream there, so these tests still run.
+        if (function_exists('stream_socket_pair')) {
+            $pair = stream_socket_pair(STREAM_PF_UNIX, STREAM_SOCK_STREAM, STREAM_IPPROTO_IP);
+            if ($pair !== false) {
+                return $pair;
+            }
         }
 
-        return $pair;
+        $listener = stream_socket_server('tcp://127.0.0.1:0', $errno, $errstr);
+        self::assertNotFalse($listener, "loopback listener: {$errstr}");
+        $client = stream_socket_client('tcp://' . stream_socket_get_name($listener, false), $errno, $errstr, 5.0);
+        self::assertNotFalse($client, "loopback client: {$errstr}");
+        $server = stream_socket_accept($listener, 5.0);
+        self::assertNotFalse($server, 'loopback accept');
+        fclose($listener);
+
+        return [$server, $client];
     }
 
     /**
@@ -104,12 +117,15 @@ final class LspLoopTest extends TestCase
         [$serverEnd, $client] = self::pair();
         $out = fopen('php://memory', 'w+');
 
-        $source = new class ($client) implements BufferDiagnosticsSource {
+        $source = new class ($client, $serverEnd) implements BufferDiagnosticsSource {
             /** @var list<string> */
             public array $diagnosed = [];
 
-            /** @param resource $client */
-            public function __construct(private $client)
+            /**
+             * @param resource $client
+             * @param resource $serverEnd
+             */
+            public function __construct(private $client, private $serverEnd)
             {
             }
 
@@ -123,6 +139,13 @@ final class LspLoopTest extends TestCase
                 $this->diagnosed[] = $content;
                 if (count($this->diagnosed) === 1) {
                     fwrite($this->client, LspLoopTest::changeFrame(2, "<?php\nclean\n"));
+                    // "Arrived while Rector ran" means readable on the
+                    // server's end before this run returns. Over the
+                    // loopback-TCP fallback that takes a moment; wait for
+                    // it (without reading) so the test states that premise.
+                    $read = [$this->serverEnd];
+                    $none = null;
+                    stream_select($read, $none, $none, 2);
                 } else {
                     fclose($this->client);
                 }

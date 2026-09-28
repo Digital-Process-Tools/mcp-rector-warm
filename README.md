@@ -247,11 +247,13 @@ Limits of the buffer mode:
   modified when it is opened is diagnosed from its first change.
 - Only `file:` URIs are diagnosed. An `untitled:` buffer has no project
   path, so it gets no diagnostics.
-- The debounce reads stdin with a timeout (`stream_select`). PHP cannot
-  select on pipes on Windows. There the server waits out the debounce and
-  then runs, and a change sent during a run is read after that run is
-  published, where it replaces the published result a moment later. This is
-  reasoned from PHP's documentation, not observed, because CI runs on Linux.
+- The debounce reads stdin with a timeout. On Linux and macOS that is
+  `stream_select`. `select()` on Windows works only on sockets, so there the
+  server polls instead: every 5 ms it checks PHP's read buffer and the bytes
+  waiting in the pipe. If the pipe cannot report waiting bytes, the debounce
+  still fires on time. The only loss is that a change sent while Rector runs
+  no longer supersedes that run: its result is published, then replaced by
+  the next one.
 - Editors, watchers and `git status` can see the temp directory for the
   length of one run.
 

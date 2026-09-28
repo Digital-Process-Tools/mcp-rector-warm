@@ -85,15 +85,28 @@ final class StdioLspTransport
      * frame that arrived in the same write as the first is not missed. EOF
      * counts as readable: the following read() returns null.
      *
-     * Where stream_select() cannot watch the stream at all (it returns
-     * false -- documented for pipes on Windows), this sleeps for the timeout
-     * and reports no input, so the debounce still fires; input that arrived
-     * meanwhile is read on the next blocking read(). Reasoned from PHP's
-     * documentation, not observed: CI runs on Linux only.
+     * Windows: select() there only works on sockets, and for a pipe PHP
+     * either fails or reports the handle as always ready -- the second would
+     * make the loop block in read() and never fire the debounce. So on
+     * Windows this polls instead: PHP's own read buffer
+     * (`unread_bytes`), then the bytes waiting in the pipe (fstat()'s size,
+     * which Windows fills from PeekNamedPipe for a pipe), every 5 ms until
+     * the timeout. If neither can see pending input, the debounce still
+     * fires on time and a message that arrived meanwhile is read right
+     * after, so the only loss is superseding a run in flight.
      */
     public function waitForInput(float $timeoutSeconds): bool
     {
         $timeoutSeconds = max(0.0, $timeoutSeconds);
+
+        if ($this->hasBufferedInput()) {
+            return true;
+        }
+
+        if (PHP_OS_FAMILY === 'Windows') {
+            return $this->pollForInput($timeoutSeconds);
+        }
+
         $seconds = (int) floor($timeoutSeconds);
         $microseconds = min(999_999, (int) round(($timeoutSeconds - $seconds) * 1_000_000));
 
@@ -103,14 +116,40 @@ final class StdioLspTransport
         $ready = @stream_select($read, $write, $except, $seconds, $microseconds);
 
         if ($ready === false) {
-            if ($timeoutSeconds > 0.0) {
-                usleep((int) round($timeoutSeconds * 1_000_000));
-            }
-
-            return false;
+            return $this->pollForInput($timeoutSeconds);
         }
 
         return $ready > 0;
+    }
+
+    private function hasBufferedInput(): bool
+    {
+        $meta = stream_get_meta_data($this->in);
+
+        return ($meta['unread_bytes'] ?? 0) > 0;
+    }
+
+    private function pollForInput(float $timeoutSeconds): bool
+    {
+        $deadline = microtime(true) + $timeoutSeconds;
+
+        while (true) {
+            if ($this->hasBufferedInput()) {
+                return true;
+            }
+
+            $stat = @fstat($this->in);
+            if (is_array($stat) && ($stat['size'] ?? 0) > 0) {
+                return true;
+            }
+
+            $remaining = $deadline - microtime(true);
+            if ($remaining <= 0.0) {
+                return false;
+            }
+
+            usleep((int) min(5_000, max(1, $remaining * 1_000_000)));
+        }
     }
 
     public function write(array $message): void
