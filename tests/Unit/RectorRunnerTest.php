@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Dpt\McpRectorWarm\Tests\Unit;
 
+use Dpt\McpRectorWarm\RectorCallTimeoutException;
 use Dpt\McpRectorWarm\RectorRunner;
 use PHPUnit\Framework\TestCase;
 
@@ -530,7 +531,19 @@ final class RectorRunnerTest extends TestCase
                 $runner->run(['rector', 'wedge']);
                 self::fail('expected the wedged call to throw a timeout error');
             } catch (\RuntimeException $e) {
-                self::assertStringContainsString('exceeded 1s', $e->getMessage());
+                // #81: assert a message pattern common to BOTH kill sites, not
+                // which one fired -- forkAndExecute()'s inner deadline
+                // ("... exceeded 1s (--call-timeout); the analysis was
+                // killed") normally wins the race, but readExactly()'s outer
+                // backstop ("... exceeded its configured --call-timeout
+                // waiting on the warm worker") can fire instead under CPU
+                // contention that eats RUN_FORKED_DEADLINE_GRACE_SECONDS --
+                // see .claude/jit-context/paths/00-manual/deadline-grace-gap.md.
+                // Both messages share this substring; only the inner one also
+                // has the specific "exceeded 1s" figure, which is not this
+                // test's concern (that a call-timeout fired at all, and
+                // roughly on time -- checked below -- is).
+                self::assertStringContainsString('rector call exceeded', $e->getMessage());
                 self::assertStringContainsString('--call-timeout', $e->getMessage());
             }
             $elapsed = microtime(true) - $start;
@@ -557,6 +570,56 @@ final class RectorRunnerTest extends TestCase
             $_SERVER['argv'] = $previousArgv;
             unlink($tmp . '/rector.php');
             rmdir($tmp);
+        }
+    }
+
+    /**
+     * #81: pins the OTHER kill site's message deterministically, without
+     * relying on CPU contention to make it fire. readExactly()'s outer
+     * backstop deadline (RUN_FORKED_DEADLINE_GRACE_SECONDS past the inner
+     * one) throws RectorCallTimeoutException with a message that does NOT
+     * contain "exceeded 1s" -- only the inner kill site's message has that
+     * specific figure. Reaching this via a real wedge + CPU contention is
+     * exactly what flakes (the whole point of this issue); reaching it via
+     * Reflection on an already-expired deadline is deterministic and
+     * exercises the identical production code (src/RectorRunner.php's
+     * readExactly()). This is the regression pin for the fix in the two
+     * wedge tests above: their assertions must match BOTH this message and
+     * the inner one, never just the inner one's numeric figure.
+     */
+    public function testReadExactlyOuterBackstopMessageSharesPatternButNotFigureWithInnerKillSite(): void
+    {
+        $runner = new RectorRunner(1);
+
+        // A loopback TCP socket nobody ever writes to: portable across
+        // platforms (unlike an AF_UNIX stream_socket_pair, which Windows does
+        // not support), and its read reliably times out.
+        $server = stream_socket_server('tcp://127.0.0.1:0');
+        self::assertNotFalse($server, 'could not open a loopback TCP server for this test');
+        $address = stream_socket_get_name($server, false);
+        $client = stream_socket_client("tcp://{$address}", $errno, $errstr, 1.0);
+        self::assertNotFalse($client, "could not connect to the loopback server: {$errstr}");
+        stream_set_timeout($client, 0, 100_000);
+
+        $method = new \ReflectionMethod(RectorRunner::class, 'readExactly');
+        $method->setAccessible(true);
+
+        try {
+            // Deadline already in the past: the very first timed-out read hits it.
+            $method->invoke($runner, $client, 4, \hrtime(true) - 1_000_000_000);
+            self::fail('expected readExactly() to throw once its deadline had already passed');
+        } catch (RectorCallTimeoutException $e) {
+            self::assertStringContainsString('rector call exceeded', $e->getMessage());
+            self::assertStringContainsString('--call-timeout', $e->getMessage());
+            self::assertStringNotContainsString(
+                'exceeded 1s',
+                $e->getMessage(),
+                'this outer/backstop message never carries the inner kill site\'s numeric figure -- '
+                . 'that difference is exactly what #81 flaked on',
+            );
+        } finally {
+            fclose($client);
+            fclose($server);
         }
     }
 
@@ -631,7 +694,9 @@ final class RectorRunnerTest extends TestCase
                 $runner->run(['rector', 'wedge'], true);
                 self::fail('expected the wedged dry-run call to throw a timeout error');
             } catch (\RuntimeException $e) {
-                self::assertStringContainsString('exceeded 1s', $e->getMessage());
+                // #81: same shared-pattern reasoning as the sibling wedge test
+                // above -- either kill site may have fired under contention.
+                self::assertStringContainsString('rector call exceeded', $e->getMessage());
                 self::assertStringContainsString('--call-timeout', $e->getMessage());
             }
             $elapsed = microtime(true) - $start;
