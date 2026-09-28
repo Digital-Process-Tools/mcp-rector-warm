@@ -213,15 +213,19 @@ final class LspServer
 
         // #115: most-recently-active document first, not open-order -- see
         // the $activityOrder property doc. array_reverse() snapshots the
-        // order before the loop starts, so a call's own touchActivity()
-        // (inside diagnoseDocument, below) mutating $this->activityOrder
-        // mid-loop cannot reorder an iteration already under way.
+        // order before the loop starts, so mutating $this->activityOrder
+        // mid-loop cannot reorder an iteration already under way -- but the
+        // snapshot alone is not enough: `touchActivity: false` (self-review
+        // finding, see diagnoseDocument()'s own doc) stops each call from
+        // re-appending its own URI and reversing $activityOrder for NEXT
+        // time, which would otherwise silently undo this fix on any second
+        // config change with no real didOpen/didSave in between.
         $frames = [];
         foreach (array_reverse($this->activityOrder) as $uri) {
             $frames = array_merge($frames, $this->diagnoseDocument([
                 'uri' => $uri,
                 'version' => $this->documentVersions[$uri] ?? 0,
-            ]));
+            ], touchActivity: false));
         }
 
         return $frames;
@@ -243,9 +247,20 @@ final class LspServer
 
     /**
      * @param array<string, mixed> $textDocument
+     * @param bool $touchActivity #115 self-review finding: `diagnoseDocument()`
+     *   is ALSO the function `watchedFilesChanged()`'s own re-diagnose loop
+     *   calls for every open document. If that call touched activity too,
+     *   each re-diagnosis in the loop would re-append its own URI, ending
+     *   the loop with $activityOrder REVERSED from what it was -- a second
+     *   config-file change with no real didOpen/didSave in between would
+     *   then process documents in exactly the wrong order, silently undoing
+     *   the fix this parameter exists to prevent. A config-triggered
+     *   re-diagnosis is not real developer activity on the document, so it
+     *   must never move it in the activity order; only didOpen/didSave (the
+     *   two callers that pass no argument here, defaulting to true) do.
      * @return list<array<string, mixed>>
      */
-    private function diagnoseDocument(array $textDocument): array
+    private function diagnoseDocument(array $textDocument, bool $touchActivity = true): array
     {
         $uri = $textDocument['uri'] ?? null;
         if (!is_string($uri) || $this->diagnostics === null) {
@@ -254,7 +269,9 @@ final class LspServer
 
         $version = $textDocument['version'] ?? ($this->documentVersions[$uri] ?? 0);
         $this->documentVersions[$uri] = $version;
-        $this->touchActivity($uri);
+        if ($touchActivity) {
+            $this->touchActivity($uri);
+        }
 
         $path = self::uriToPath($uri);
         $result = $this->diagnostics->diagnose($path);

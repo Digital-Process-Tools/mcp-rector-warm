@@ -691,6 +691,60 @@ final class LspServerTest extends TestCase
         self::assertSame(['file:///tmp/C.php', 'file:///tmp/B.php', 'file:///tmp/A.php'], $uris);
     }
 
+    public function testASecondConfigChangeWithNoInterveningActivityKeepsTheSameOrder(): void
+    {
+        // Self-review finding (independent oss:auditor review pass):
+        // diagnoseDocument() is also what watchedFilesChanged()'s own
+        // re-diagnose loop calls for every open document. If that call
+        // touched activity too, each re-diagnosis would re-append its own
+        // URI and leave $activityOrder REVERSED afterward -- a SECOND
+        // config change with no real didOpen/didSave in between would then
+        // process documents in exactly the wrong order, silently undoing
+        // the ordering fix for that second event. Two config-change events
+        // back to back, with nothing real happening between them, must
+        // re-diagnose in the SAME most-recently-active-first order both
+        // times.
+        $source = new class implements DiagnosticsSource {
+            /** @var list<string> */
+            public array $order = [];
+
+            public function diagnose(string $absolutePath): array
+            {
+                $this->order[] = $absolutePath;
+
+                return ['fixes' => []];
+            }
+        };
+
+        $server = new LspServer('1.0.0', $source);
+        $server->handle([
+            'jsonrpc' => '2.0',
+            'method' => 'textDocument/didOpen',
+            'params' => ['textDocument' => ['uri' => 'file:///tmp/A.php', 'version' => 1]],
+        ]);
+        $server->handle([
+            'jsonrpc' => '2.0',
+            'method' => 'textDocument/didOpen',
+            'params' => ['textDocument' => ['uri' => 'file:///tmp/B.php', 'version' => 1]],
+        ]);
+        $source->order = [];
+
+        $configChange = [
+            'jsonrpc' => '2.0',
+            'method' => 'workspace/didChangeWatchedFiles',
+            'params' => ['changes' => [['uri' => 'file:///tmp/rector.php', 'type' => 2]]],
+        ];
+        $server->handle($configChange);
+        $firstOrder = $source->order;
+        $source->order = [];
+
+        $server->handle($configChange);
+        $secondOrder = $source->order;
+
+        self::assertSame(['/tmp/B.php', '/tmp/A.php'], $firstOrder);
+        self::assertSame($firstOrder, $secondOrder);
+    }
+
     public function testWatchedConfigChangeTreatsADidSaveAsRefreshingActivityOrder(): void
     {
         // Positive control: activity is not just "when was it opened" --
