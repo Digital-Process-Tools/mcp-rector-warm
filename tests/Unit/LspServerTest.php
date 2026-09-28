@@ -373,6 +373,68 @@ final class LspServerTest extends TestCase
         self::assertSame('Apply all Rector fixes', $actions[0]['title']);
     }
 
+    public function testCodeActionAtAnInsertOnlyHunksOwnZeroWidthRangeOffersItsQuickfix(): void
+    {
+        // #93 regression: #92 narrowed diagnostic ranges to the changed
+        // lines, so a pure-insertion hunk (e.g. NewlineAfterStatementRector
+        // adding a blank line) now gets a zero-width diagnostic range like
+        // `66:0-66:0`. The half-open overlap test treated an empty $b as
+        // never overlapping anything, so a codeAction request using the
+        // diagnostic's own range (exactly what a real editor sends for a
+        // cursor on that line) returned no per-hunk quickfix at all.
+        $fixes = [self::fix(66, 66, "\n", 'NewlineAfterStatementRector')];
+        $server = new LspServer('1.0.0', self::fakeSource($fixes));
+        $server->handle([
+            'jsonrpc' => '2.0',
+            'method' => 'textDocument/didOpen',
+            'params' => ['textDocument' => ['uri' => 'file:///tmp/Sample.php', 'version' => 1]],
+        ]);
+
+        $responses = $server->handle([
+            'jsonrpc' => '2.0',
+            'id' => 10,
+            'method' => 'textDocument/codeAction',
+            'params' => [
+                'textDocument' => ['uri' => 'file:///tmp/Sample.php'],
+                'range' => ['start' => ['line' => 66, 'character' => 0], 'end' => ['line' => 66, 'character' => 0]],
+                'context' => ['diagnostics' => []],
+            ],
+        ]);
+
+        $actions = $responses[0]['result'];
+        self::assertCount(2, $actions);
+        self::assertSame('Apply Rector: NewlineAfterStatementRector', $actions[0]['title']);
+    }
+
+    public function testCodeActionOnAnUnrelatedLineNearAnInsertOnlyHunkIsNotOffered(): void
+    {
+        // Negative-control pairing for the test above: a zero-width request
+        // range on a DIFFERENT line than an insert-only hunk's own
+        // zero-width diagnostic range must not surface that quickfix.
+        $fixes = [self::fix(66, 66, "\n", 'NewlineAfterStatementRector')];
+        $server = new LspServer('1.0.0', self::fakeSource($fixes));
+        $server->handle([
+            'jsonrpc' => '2.0',
+            'method' => 'textDocument/didOpen',
+            'params' => ['textDocument' => ['uri' => 'file:///tmp/Sample.php', 'version' => 1]],
+        ]);
+
+        $responses = $server->handle([
+            'jsonrpc' => '2.0',
+            'id' => 11,
+            'method' => 'textDocument/codeAction',
+            'params' => [
+                'textDocument' => ['uri' => 'file:///tmp/Sample.php'],
+                'range' => ['start' => ['line' => 70, 'character' => 0], 'end' => ['line' => 70, 'character' => 0]],
+                'context' => ['diagnostics' => []],
+            ],
+        ]);
+
+        $actions = $responses[0]['result'];
+        self::assertCount(1, $actions);
+        self::assertSame('Apply all Rector fixes', $actions[0]['title']);
+    }
+
     public function testAStaleResultIsDiscardedWhenTheVersionChangedMidCall(): void
     {
         // #53's version-pinning requirement: a diagnose() call that (from the
