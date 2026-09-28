@@ -18,3 +18,22 @@ fragment whose claim is about the code).
   from "resolution failed". Filed as #63 rather than turned into an agent-facing rule: this is a
   one-off finding about the code (a suggested diagnostic improvement, not a lesson an agent should
   have learned before touching this file), so it belongs on the tracker, not here.
+- **`trap.d/58.killAndReap-wnohang-branch-untested.md`** (still true, checked against HEAD by curate
+  2026-09-28) -- `killAndReap()`'s WNOHANG branch in `src/RectorRunner.php` (taken when
+  `posix_kill` is unavailable) is still reachable only when pcntl is present and posix is absent,
+  and no CI leg forces that combination. Already filed as #71 by an earlier round; not turned into
+  a rule since this is a one-off finding about test coverage, not a lesson an agent should have
+  learned before touching this file.
+- **`trap.d/58.zombie-check-ps-portability-and-boot-e2e-gap.md`** (still true, checked against HEAD
+  by curate 2026-09-28) -- two independent gaps in `tests/E2E/mcp_harness.py`, both still present:
+  `process_descendants()`'s `ps -eo pid,ppid,stat` column parsing is unverified on a non-procps-ng
+  `ps` (already disclosed in the function's own docstring), filed as #79; and no E2E scenario
+  drives a wedged BOOT (only a wedged CALL) through the real process-tree zombie check, filed as
+  #80. Neither is an agent-facing lesson -- both are one-off coverage gaps, so they belong on the
+  tracker rather than here.
+- **`trap.d/72.wedged-write-now-hangs-the-whole-server-not-just-the-call.md`** (already fixed,
+  checked against HEAD by curate 2026-09-28) -- the #72 release notes gap this fragment describes
+  (README/changelog not disclosing that a wedged write now hangs the whole daemon indefinitely,
+  where v0.5.0 timed out the socket read after ~60s) was fixed by commit `410118c` (PR #76,
+  "Correct the #72 changelog/README wedged-write description"): `README.md`'s `--call-timeout` row
+  now states this exact trade-off in full. No rule needed.
