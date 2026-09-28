@@ -76,6 +76,43 @@ final class StdioLspTransport
         return $decoded;
     }
 
+    /**
+     * #106: whether a message can be read without blocking, waiting up to
+     * $timeoutSeconds for one to arrive -- the synchronous loop's debounce
+     * timer. stream_select() also reports a stream whose next frame already
+     * sits in PHP's own read buffer (read() pulls whole chunks through
+     * fgets()), not only one with bytes pending in the kernel, so a second
+     * frame that arrived in the same write as the first is not missed. EOF
+     * counts as readable: the following read() returns null.
+     *
+     * Where stream_select() cannot watch the stream at all (it returns
+     * false -- documented for pipes on Windows), this sleeps for the timeout
+     * and reports no input, so the debounce still fires; input that arrived
+     * meanwhile is read on the next blocking read(). Reasoned from PHP's
+     * documentation, not observed: CI runs on Linux only.
+     */
+    public function waitForInput(float $timeoutSeconds): bool
+    {
+        $timeoutSeconds = max(0.0, $timeoutSeconds);
+        $seconds = (int) floor($timeoutSeconds);
+        $microseconds = min(999_999, (int) round(($timeoutSeconds - $seconds) * 1_000_000));
+
+        $read = [$this->in];
+        $write = null;
+        $except = null;
+        $ready = @stream_select($read, $write, $except, $seconds, $microseconds);
+
+        if ($ready === false) {
+            if ($timeoutSeconds > 0.0) {
+                usleep((int) round($timeoutSeconds * 1_000_000));
+            }
+
+            return false;
+        }
+
+        return $ready > 0;
+    }
+
     public function write(array $message): void
     {
         $body = json_encode($message, JSON_UNESCAPED_SLASHES);

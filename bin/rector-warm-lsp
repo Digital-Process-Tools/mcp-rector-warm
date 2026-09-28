@@ -20,6 +20,7 @@ foreach ([
     }
 }
 
+use Dpt\McpRectorWarm\Lsp\LspLoop;
 use Dpt\McpRectorWarm\Lsp\LspServer;
 use Dpt\McpRectorWarm\Lsp\RectorDiagnosticsSource;
 use Dpt\McpRectorWarm\Lsp\StdioLspTransport;
@@ -51,23 +52,6 @@ $transport = new StdioLspTransport(STDIN, STDOUT);
 $diagnostics = new RectorDiagnosticsSource(new RectorTool());
 $server = new LspServer(ServerVersion::resolve(), $diagnostics);
 
-while (true) {
-    try {
-        $message = $transport->read();
-    } catch (\RuntimeException $e) {
-        fwrite(STDERR, "rector-warm-lsp: {$e->getMessage()}\n");
-        exit(1);
-    }
-
-    if ($message === null) {
-        exit($server->isShuttingDown() ? 0 : 1);
-    }
-
-    if (($message['method'] ?? null) === 'exit') {
-        exit($server->isShuttingDown() ? 0 : 1);
-    }
-
-    foreach ($server->handle($message) as $response) {
-        $transport->write($response);
-    }
-}
+// #106: the loop lives in LspLoop so the debounce (a read with a timeout)
+// and the drain-before-publish ordering are unit-tested.
+exit((new LspLoop($transport, $server))->run());

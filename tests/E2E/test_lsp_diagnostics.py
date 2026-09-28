@@ -590,9 +590,188 @@ def test_watched_config_change_re_diagnoses_the_most_recently_active_document_fi
         stop_server(proc)
 
 
+# --- #106: diagnostics on unsaved buffers (didChange, full sync, debounced) --
+
+FIXABLE_BUFFER_FOR_CLEAN = """<?php
+
+declare(strict_types=1);
+
+final class Clean
+{
+    public function isEmpty(array $items): bool
+    {
+        if (count($items) === 0) {
+            return true;
+        }
+
+        return false;
+    }
+}
+"""
+
+
+def did_change(server, uri: str, version: int, text: str) -> None:
+    server.stdin.write(frame({
+        "jsonrpc": "2.0",
+        "method": "textDocument/didChange",
+        "params": {
+            "textDocument": {"uri": uri, "version": version},
+            "contentChanges": [{"text": text}],
+        },
+    }))
+    server.stdin.flush()
+
+
+def temp_leftovers(project: Path) -> list[str]:
+    return sorted(str(p.relative_to(project)) for p in project.rglob("*") if "rector-warm" in p.name)
+
+
+def cold_apply(project: Path, relative: str, content: str) -> str:
+    """The oracle: a cold, non-dry-run rector on a fresh copy of the fixture
+    with `content` written at `relative` -- same content, same path."""
+    cold = project.parent / "cold-buffer"
+    if cold.exists():
+        shutil.rmtree(cold)
+    copy_fixture(cold)
+    (cold / relative).write_text(content)
+    done = subprocess.run(
+        [php_binary(), str(REPO / "vendor" / "bin" / "rector"), "process",
+         "--config=rector.php", "--no-progress-bar", "--", relative],
+        cwd=cold, capture_output=True, text=True, timeout=120,
+    )
+    assert done.returncode == 0, done.stderr
+    return (cold / relative).read_text()
+
+
+def cold_dry_run_report(project: Path, relative: str, content: str) -> dict:
+    cold = project.parent / "cold-dry"
+    if cold.exists():
+        shutil.rmtree(cold)
+    copy_fixture(cold)
+    (cold / relative).write_text(content)
+    done = subprocess.run(
+        [php_binary(), str(REPO / "vendor" / "bin" / "rector"), "process", "--dry-run",
+         "--config=rector.php", "--no-progress-bar", "--output-format=json", "--", relative],
+        cwd=cold, capture_output=True, text=True, timeout=120,
+    )
+    return json.loads(done.stdout[done.stdout.index("{"):])
+
+
+def test_initialize_advertises_full_sync(project):
+    proc = subprocess.Popen(
+        [php_binary(), str(BIN), f"--working-dir={project}"],
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+    )
+    try:
+        proc.stdin.write(frame({
+            "jsonrpc": "2.0", "id": 1, "method": "initialize",
+            "params": {"processId": None, "rootUri": None, "capabilities": {}},
+        }))
+        proc.stdin.flush()
+        reply = read_frame(proc.stdout)
+        assert reply["result"]["capabilities"]["textDocumentSync"]["change"] == 1
+    finally:
+        stop_server(proc)
+
+
 def _pid_is_alive(pid: int) -> bool:
     try:
         os.kill(pid, 0)
     except ProcessLookupError:
         return False
     return True
+
+
+def test_did_change_with_fixable_content_publishes_without_a_save_and_matches_cold(server, project):
+    # Must fire: Clean.php is clean on disk; only the unsaved buffer is
+    # fixable. No didSave is ever sent.
+    path = project / "src" / "Clean.php"
+    uri = path.as_uri()
+    on_disk = path.read_text()
+    assert did_open(server, uri)["params"]["diagnostics"] == []
+
+    did_change(server, uri, 2, FIXABLE_BUFFER_FOR_CLEAN)
+    notification = read_frame(server.stdout)
+
+    assert notification["method"] == "textDocument/publishDiagnostics"
+    assert notification["params"]["uri"] == uri
+    assert notification["params"]["version"] == 2
+    diagnostics = notification["params"]["diagnostics"]
+    assert len(diagnostics) == 1
+    assert "SimplifyIfReturnBoolRector" in diagnostics[0]["message"]
+
+    # Oracle, dry-run form: cold rector on a file with the same content at
+    # the same path reports the same rule and one changed file.
+    report = cold_dry_run_report(project, "src/Clean.php", FIXABLE_BUFFER_FOR_CLEAN)
+    assert report["totals"]["changed_files"] == 1
+    assert any("SimplifyIfReturnBoolRector" in r for r in report["file_diffs"][0]["applied_rectors"])
+
+    # Oracle, applied form: the buffer's own fix-all edit gives the exact
+    # bytes a cold rector apply gives on that content at that path.
+    server.stdin.write(frame({
+        "jsonrpc": "2.0", "id": 3, "method": "textDocument/codeAction",
+        "params": {"textDocument": {"uri": uri}, "range": diagnostics[0]["range"],
+                   "context": {"diagnostics": diagnostics}},
+    }))
+    server.stdin.flush()
+    actions = read_frame(server.stdout)["result"]
+    fix_all = next(a for a in actions if a["title"] == "Apply all Rector fixes")
+    applied = FIXABLE_BUFFER_FOR_CLEAN
+    for edit in sorted(fix_all["edit"]["changes"][uri], key=lambda e: e["range"]["start"]["line"], reverse=True):
+        applied = apply_edit(applied, edit)
+    assert applied == cold_apply(project, "src/Clean.php", FIXABLE_BUFFER_FOR_CLEAN)
+
+    # The file on disk was never touched, and no temp file is left behind.
+    assert path.read_text() == on_disk
+    assert temp_leftovers(project) == []
+
+
+def test_a_buffer_changed_back_to_clean_content_publishes_an_empty_list(server, project):
+    path = project / "src" / "Clean.php"
+    uri = path.as_uri()
+    did_open(server, uri)
+
+    did_change(server, uri, 2, FIXABLE_BUFFER_FOR_CLEAN)
+    assert len(read_frame(server.stdout)["params"]["diagnostics"]) == 1
+
+    did_change(server, uri, 3, path.read_text())
+    notification = read_frame(server.stdout)
+
+    assert notification["params"]["version"] == 3
+    assert notification["params"]["diagnostics"] == []
+    assert temp_leftovers(project) == []
+
+
+def test_a_syntax_error_buffer_publishes_the_error_and_leaves_no_temp_file(server, project):
+    path = project / "src" / "Clean.php"
+    uri = path.as_uri()
+    did_open(server, uri)
+
+    did_change(server, uri, 2, "<?php\n\nfinal class Clean\n{\n    public function (\n")
+    notification = read_frame(server.stdout)
+
+    diagnostics = notification["params"]["diagnostics"]
+    assert len(diagnostics) >= 1
+    assert all(d["severity"] == 1 for d in diagnostics)
+    assert all("rector-warm" not in d["message"] for d in diagnostics)
+    assert temp_leftovers(project) == []
+
+
+def test_a_result_for_version_n_is_not_published_once_n_plus_1_arrived(server, project):
+    # Must not fire. No didOpen first, so the version-2 run is the one that
+    # boots Rector's container -- well over a second, every platform. Version
+    # 3 is sent while it is in flight; the server must drain it before
+    # publishing, so the first publish is version 3's, never version 2's.
+    # Positive control: version 3's (clean) result IS published.
+    path = project / "src" / "Clean.php"
+    uri = path.as_uri()
+
+    did_change(server, uri, 2, FIXABLE_BUFFER_FOR_CLEAN)
+    time.sleep(0.8)
+    did_change(server, uri, 3, path.read_text())
+
+    notification = read_frame(server.stdout)
+    assert notification["method"] == "textDocument/publishDiagnostics"
+    assert notification["params"]["version"] == 3, notification
+    assert notification["params"]["diagnostics"] == []
+    assert temp_leftovers(project) == []

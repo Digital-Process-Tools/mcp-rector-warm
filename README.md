@@ -190,8 +190,8 @@ false` (a non-dry-run call writes files), `destructiveHint: true`,
 
 `bin/rector-warm-lsp` (#53) is a second entry point on the same warm core as
 the MCP server, speaking [LSP](https://microsoft.github.io/language-server-protocol/)
-over stdio instead of MCP -- for editors that want Rector diagnostics on save
-rather than an agent calling a tool. Same `--working-dir` flag as
+over stdio instead of MCP -- for editors that want Rector diagnostics as you
+type and on save, rather than an agent calling a tool. Same `--working-dir` flag as
 `bin/mcp-rector-warm`; `--config` works the same passive way (left in
 `$_SERVER['argv']` for `RectorConfigsResolver` to pick up).
 
@@ -210,11 +210,50 @@ is never indistinguishable from a clean one (#90, #91).
 `Apply Rector: Rector fix` for the same no-rule-pinned case) -- a
 `WorkspaceEdit` built straight from Rector's own unified diff, no full-file
 read needed -- plus a whole-file "Apply all Rector fixes" action. `didClose`
-clears a file's diagnostics. Results are pinned to the document version that
-requested them, so a stale one is discarded if a newer `didSave` for the same
-document finishes first -- inert in the current strictly-synchronous stdio
-loop (nothing can race it there today), kept as defense-in-depth for a future
-async/pipelined transport.
+clears a file's diagnostics.
+
+**Unsaved buffers (#106).** The server declares full text sync
+(`textDocumentSync.change: 1`), so it diagnoses what you are typing, not only
+what is saved. After each `didChange` it waits for 500 ms of quiet, then runs
+Rector on the buffer: the text is written to a temp copy **inside the
+project**, in a hidden `.rector-warm-<pid>/` directory next to the original
+and under the original's file name, so autoload, `rector.php` and the
+working-directory containment apply exactly as for the saved file. The copy
+and its directory are deleted as soon as the run ends, including when Rector
+reports an error. Diagnostics and quick fixes come back on the original URI,
+and error messages name the original path. The result is the one a cold
+`vendor/bin/rector process --dry-run` gives on a file with the same content
+at the same path.
+
+Every result carries the document `version` it was computed for. A result is
+published only if that version is still the latest: a change that arrives
+while Rector runs on the previous version supersedes it, and the loop reads
+that change before it publishes. Code actions are offered only while the
+buffer is still at the version their diagnostics describe. For a client that
+declares `workspace.workspaceEdit.documentChanges`, each edit also names that
+version, so the client rejects it if the buffer has moved on. `didSave`
+diagnoses the saved file and cancels a pending buffer run; `didClose` drops
+the buffer.
+
+Limits of the buffer mode:
+
+- A `withSkip()` entry that names the file's **exact path**
+  (`__DIR__ . '/src/Foo.php'`) does not match the temp copy, so that file is
+  diagnosed while it has unsaved changes. Globs on the file name
+  (`*Test.php`, `*/Foo.php`), skipped directories and rules skipped for such
+  patterns do match, because the copy keeps the file name and sits below the
+  original's directory. This was checked against Rector 2.x.
+- `didOpen` still reads the file from disk. A buffer that is already
+  modified when it is opened is diagnosed from its first change.
+- Only `file:` URIs are diagnosed. An `untitled:` buffer has no project
+  path, so it gets no diagnostics.
+- The debounce reads stdin with a timeout (`stream_select`). PHP cannot
+  select on pipes on Windows. There the server waits out the debounce and
+  then runs, and a change sent during a run is read after that run is
+  published, where it replaces the published result a moment later. This is
+  reasoned from PHP's documentation, not observed, because CI runs on Linux.
+- Editors, watchers and `git status` can see the temp directory for the
+  length of one run.
 
 On `initialized` the server also asks the client (via
 `client/registerCapability`) to watch `rector.php` and `composer.lock` and
@@ -233,8 +272,7 @@ requires; with any other client the config is still reloaded on the next
 `didSave` (the warm worker compares a content hash of the config on every
 call), just not pushed to documents the editor does not re-save (#105).
 
-Out of v1 scope: unsaved buffers (Rector reads from disk), workspace-wide
-scans, and `workspace/configuration`.
+Out of scope: workspace-wide scans and `workspace/configuration`.
 
 For the architecture, the design decisions behind it, correctness (the warm
 == cold oracle) and current benchmark numbers -- written for someone
