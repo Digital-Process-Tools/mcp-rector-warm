@@ -572,7 +572,16 @@ final class ServerStdioTest extends TestCase
             $args[] = '--working-dir=' . self::$fixtureDir;
             $args[] = '--config=' . self::$fixtureDir . '/rector.php';
         }
-        $cmd = array_merge([self::$bin], $args);
+        // #97: self::$bin is a shebang-only PHP script with no .bat/.exe/
+        // .cmd extension. proc_open can exec a shebang file directly on
+        // POSIX, but Windows has no shebang interpretation and nothing for
+        // CreateProcess to resolve, so proc_open silently returns false
+        // instead of a resource -- found via #97's own windows-latest CI
+        // leg. Prepending the interpreter explicitly works identically on
+        // every platform and still boots the same script this test means
+        // to cover -- it does not depend on the shebang line or the file's
+        // executable bit either way.
+        $cmd = array_merge([PHP_BINARY, self::$bin], $args);
 
         $stdin = '';
         foreach ($messages as $m) {
