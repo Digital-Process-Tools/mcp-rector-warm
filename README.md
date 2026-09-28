@@ -223,7 +223,12 @@ files changes, every currently-open document is re-diagnosed -- the warm
 worker already reloads the config on its next call on its own, but nothing
 else would trigger that next call for a document the editor is not also
 re-saving, so diagnostics would otherwise keep reflecting the old config
-until the editor restarted the server (#101).
+until the editor restarted the server (#101). The registration is only sent
+to a client whose `initialize` declared
+`workspace.didChangeWatchedFiles.dynamicRegistration: true`, as the LSP spec
+requires; with any other client the config is still reloaded on the next
+`didSave` (the warm worker compares a content hash of the config on every
+call), just not pushed to documents the editor does not re-save (#105).
 
 Out of v1 scope: unsaved buffers (Rector reads from disk), workspace-wide
 scans, and `workspace/configuration`. Editor-specific setup snippets are

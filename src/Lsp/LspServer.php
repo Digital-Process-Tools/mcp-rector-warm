@@ -16,6 +16,9 @@ final class LspServer
 {
     private bool $shuttingDown = false;
 
+    /** #105: set from `initialize`'s client capabilities */
+    private bool $canWatchFiles = false;
+
     /** @var array<string, int> URI -> the version this server last diagnosed */
     private array $documentVersions = [];
 
@@ -42,11 +45,24 @@ final class LspServer
     public function handle(array $message): array
     {
         $method = $message['method'] ?? null;
-        $isRequest = array_key_exists('id', $message);
         $id = $message['id'] ?? null;
         $params = $message['params'] ?? [];
 
+        // #105: a message with an id but no method is a RESPONSE -- here,
+        // the client's reply to this server's own client/registerCapability
+        // request. JSON-RPC forbids answering a response, and nothing in
+        // this server depends on its result, so it is consumed silently.
+        if ($method === null && array_key_exists('id', $message)) {
+            return [];
+        }
+
+        $isRequest = array_key_exists('id', $message);
+
         if ($method === 'initialize') {
+            $this->canWatchFiles = self::clientSupportsDynamicWatchedFiles(
+                is_array($params) ? ($params['capabilities'] ?? null) : null,
+            );
+
             return [$this->result($id, [
                 'capabilities' => [
                     // Disk-based: no textDocument/didChange handling, so
@@ -66,7 +82,13 @@ final class LspServer
         }
 
         if ($method === 'initialized') {
-            return [$this->registerConfigFileWatcher()];
+            // #105: the spec lets a server register dynamically only for a
+            // capability the client declared `dynamicRegistration: true`
+            // for. Without it nothing is lost for correctness: the warm
+            // worker still reloads rector.php on the next didSave
+            // (RectorRunner::configFileChanged()); only the re-diagnose of
+            // open documents on an out-of-editor config edit is skipped.
+            return $this->canWatchFiles ? [$this->registerConfigFileWatcher()] : [];
         }
 
         if ($method === 'shutdown') {
@@ -105,6 +127,18 @@ final class LspServer
     public function isShuttingDown(): bool
     {
         return $this->shuttingDown;
+    }
+
+    private static function clientSupportsDynamicWatchedFiles(mixed $capabilities): bool
+    {
+        if (!is_array($capabilities)) {
+            return false;
+        }
+
+        $workspace = $capabilities['workspace'] ?? null;
+        $watched = is_array($workspace) ? ($workspace['didChangeWatchedFiles'] ?? null) : null;
+
+        return is_array($watched) && ($watched['dynamicRegistration'] ?? false) === true;
     }
 
     /**
