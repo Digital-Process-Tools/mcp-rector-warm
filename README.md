@@ -240,26 +240,26 @@ Every editor below spawns the same command:
 `vendor/bin/rector-warm-lsp --working-dir=/path/to/project` (local clone),
 filetype `php`, root markers `composer.json` / `rector.php`.
 
-**These snippets are written against each editor's own published LSP-client
-documentation. None of them has been run against a live install of Neovim,
-Zed, Helix, Sublime Text or PhpStorm/LSP4IJ in the environment that produced
-this change** -- treat each as a documented starting point, not a verified
-recipe, until someone runs it against a real editor and records the version
-it was tested against.
+Each editor says whether its snippet was run against a live install, and on
+which versions. Neovim and Helix were tested (macOS, against a fixture
+project: a file with a pending Rector change got one diagnostic plus an
+`Apply Rector: ...` quickfix, and a clean file got none). Sublime Text and
+PhpStorm/LSP4IJ were not.
 
-#### Neovim (0.11+, native `vim.lsp.config`)
+#### Neovim (0.11.3+, native `vim.lsp.config`)
+
+Tested on Neovim 0.11.3, 0.11.4 and 0.12.5, including starting Neovim outside
+the project directory.
 
 ```lua
--- ~/.config/nvim/lsp/rector.lua
+-- ~/.config/nvim/lsp/rector.lua   (Neovim 0.11.3+)
 -- `cmd` is a function, not a static list: `--working-dir` has to be the
 -- resolved project root (matched against root_markers below), not whatever
--- directory Neovim happened to start in -- `vim.fn.getcwd()` would silently
--- point rector-warm-lsp at the wrong project whenever Neovim isn't launched
--- from the exact project root, or in a multi-root session.
+-- directory Neovim happened to start in.
 return {
   cmd = function(dispatchers, config)
     local root = config.root_dir or vim.fn.getcwd()
-    return vim.lsp.rpc.start('rector-warm-lsp', { '--working-dir=' .. root }, dispatchers)
+    return vim.lsp.rpc.start({ 'rector-warm-lsp', '--working-dir=' .. root }, dispatchers)
   end,
   filetypes = { 'php' },
   root_markers = { 'composer.json', 'rector.php' },
@@ -271,7 +271,19 @@ return {
 vim.lsp.enable('rector')
 ```
 
-On older Neovim via [nvim-lspconfig](https://github.com/neovim/nvim-lspconfig), register a custom server before calling `setup`, using `on_new_config` so `cmd` picks up each resolved root rather than a fixed `vim.fn.getcwd()`:
+This needs 0.11.3 or later: Neovim 0.11.0 to 0.11.2 do not pass `config` to a
+function `cmd`, so the snippet fails there with
+`attempt to index local 'config' (a nil value)`. On those versions, and on
+0.10, use the nvim-lspconfig setup below.
+
+#### Neovim (0.10 to 0.11.2, via [nvim-lspconfig](https://github.com/neovim/nvim-lspconfig))
+
+Tested on Neovim 0.10.4, 0.11.0 and 0.12.5 with nvim-lspconfig HEAD (a9bb4d5),
+including starting Neovim outside the project directory. On 0.10,
+nvim-lspconfig warns that it is dropping 0.10 support in its v3.
+
+Register a custom server before calling `setup`, using `on_new_config` so
+`cmd` picks up each resolved root rather than a fixed `vim.fn.getcwd()`:
 
 ```lua
 local lspconfig = require('lspconfig')
@@ -301,6 +313,8 @@ a gap for a follow-up rather than guessed at.
 
 #### Helix
 
+Tested on Helix 25.07.1.
+
 ```toml
 # ~/.config/helix/languages.toml
 [language-server.rector-warm-lsp]
@@ -309,13 +323,30 @@ args = ["--working-dir=."]
 
 [[language]]
 name = "php"
+roots = ["composer.json", "rector.php"]
 language-servers = ["rector-warm-lsp"]
 ```
 
 Helix spawns language servers with the workspace root as the working
-directory already, so `--working-dir=.` resolves correctly.
+directory, so `--working-dir=.` resolves to it. `roots` is needed: Helix's
+default PHP roots are `composer.json` / `index.php`, so a project that has
+only a `rector.php` would otherwise resolve to the git root.
+
+**Open `hx` from the project root, or from inside the project's git
+checkout.** Started from a subdirectory with no `.git` above it, or from
+outside the project, the server gets the wrong root and fails with
+"No rector.php found" or "path is outside the configured working directory".
+That is a limit of Helix's root search, which `roots` cannot fix.
+
+`language-servers = [...]` replaces Helix's default PHP servers rather than
+adding to them, so to keep your usual PHP server list both, e.g.
+`language-servers = ["intelephense", "rector-warm-lsp"]` (reasoned from
+Helix's docs, not run).
 
 #### Sublime Text ([LSP package](https://github.com/sublimelsp/LSP))
+
+**Untested:** not run against a live Sublime Text install. The keys below
+match the LSP package's documented client schema.
 
 ```json
 // LSP.sublime-settings
@@ -330,11 +361,19 @@ directory already, so `--working-dir=.` resolves correctly.
 }
 ```
 
+`${folder}` is the window's *first* folder only (reasoned, from
+`window.extract_variables()`): in a multi-folder window the other folders'
+files are outside the working directory, and with no folder open the server
+gets an unusable `--working-dir`.
+
 #### PhpStorm / IntelliJ ([LSP4IJ](https://github.com/redhat-developer/lsp4ij) plugin)
+
+**Untested:** not run against a live PhpStorm/LSP4IJ install; written from
+LSP4IJ's docs.
 
 LSP4IJ has no project-file snippet for an ad hoc server; it is wired through
 its UI: **Settings > Languages & Frameworks > Language Servers > +**, define
-a server with command `rector-warm-lsp --working-dir=$ProjectFileDir$` and
+a server with command `rector-warm-lsp --working-dir=$PROJECT_DIR$` and
 file name pattern `*.php`.
 
 ## How it works
