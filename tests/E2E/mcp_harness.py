@@ -36,6 +36,17 @@ RECTOR_FLAGS = ["process", "--output-format=json", "--debug", "--no-progress-bar
 
 CALL_TIMEOUT = float(os.environ.get("E2E_CALL_TIMEOUT", "180"))
 
+# #97/#31: PHP ships with no pcntl extension on Windows at all -- RectorRunner's own
+# canFork() (function_exists('pcntl_fork') etc.) is therefore always False there, so
+# run() always takes the runCold() branch and reports warm_boot=False for EVERY call
+# in a session, never True, no matter how many calls share the session or whether the
+# config changed (see RectorRunner's own class docblock). A warm_boot assertion that
+# does not account for this fails on windows-latest not because the mechanism is
+# broken, but because it is doing exactly what it is documented to do. Folding this
+# in here (rather than skipping the assertion outright) keeps it a real check on
+# Windows too: it still pins that every call actually goes cold there.
+NO_PCNTL_PLATFORM = sys.platform.startswith("win")
+
 
 def php_binary() -> str:
     """The PHP interpreter. Invoked explicitly rather than through the bin's

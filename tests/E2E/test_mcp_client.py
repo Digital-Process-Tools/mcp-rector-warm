@@ -17,6 +17,7 @@ from mcp_types.version import HANDSHAKE_PROTOCOL_VERSIONS
 
 from mcp_harness import (
     FIXTURE_PROJECT,
+    NO_PCNTL_PLATFORM,
     REPO,
     exit_record,
     non_jsonrpc_lines,
@@ -138,7 +139,10 @@ def test_second_call_in_the_same_session_is_warm_and_agrees_with_the_first(proje
     first, second = anyio.run(scenario)
 
     assert first["warm_boot"] is False
-    assert second["warm_boot"] is True, "the second call must reuse the warm container"
+    if NO_PCNTL_PLATFORM:
+        assert second["warm_boot"] is False, "no pcntl on this platform (#97) -- every call must be a cold boot"
+    else:
+        assert second["warm_boot"] is True, "the second call must reuse the warm container"
     assert normalise(second, project) == normalise(first, project)
     assert normalise(second, project)["changed_files"] == ["src/Money.php"]
 
@@ -153,7 +157,10 @@ def test_a_different_second_file_in_a_warm_session_is_refactored(project: Path, 
     first, second = anyio.run(scenario)
 
     assert normalise(first, project)["changed_files"] == []
-    assert second["warm_boot"] is True
+    if NO_PCNTL_PLATFORM:
+        assert second["warm_boot"] is False, "no pcntl on this platform (#97) -- every call must be a cold boot"
+    else:
+        assert second["warm_boot"] is True
     assert normalise(second, project)["changed_files"] == ["src/Money.php"]
 
 

@@ -87,6 +87,7 @@ import pytest
 import yaml
 
 from mcp_harness import (
+    NO_PCNTL_PLATFORM,
     REPO,
     assert_no_zombie_descendants,
     exit_record,
@@ -290,7 +291,15 @@ async def call_step(
 
     if cold_tree is not None:
         if not first_call:
-            if expect_reboot:
+            if NO_PCNTL_PLATFORM:
+                # #97/#31: no pcntl here means RectorRunner never forks a warm worker at
+                # all, so warm_boot is False for every call regardless of expect_reboot --
+                # asserting it stays meaningful (pins that runCold() is really what ran)
+                # rather than being skipped outright.
+                assert payload.get("warm_boot") is False, (
+                    f"{where}: no pcntl on this platform (#97) -- every call must be a cold boot: {payload}"
+                )
+            elif expect_reboot:
                 assert payload.get("warm_boot") is False, (
                     f"{where}: the resolved config changed since the last call, so this call must "
                     f"reboot (warm_boot=False) rather than reuse the container the old config built: {payload}"
