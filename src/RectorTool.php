@@ -165,12 +165,19 @@ final class RectorTool
     private static function isWithinRoot(string $real, string $cwd, ?bool $caseInsensitive = null): bool
     {
         $caseInsensitive ??= DIRECTORY_SEPARATOR === '\\';
-        // #99: the case-insensitive branch is by definition the Windows
-        // one (that is exactly what $caseInsensitive means here), so it
-        // uses the Windows separator explicitly rather than the host's own
-        // DIRECTORY_SEPARATOR -- otherwise a test forcing this branch on a
-        // POSIX CI runner would build a mismatched "C:\...\\..." prefix.
-        $separator = $caseInsensitive ? '\\' : DIRECTORY_SEPARATOR;
+        // #99/#97: both branches hardcode their own separator rather than
+        // deferring to the host's DIRECTORY_SEPARATOR, and for the same
+        // reason on each side -- a test (or a merge-ref CI checkout) can
+        // force either branch on the "wrong" host OS to pin the string
+        // logic independent of platform. The case-insensitive branch is by
+        // definition the Windows one, so it uses '\\' explicitly (#99);
+        // symmetrically the case-sensitive branch is by definition the
+        // POSIX one, so it uses '/' explicitly (#97's windows-latest CI leg
+        // is what actually exposed this) -- otherwise a test forcing this
+        // branch on a real windows-latest CI runner (where
+        // DIRECTORY_SEPARATOR is '\\') would build a mismatched
+        // "/proj\..." prefix against forward-slash test paths.
+        $separator = $caseInsensitive ? '\\' : '/';
         $prefix = $cwd . $separator;
 
         if ($caseInsensitive) {
