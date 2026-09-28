@@ -4,70 +4,245 @@ declare(strict_types=1);
 
 namespace Dpt\McpRectorWarm\Lsp;
 
-use stdClass;
-
 /**
- * v1 prototype for #52 (decide the wire approach) / #53 (build v1): answers
- * enough of the LSP handshake to prove the hand-rolled-JSON-RPC decision
- * works end to end. Diagnostics (didOpen/didSave -> publishDiagnostics) and
- * codeAction are #53's scope, built on the same warm RectorRunner/RectorTool
- * core -- not here.
+ * v1 (#53): the handshake from #52's prototype, plus diagnostics
+ * (didOpen/didSave -> publishDiagnostics), didClose (clears them), and
+ * textDocument/codeAction (a WorkspaceEdit per hunk, plus a whole-file
+ * action), all built on RectorDiffParser + a DiagnosticsSource. Rector reads
+ * from disk, so text sync stays `None`: an unsaved buffer's edits are never
+ * seen (out of v1 scope, same as the issue's "unsaved buffers" exclusion).
  */
 final class LspServer
 {
     private bool $shuttingDown = false;
 
-    public function __construct(private readonly string $serverVersion)
-    {
+    /** @var array<string, int> URI -> the version this server last diagnosed */
+    private array $documentVersions = [];
+
+    /**
+     * @var array<string, list<array{range: array{start: array{line:int,character:int}, end: array{line:int,character:int}}, newText: string, rectors: list<string>}>>
+     *   URI -> the fixes behind its currently-published diagnostics, so
+     *   codeAction can build a WorkspaceEdit without re-running Rector.
+     */
+    private array $fixesByUri = [];
+
+    public function __construct(
+        private readonly string $serverVersion,
+        private readonly ?DiagnosticsSource $diagnostics = null,
+    ) {
     }
 
     /**
      * @param array<string, mixed> $message
-     * @return array<string, mixed>|null the response frame to write, or null
-     *     when the message needs no reply (a notification, or one this
-     *     prototype does not implement yet)
+     * @return list<array<string, mixed>> zero or more frames to write --
+     *   0 for a notification needing no reply and producing no diagnostics
+     *   push, 1 for an ordinary request/response or a single
+     *   publishDiagnostics push, more only if a future method needs it.
      */
-    public function handle(array $message): ?array
+    public function handle(array $message): array
     {
         $method = $message['method'] ?? null;
         $isRequest = array_key_exists('id', $message);
         $id = $message['id'] ?? null;
+        $params = $message['params'] ?? [];
 
         if ($method === 'initialize') {
-            return $this->result($id, [
-                // Empty on purpose: no textDocumentSync / codeActionProvider
-                // yet, so a real client does not expect diagnostics from this
-                // prototype. stdClass, not [], so this encodes as a JSON
-                // object ({}) rather than an array ([]) -- the LSP spec
-                // requires an object here.
-                'capabilities' => new stdClass(),
+            return [$this->result($id, [
+                'capabilities' => [
+                    // Disk-based: no textDocument/didChange handling, so
+                    // `change` stays None (0) -- see the class docblock.
+                    'textDocumentSync' => [
+                        'openClose' => true,
+                        'change' => 0,
+                        'save' => ['includeText' => false],
+                    ],
+                    'codeActionProvider' => true,
+                ],
                 'serverInfo' => [
                     'name' => 'rector-warm-lsp',
                     'version' => $this->serverVersion,
                 ],
-            ]);
+            ])];
         }
 
         if ($method === 'initialized') {
-            return null;
+            return [];
         }
 
         if ($method === 'shutdown') {
             $this->shuttingDown = true;
 
-            return $this->result($id, null);
+            return [$this->result($id, null)];
+        }
+
+        if ($method === 'textDocument/didOpen') {
+            return $this->diagnoseDocument(is_array($params) ? ($params['textDocument'] ?? []) : []);
+        }
+
+        if ($method === 'textDocument/didSave') {
+            return $this->diagnoseDocument(is_array($params) ? ($params['textDocument'] ?? []) : []);
+        }
+
+        if ($method === 'textDocument/didClose') {
+            return $this->clearDocument(is_array($params) ? ($params['textDocument'] ?? []) : []);
+        }
+
+        if ($method === 'textDocument/codeAction') {
+            return [$this->codeAction($id, is_array($params) ? $params : [])];
         }
 
         if ($isRequest) {
-            return $this->error($id, -32601, sprintf('Method not found: %s', (string) $method));
+            return [$this->error($id, -32601, sprintf('Method not found: %s', (string) $method))];
         }
 
-        return null;
+        return [];
     }
 
     public function isShuttingDown(): bool
     {
         return $this->shuttingDown;
+    }
+
+    /**
+     * @param array<string, mixed> $textDocument
+     * @return list<array<string, mixed>>
+     */
+    private function diagnoseDocument(array $textDocument): array
+    {
+        $uri = $textDocument['uri'] ?? null;
+        if (!is_string($uri) || $this->diagnostics === null) {
+            return [];
+        }
+
+        $version = $textDocument['version'] ?? ($this->documentVersions[$uri] ?? 0);
+        $this->documentVersions[$uri] = $version;
+
+        $path = self::uriToPath($uri);
+        $result = $this->diagnostics->diagnose($path);
+
+        // Drop a stale result (#53): a call's diagnose() can itself take long
+        // enough for a later didSave to land and bump the tracked version
+        // before this one returns. Comparing against the version THIS call
+        // started with, not whatever is tracked now, is what makes a stale
+        // result discardable at all.
+        if (($this->documentVersions[$uri] ?? null) !== $version) {
+            return [];
+        }
+
+        $fixes = $result['fixes'] ?? [];
+        $this->fixesByUri[$uri] = $fixes;
+
+        $diagnostics = [];
+        foreach ($fixes as $i => $fix) {
+            $diagnostics[] = [
+                'range' => $fix['range'],
+                'severity' => 3,
+                'source' => 'rector',
+                'message' => implode(', ', $fix['rectors']),
+                'data' => ['hunkIndex' => $i],
+            ];
+        }
+
+        return [$this->publishDiagnostics($uri, $diagnostics)];
+    }
+
+    /**
+     * @param array<string, mixed> $textDocument
+     * @return list<array<string, mixed>>
+     */
+    private function clearDocument(array $textDocument): array
+    {
+        $uri = $textDocument['uri'] ?? null;
+        if (!is_string($uri)) {
+            return [];
+        }
+
+        unset($this->fixesByUri[$uri], $this->documentVersions[$uri]);
+
+        return [$this->publishDiagnostics($uri, [])];
+    }
+
+    /**
+     * @param array<string, mixed> $params
+     * @return array<string, mixed>
+     */
+    private function codeAction(mixed $id, array $params): array
+    {
+        $textDocument = is_array($params['textDocument'] ?? null) ? $params['textDocument'] : [];
+        $uri = $textDocument['uri'] ?? null;
+        $range = is_array($params['range'] ?? null) ? $params['range'] : null;
+
+        if (!is_string($uri)) {
+            return $this->result($id, []);
+        }
+
+        $fixes = $this->fixesByUri[$uri] ?? [];
+        if ($fixes === []) {
+            return $this->result($id, []);
+        }
+
+        $actions = [];
+        foreach ($fixes as $fix) {
+            if ($range !== null && !self::rangesOverlap($range, $fix['range'])) {
+                continue;
+            }
+
+            $actions[] = [
+                'title' => 'Apply Rector: ' . implode(', ', $fix['rectors']),
+                'kind' => 'quickfix',
+                'edit' => ['changes' => [$uri => [['range' => $fix['range'], 'newText' => $fix['newText']]]]],
+            ];
+        }
+
+        $actions[] = [
+            'title' => 'Apply all Rector fixes',
+            'kind' => 'source.fixAll.rector',
+            'edit' => ['changes' => [$uri => array_map(
+                static fn (array $fix): array => ['range' => $fix['range'], 'newText' => $fix['newText']],
+                $fixes,
+            )]],
+        ];
+
+        return $this->result($id, $actions);
+    }
+
+    /**
+     * @param list<array<string, mixed>> $diagnostics
+     * @return array<string, mixed>
+     */
+    private function publishDiagnostics(string $uri, array $diagnostics): array
+    {
+        return [
+            'jsonrpc' => '2.0',
+            'method' => 'textDocument/publishDiagnostics',
+            'params' => ['uri' => $uri, 'diagnostics' => $diagnostics],
+        ];
+    }
+
+    /**
+     * @param array{start: array{line:int,character:int}, end: array{line:int,character:int}} $a
+     * @param array{start: array{line:int,character:int}, end: array{line:int,character:int}} $b
+     */
+    private static function rangesOverlap(array $a, array $b): bool
+    {
+        return $a['start']['line'] < $b['end']['line'] && $b['start']['line'] < $a['end']['line'];
+    }
+
+    /**
+     * `file:///path` -> `/path`, decoded, with the Windows `/C:/...` ->
+     * `C:/...` correction every `file://` URI needs there (reasoned, not
+     * observed on this machine -- see the developer report).
+     */
+    private static function uriToPath(string $uri): string
+    {
+        $path = parse_url($uri, PHP_URL_PATH);
+        $path = is_string($path) ? rawurldecode($path) : $uri;
+
+        if (preg_match('#^/[A-Za-z]:#', $path) === 1) {
+            $path = substr($path, 1);
+        }
+
+        return $path;
     }
 
     /**
