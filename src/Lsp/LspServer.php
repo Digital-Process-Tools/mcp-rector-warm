@@ -415,9 +415,12 @@ final class LspServer
             // `file://c:/foo/bar.php` -- a non-conformant but real
             // two-slash Windows drive-letter shape (RFC 8089 Appendix E)
             // -- puts the single-letter drive in parse_url()'s HOST, not
-            // PATH. A one-character host is a drive letter, never a real
-            // UNC server name, so it must be rebuilt as a drive path
-            // rather than folded into a `\\host\...` UNC prefix.
+            // PATH. Treated here as a drive letter rather than a UNC
+            // server name: a single-letter NetBIOS hostname is technically
+            // legal (1-15 chars) but vanishingly rare in practice, and the
+            // URI syntax itself gives no way to tell the two apart, so this
+            // is a deliberate, documented trade-off (second self-review
+            // pass), not a claim that the UNC reading is impossible.
             if (preg_match('#^[A-Za-z]$#', $host) === 1) {
                 return $host . ':' . $path;
             }
