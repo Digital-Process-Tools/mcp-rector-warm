@@ -1203,7 +1203,7 @@ class RectorRunner implements RunnerInterface
                 if ($files === null) {
                     continue; // skipped everywhere, the copy included
                 }
-                if ($skipper->matchSkip($class, $originalPath) !== null && $skipper->matchSkip($class, $copyPath) === null) {
+                if (self::ruleSkippedFor($skipper, $class, $originalPath) && !self::ruleSkippedFor($skipper, $class, $copyPath)) {
                     $classes[$class] = \array_merge($files, $copyPaths);
                     $changed = true;
                 }
@@ -1213,12 +1213,33 @@ class RectorRunner implements RunnerInterface
                 self::overwriteResolved($classResolver, 'skippedClassesToFiles', $classes);
             }
         } catch (\Throwable $e) {
-            \fwrite(\STDERR, \sprintf(
-                "mcp-rector-warm: could not apply the skip rules of %s to its buffer copy: %s\n",
-                $originalPath,
-                $e->getMessage(),
-            ));
+            // Fail open: the copy is diagnosed without these skips. The
+            // forked grandchild has already closed fd 2 (runForked()), and an
+            // fwrite() to a closed STDERR throws a TypeError out of this
+            // catch -- failing the whole call. Write only where it is open.
+            if (\defined('STDERR') && \is_resource(\STDERR)) {
+                @\fwrite(\STDERR, \sprintf(
+                    "mcp-rector-warm: could not apply the skip rules of %s to its buffer copy: %s\n",
+                    $originalPath,
+                    $e->getMessage(),
+                ));
+            }
         }
+    }
+
+    /**
+     * Skipper::matchSkip() exists from Rector 2.5.2 and does not mark the
+     * skip as used; composer.json allows ^2.4, whose Skipper only has
+     * shouldSkipElementAndFilePath() (same answer, and no used-skip
+     * tracking to disturb before 2.5.2).
+     */
+    private static function ruleSkippedFor(object $skipper, string $class, string $path): bool
+    {
+        if (\method_exists($skipper, 'matchSkip')) {
+            return $skipper->matchSkip($class, $path) !== null;
+        }
+
+        return $skipper->shouldSkipElementAndFilePath($class, $path);
     }
 
     private static function overwriteResolved(object $resolver, string $property, array $value): void

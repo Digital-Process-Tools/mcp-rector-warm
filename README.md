@@ -252,9 +252,17 @@ the buffer.
 Limits of the buffer mode:
 
 - Applying the original path's skips relies on two private lists in
-  Rector's skip resolvers (checked against Rector 2.x). If a future Rector
-  renames them, the server logs this on stderr and diagnoses the buffer
-  without those skips, rather than failing.
+  Rector's skip resolvers. Their names are the same from Rector 2.4.0 to the
+  locked 2.6.7 (checked in Rector's source). On 2.4 to 2.5.1, which have no
+  `Skipper::matchSkip()`, rule-scoped skips are checked through
+  `shouldSkipElementAndFilePath()` instead (reasoned from the source, not
+  run). If a future Rector renames those lists, the buffer is diagnosed
+  without those skips rather than failing; the notice goes to stderr only
+  when the call runs cold, since the forked worker has no stderr.
+- An exact-path `withSkip()` entry for a file that has **never been saved to
+  disk** does not apply to its unsaved buffer: Rector drops non-glob skip
+  paths that do not exist. Once the file is saved, the skip applies, as it
+  does for a cold run.
 - `didOpen` still reads the file from disk. A buffer that is already
   modified when it is opened is diagnosed from its first change.
 - Only `file:` URIs are diagnosed. An `untitled:` buffer has no project
