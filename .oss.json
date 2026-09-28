@@ -11,7 +11,8 @@
     "0.3.0"
   ],
   "docs_targets": [
-    "README.md"
+    "README.md",
+    "docs/lsp-for-rector-maintainers.md"
   ],
   "labels": {
     "priority": ["priority-high", "priority-medium", "priority-low"],
