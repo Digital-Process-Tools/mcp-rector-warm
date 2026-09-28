@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Dpt\McpRectorWarm;
 
+use Dpt\McpRectorWarm\Support\ProcessTree;
 use Rector\Bootstrap\RectorConfigsResolver;
 use Rector\DependencyInjection\RectorContainerFactory;
 
@@ -286,6 +287,20 @@ class RectorRunner implements RunnerInterface
     }
 
     /**
+     * Deadline for boot()'s handshake read: the bare call deadline, no grace
+     * (see the comment at its call site). Its own method only so a test can
+     * keep a real container build out of the short --call-timeout it measures
+     * a CALL against (#113) -- boot()'s deadline is computed here in the
+     * daemon process, after the worker has already forked with its own copy of
+     * $callTimeoutSeconds, so overriding this never changes the worker's
+     * forkAndExecute() deadline.
+     */
+    protected function bootDeadlineNs(): ?int
+    {
+        return $this->callDeadlineNs();
+    }
+
+    /**
      * Best-effort SIGKILL of a wedged $pid, then reap it -- the shared shape
      * behind every deadline-expiry path in this file (boot(), runForked(),
      * forkAndExecute()). Blocks on the reap ONLY when a kill signal was
@@ -306,6 +321,10 @@ class RectorRunner implements RunnerInterface
     {
         $status = 0;
         if ($this->hasPosixKill()) {
+            // #112: the whole tree, not only $pid -- Rector's parallel workers
+            // (and anything a rector.php starts) are $pid's descendants, and a
+            // SIGKILL to $pid alone left them running as orphans.
+            ProcessTree::killTree($pid);
             @\posix_kill($pid, \SIGKILL);
             \pcntl_waitpid($pid, $status);
         } else {
@@ -368,7 +387,7 @@ class RectorRunner implements RunnerInterface
         // deadline layer over the boot handshake, there is no separate
         // worker-side sub-process boundary underneath it to give a head start
         // to, so the bare callDeadlineNs() (no grace) is the right one.
-        $bootDeadline = $this->callDeadlineNs();
+        $bootDeadline = $this->bootDeadlineNs();
         if ($bootDeadline !== null) {
             \stream_set_timeout($parentSocket, 1);
         }
@@ -381,7 +400,18 @@ class RectorRunner implements RunnerInterface
             // deadline-expiry path in this file.
             $this->killAndReap($pid);
             \fclose($parentSocket);
-            throw new \RuntimeException($e->getMessage());
+            // #113: never rethrow readExactly()'s own message here. That text
+            // ("... waiting on the warm worker") is runForked()'s outer
+            // backstop's, which only ever fires after the call deadline PLUS
+            // RUN_FORKED_DEADLINE_GRACE_SECONDS; reusing it for this ungraced
+            // boot deadline made a slow container build read as the outer
+            // backstop tripping at ~1s -- a kill site that cannot exist.
+            // Deliberately not "exceeded {N}s" either: that figure is how the
+            // wedge tests recognise forkAndExecute()'s inner kill site.
+            throw new \RuntimeException(
+                "rector call exceeded its configured --call-timeout ({$this->callTimeoutSeconds}s) before the "
+                . 'warm worker finished booting; the worker was killed',
+            );
         }
         $decoded = $handshake === null ? null : \json_decode($handshake, true);
         if (!\is_array($decoded) || ($decoded['ok'] ?? false) !== true) {
@@ -509,12 +539,10 @@ class RectorRunner implements RunnerInterface
             // (#43) instead of waiting on a read that may never arrive. This
             // process only ever learns the worker's own pid (boot()'s
             // pcntl_fork() return) -- never its grandchild's, which is forked
-            // and reaped entirely inside the worker's own forkAndExecute() -- so
-            // an in-flight grandchild here is orphaned (reparented, not left a
-            // zombie under THIS process) rather than reaped directly; a real,
-            // narrower gap than the zombie-under-us case #48 described, and one
-            // that should be rare given forkAndExecute()'s own deadline already
-            // covers the common "grandchild alone is wedged" case.
+            // and reaped entirely inside the worker's own forkAndExecute().
+            // killAndReap() kills the worker's whole process tree (#112), so an
+            // in-flight grandchild and whatever it spawned go down with it
+            // (reparented and reaped by init, never a zombie under THIS process).
             if ($this->workerPid !== null) {
                 $this->killAndReap($this->workerPid);
             }
@@ -822,6 +850,13 @@ class RectorRunner implements RunnerInterface
                         // straight to a hard kill: a wedged process is, by
                         // definition, not responding to signals it could choose to
                         // handle.
+                        // #112: the whole tree first. proc_terminate() reaches
+                        // only the direct child; Rector's parallel workers
+                        // (spawned by it) kept running as orphans, and on
+                        // Windows kept the call's working directory locked.
+                        // `taskkill /T` must see the root alive to find the
+                        // tree, hence before proc_terminate(), never after.
+                        ProcessTree::killTree((int) $procStatus['pid']);
                         \proc_terminate($process, 9);
                         \proc_close($process);
 

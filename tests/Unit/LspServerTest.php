@@ -68,11 +68,54 @@ final class LspServerTest extends TestCase
         );
     }
 
-    public function testInitializedNotificationGetsNoReply(): void
+    /**
+     * @param array<string, mixed> $capabilities
+     */
+    private static function initialize(LspServer $server, array $capabilities): void
     {
-        $server = new LspServer('0.1.0-prototype');
+        $server->handle([
+            'jsonrpc' => '2.0',
+            'id' => 1,
+            'method' => 'initialize',
+            'params' => ['processId' => null, 'rootUri' => null, 'capabilities' => $capabilities],
+        ]);
+    }
 
-        self::assertSame([], $server->handle(['jsonrpc' => '2.0', 'method' => 'initialized']));
+    private const WATCHED_FILES_DYNAMIC = [
+        'workspace' => ['didChangeWatchedFiles' => ['dynamicRegistration' => true]],
+    ];
+
+    public function testInitializedNotificationRegistersAConfigFileWatcher(): void
+    {
+        // #101: `initialized` used to produce no reply at all. Now it sends
+        // a `client/registerCapability` REQUEST (server -> client) asking
+        // to be told about changes to rector.php/composer.lock, so the
+        // server can react to an edit made outside any didOpen/didSave --
+        // the missing trigger the issue names. This is a request, not a
+        // notification, so it carries an id the client is expected to
+        // reply to (the reply itself needs no handling: nothing in this
+        // server depends on its result -- see
+        // testAResponseFromTheClientIsNeverAnswered).
+        //
+        // #105: only when the client declared it can take the registration
+        // (`workspace.didChangeWatchedFiles.dynamicRegistration: true`).
+        $server = new LspServer('0.1.0-prototype');
+        self::initialize($server, self::WATCHED_FILES_DYNAMIC);
+
+        $responses = $server->handle(['jsonrpc' => '2.0', 'method' => 'initialized']);
+
+        self::assertCount(1, $responses);
+        $request = $responses[0];
+        self::assertSame('2.0', $request['jsonrpc']);
+        self::assertSame('client/registerCapability', $request['method']);
+        self::assertArrayHasKey('id', $request);
+
+        $registrations = $request['params']['registrations'];
+        self::assertCount(1, $registrations);
+        self::assertSame('workspace/didChangeWatchedFiles', $registrations[0]['method']);
+
+        $patterns = array_column($registrations[0]['registerOptions']['watchers'], 'globPattern');
+        self::assertSame(['**/rector.php', '**/composer.lock'], $patterns);
     }
 
     public function testUnknownRequestGetsAMethodNotFoundError(): void
@@ -83,6 +126,111 @@ final class LspServerTest extends TestCase
 
         self::assertSame(7, $responses[0]['id']);
         self::assertSame(-32601, $responses[0]['error']['code']);
+    }
+
+    /**
+     * @return iterable<string, array{array<string, mixed>}>
+     */
+    public static function clientCapabilitiesWithoutDynamicWatchedFiles(): iterable
+    {
+        yield 'empty capabilities' => [[]];
+        yield 'workspace without didChangeWatchedFiles' => [['workspace' => ['applyEdit' => true]]];
+        yield 'dynamicRegistration false' => [['workspace' => ['didChangeWatchedFiles' => ['dynamicRegistration' => false]]]];
+        yield 'didChangeWatchedFiles without dynamicRegistration' => [['workspace' => ['didChangeWatchedFiles' => []]]];
+    }
+
+    /**
+     * #105: the LSP spec only lets a server register a capability
+     * dynamically when the client declared `dynamicRegistration: true` for
+     * it. Paired with testInitializedNotificationRegistersAConfigFileWatcher
+     * (the must-fire half), so an `initialized` that silently produces
+     * nothing for every client cannot pass both.
+     *
+     * @param array<string, mixed> $capabilities
+     */
+    #[\PHPUnit\Framework\Attributes\DataProvider('clientCapabilitiesWithoutDynamicWatchedFiles')]
+    public function testInitializedDoesNotRegisterWithoutTheClientCapability(array $capabilities): void
+    {
+        $server = new LspServer('0.1.0-prototype');
+        self::initialize($server, $capabilities);
+
+        self::assertSame([], $server->handle(['jsonrpc' => '2.0', 'method' => 'initialized']));
+    }
+
+    /**
+     * #105, the other half of "not registered": with no watcher, a config
+     * change still reaches diagnostics on the next didSave, because every
+     * didSave calls the DiagnosticsSource again and the warm worker reloads
+     * the config itself on that call (RectorRunner::configFileChanged(),
+     * pinned in RectorRunnerTest and end to end in test_lsp_diagnostics.py).
+     * This source stands in for that: its answer changes between the two
+     * calls the way a reloaded config's does.
+     */
+    public function testWithoutTheWatcherTheNextSaveStillPublishesTheReloadedResult(): void
+    {
+        $source = new class implements DiagnosticsSource {
+            public int $calls = 0;
+
+            public function diagnose(string $absolutePath): array
+            {
+                $this->calls++;
+
+                return $this->calls === 1
+                    ? ['fixes' => [[
+                        'range' => ['start' => ['line' => 1, 'character' => 0], 'end' => ['line' => 2, 'character' => 0]],
+                        'newText' => 'x',
+                        'rectors' => ['BeforeConfigRector'],
+                    ]]]
+                    : ['fixes' => []];
+            }
+        };
+        $server = new LspServer('0.1.0-prototype', $source);
+        self::initialize($server, []);
+        self::assertSame([], $server->handle(['jsonrpc' => '2.0', 'method' => 'initialized']));
+
+        $uri = 'file:///tmp/A.php';
+        $opened = $server->handle([
+            'jsonrpc' => '2.0',
+            'method' => 'textDocument/didOpen',
+            'params' => ['textDocument' => ['uri' => $uri, 'version' => 1, 'text' => '']],
+        ]);
+        self::assertCount(1, $opened[0]['params']['diagnostics']);
+
+        $saved = $server->handle([
+            'jsonrpc' => '2.0',
+            'method' => 'textDocument/didSave',
+            'params' => ['textDocument' => ['uri' => $uri]],
+        ]);
+
+        self::assertSame(2, $source->calls);
+        self::assertSame('textDocument/publishDiagnostics', $saved[0]['method']);
+        self::assertSame([], $saved[0]['params']['diagnostics']);
+    }
+
+    /**
+     * #105: a RESPONSE (id + result/error, no method) -- e.g. the client's
+     * reply to this server's own client/registerCapability -- must never be
+     * answered; JSON-RPC forbids replying to a response. Paired with
+     * testUnknownRequestGetsAMethodNotFoundError (the must-still-fire half).
+     *
+     * @return iterable<string, array{array<string, mixed>}>
+     */
+    public static function responseFrames(): iterable
+    {
+        yield 'result null' => [['jsonrpc' => '2.0', 'id' => 'rector-warm-lsp/config-watch', 'result' => null]];
+        yield 'error' => [['jsonrpc' => '2.0', 'id' => 'rector-warm-lsp/config-watch', 'error' => ['code' => -32601, 'message' => 'nope']]];
+        yield 'integer id' => [['jsonrpc' => '2.0', 'id' => 3, 'result' => ['ok' => true]]];
+    }
+
+    /**
+     * @param array<string, mixed> $response
+     */
+    #[\PHPUnit\Framework\Attributes\DataProvider('responseFrames')]
+    public function testAResponseFromTheClientIsNeverAnswered(array $response): void
+    {
+        $server = new LspServer('0.1.0-prototype');
+
+        self::assertSame([], $server->handle($response));
     }
 
     public function testUnknownNotificationIsIgnored(): void
@@ -144,6 +292,244 @@ final class LspServerTest extends TestCase
         }
     }
 
+    public function testDidOpenOnAUncPathBuildsAWindowsUncPathDeliberately(): void
+    {
+        // #99: `file://server/share/A.php` puts `server` in parse_url()'s
+        // HOST component -- uriToPath() used to read only PHP_URL_PATH, so
+        // the host was silently dropped and the path collapsed to
+        // `/share/A.php` (a plausible-looking but wrong, host-free path).
+        // Deliberate handling: fold the host back in as a `\\host\share`
+        // UNC prefix, backslash-separated, the form Windows itself expects.
+        $seen = null;
+        $capturing = new class ($seen) implements DiagnosticsSource {
+            public function __construct(private mixed &$seen)
+            {
+            }
+
+            public function diagnose(string $absolutePath): array
+            {
+                $this->seen = $absolutePath;
+
+                return ['fixes' => []];
+            }
+        };
+
+        $server = new LspServer('1.0.0', $capturing);
+        $server->handle([
+            'jsonrpc' => '2.0',
+            'method' => 'textDocument/didOpen',
+            'params' => ['textDocument' => ['uri' => 'file://server/share/A.php', 'version' => 1]],
+        ]);
+
+        self::assertSame('\\\\server\\share\\A.php', $seen);
+    }
+
+    public function testDidOpenOnATwoSlashDriveLetterUriIsNotTreatedAsUnc(): void
+    {
+        // Self-review finding (independent Explore review pass): #99's UNC
+        // fix folded ANY non-empty, non-localhost host into a `\\host\...`
+        // UNC prefix -- but `file://c:/foo/bar.php` (a non-conformant but
+        // real two-slash Windows drive-letter shape, RFC 8089 Appendix E)
+        // puts the single-letter drive itself in parse_url()'s HOST, not
+        // PATH. Folding that in as a UNC host produced the bogus
+        // `\\c\foo\bar.php` instead of the intended `c:/foo/bar.php`. A
+        // single-character host is a drive letter, never a real UNC server
+        // name.
+        $seen = null;
+        $capturing = new class ($seen) implements DiagnosticsSource {
+            public function __construct(private mixed &$seen)
+            {
+            }
+
+            public function diagnose(string $absolutePath): array
+            {
+                $this->seen = $absolutePath;
+
+                return ['fixes' => []];
+            }
+        };
+
+        $server = new LspServer('1.0.0', $capturing);
+        $server->handle([
+            'jsonrpc' => '2.0',
+            'method' => 'textDocument/didOpen',
+            'params' => ['textDocument' => ['uri' => 'file://c:/foo/bar.php', 'version' => 1]],
+        ]);
+
+        self::assertSame('c:/foo/bar.php', $seen);
+    }
+
+    public function testDidOpenOnALocalhostAuthorityIsNotTreatedAsUnc(): void
+    {
+        // Negative control for the case above: `file://localhost/...` is
+        // RFC 8089's spelling for an empty authority, not a UNC host -- it
+        // must resolve exactly like the bare `file:///...` form, never grow
+        // a `\\localhost\` prefix.
+        $seen = null;
+        $capturing = new class ($seen) implements DiagnosticsSource {
+            public function __construct(private mixed &$seen)
+            {
+            }
+
+            public function diagnose(string $absolutePath): array
+            {
+                $this->seen = $absolutePath;
+
+                return ['fixes' => []];
+            }
+        };
+
+        $server = new LspServer('1.0.0', $capturing);
+        $server->handle([
+            'jsonrpc' => '2.0',
+            'method' => 'textDocument/didOpen',
+            'params' => ['textDocument' => ['uri' => 'file://localhost/tmp/Sample.php', 'version' => 1]],
+        ]);
+
+        self::assertSame('/tmp/Sample.php', $seen);
+    }
+
+    public function testWatchedRectorConfigChangeReDiagnosesEveryOpenDocument(): void
+    {
+        // #101: a `rector.php` edit made without the editor re-saving any
+        // open PHP file (a different tool touched it, or the editor never
+        // watches it itself) must still reach every currently-open
+        // document once the client reports the watched-file change -- the
+        // trigger the issue says is missing. RectorRunner already reloads
+        // the config on the NEXT process() call on its own (#101's
+        // "already-shipped" half); this only has to prove the re-diagnose
+        // is actually requested for both open documents.
+        $source = new class implements DiagnosticsSource {
+            private int $calls = 0;
+
+            public function diagnose(string $absolutePath): array
+            {
+                $this->calls++;
+                $rector = $this->calls <= 2 ? 'RuleBeforeConfigChange' : 'RuleAfterConfigChange';
+
+                return ['fixes' => [[
+                    'range' => ['start' => ['line' => 0, 'character' => 0], 'end' => ['line' => 1, 'character' => 0]],
+                    'newText' => "x\n",
+                    'rectors' => [$rector],
+                ]]];
+            }
+        };
+
+        $server = new LspServer('1.0.0', $source);
+        $server->handle([
+            'jsonrpc' => '2.0',
+            'method' => 'textDocument/didOpen',
+            'params' => ['textDocument' => ['uri' => 'file:///tmp/A.php', 'version' => 1]],
+        ]);
+        $server->handle([
+            'jsonrpc' => '2.0',
+            'method' => 'textDocument/didOpen',
+            'params' => ['textDocument' => ['uri' => 'file:///tmp/B.php', 'version' => 1]],
+        ]);
+
+        $responses = $server->handle([
+            'jsonrpc' => '2.0',
+            'method' => 'workspace/didChangeWatchedFiles',
+            'params' => ['changes' => [['uri' => 'file:///tmp/rector.php', 'type' => 2]]],
+        ]);
+
+        self::assertCount(2, $responses);
+        $uris = array_map(static fn (array $r): string => $r['params']['uri'], $responses);
+        sort($uris);
+        self::assertSame(['file:///tmp/A.php', 'file:///tmp/B.php'], $uris);
+        foreach ($responses as $notification) {
+            self::assertSame('textDocument/publishDiagnostics', $notification['method']);
+            self::assertSame('RuleAfterConfigChange', $notification['params']['diagnostics'][0]['message']);
+        }
+    }
+
+    public function testWatchedComposerLockChangeAlsoReDiagnoses(): void
+    {
+        // Positive control's sibling: composer.lock is the OTHER file the
+        // issue names ("register for rector.php and composer.lock").
+        $fixes = [self::fix(0, 1, "x\n", 'AnyRector')];
+        $server = new LspServer('1.0.0', self::fakeSource($fixes));
+        $server->handle([
+            'jsonrpc' => '2.0',
+            'method' => 'textDocument/didOpen',
+            'params' => ['textDocument' => ['uri' => 'file:///tmp/A.php', 'version' => 1]],
+        ]);
+
+        $responses = $server->handle([
+            'jsonrpc' => '2.0',
+            'method' => 'workspace/didChangeWatchedFiles',
+            'params' => ['changes' => [['uri' => 'file:///tmp/composer.lock', 'type' => 2]]],
+        ]);
+
+        self::assertCount(1, $responses);
+        self::assertSame('file:///tmp/A.php', $responses[0]['params']['uri']);
+    }
+
+    public function testWatchedRectorConfigChangeIsCaseInsensitiveInTheBasename(): void
+    {
+        // oss:auditor self-review finding: the basename comparison used
+        // `===`, which is case-sensitive -- on a case-insensitive
+        // filesystem (the default on Windows and on macOS, the two
+        // platforms this whole issue is about) a client could report
+        // `Rector.php`/`Composer.Lock`'s real on-disk casing and the guard
+        // would silently miss it, returning [] identically to the
+        // genuinely-unrelated-file case (testWatchedFileChangeTo...
+        // below) -- an absence the caller cannot tell from "nothing to do".
+        $fixes = [self::fix(0, 1, "x\n", 'AnyRector')];
+        $server = new LspServer('1.0.0', self::fakeSource($fixes));
+        $server->handle([
+            'jsonrpc' => '2.0',
+            'method' => 'textDocument/didOpen',
+            'params' => ['textDocument' => ['uri' => 'file:///tmp/A.php', 'version' => 1]],
+        ]);
+
+        $responses = $server->handle([
+            'jsonrpc' => '2.0',
+            'method' => 'workspace/didChangeWatchedFiles',
+            'params' => ['changes' => [['uri' => 'file:///tmp/Rector.PHP', 'type' => 2]]],
+        ]);
+
+        self::assertCount(1, $responses);
+        self::assertSame('file:///tmp/A.php', $responses[0]['params']['uri']);
+    }
+
+    public function testWatchedFileChangeToAnUnrelatedFileTriggersNoRediagnosis(): void
+    {
+        // Negative control: an event for a file that is neither rector.php
+        // nor composer.lock must not blindly re-diagnose every open
+        // document -- otherwise this would fire on any workspace edit at
+        // all, not just a config change.
+        $fixes = [self::fix(0, 1, "x\n", 'AnyRector')];
+        $server = new LspServer('1.0.0', self::fakeSource($fixes));
+        $server->handle([
+            'jsonrpc' => '2.0',
+            'method' => 'textDocument/didOpen',
+            'params' => ['textDocument' => ['uri' => 'file:///tmp/A.php', 'version' => 1]],
+        ]);
+
+        $responses = $server->handle([
+            'jsonrpc' => '2.0',
+            'method' => 'workspace/didChangeWatchedFiles',
+            'params' => ['changes' => [['uri' => 'file:///tmp/Unrelated.php', 'type' => 2]]],
+        ]);
+
+        self::assertSame([], $responses);
+    }
+
+    public function testWatchedConfigChangeWithNoOpenDocumentsProducesNoNotifications(): void
+    {
+        // Second negative control: nothing is open to republish for.
+        $server = new LspServer('1.0.0', self::fakeSource([]));
+
+        $responses = $server->handle([
+            'jsonrpc' => '2.0',
+            'method' => 'workspace/didChangeWatchedFiles',
+            'params' => ['changes' => [['uri' => 'file:///tmp/rector.php', 'type' => 2]]],
+        ]);
+
+        self::assertSame([], $responses);
+    }
+
     public function testDidOpenPublishesOneDiagnosticPerFix(): void
     {
         $fixes = [self::fix(3, 12, "fixed\n", 'Rector\\CodeQuality\\Rector\\If_\\SimplifyIfReturnBoolRector')];
@@ -164,6 +550,84 @@ final class LspServerTest extends TestCase
         self::assertSame($fixes[0]['range'], $diagnostic['range']);
         self::assertSame('rector', $diagnostic['source']);
         self::assertSame('Rector\\CodeQuality\\Rector\\If_\\SimplifyIfReturnBoolRector', $diagnostic['message']);
+    }
+
+    public function testDidOpenPublishesAnErrorDiagnosticForAnErrorsEntryWithNoQuickfix(): void
+    {
+        // #90: an `errors` entry (e.g. a syntax error) has no fix behind it
+        // -- it must still reach the editor as an Error-severity diagnostic,
+        // and must NOT be offered as a quickfix (no `data.hunkIndex`, and it
+        // never enters fixesByUri, so codeAction cannot build a
+        // WorkspaceEdit for it that would do nothing when applied).
+        $source = new class implements DiagnosticsSource {
+            public function diagnose(string $absolutePath): array
+            {
+                return ['fixes' => [], 'errors' => [['message' => 'Syntax error, unexpected token', 'line' => 7]]];
+            }
+        };
+        $server = new LspServer('1.0.0', $source);
+
+        $responses = $server->handle([
+            'jsonrpc' => '2.0',
+            'method' => 'textDocument/didOpen',
+            'params' => ['textDocument' => ['uri' => 'file:///tmp/Broken.php', 'version' => 1]],
+        ]);
+
+        self::assertCount(1, $responses);
+        $diagnostics = $responses[0]['params']['diagnostics'];
+        self::assertCount(1, $diagnostics);
+        self::assertSame(1, $diagnostics[0]['severity']);
+        self::assertSame('Syntax error, unexpected token', $diagnostics[0]['message']);
+        self::assertSame(['line' => 6, 'character' => 0], $diagnostics[0]['range']['start']);
+        self::assertArrayNotHasKey('data', $diagnostics[0]);
+
+        $codeActionResponses = $server->handle([
+            'jsonrpc' => '2.0',
+            'id' => 2,
+            'method' => 'textDocument/codeAction',
+            'params' => [
+                'textDocument' => ['uri' => 'file:///tmp/Broken.php'],
+                'range' => ['start' => ['line' => 6, 'character' => 0], 'end' => ['line' => 6, 'character' => 0]],
+                'context' => ['diagnostics' => []],
+            ],
+        ]);
+
+        // No quickfix at all for the error line -- fixesByUri is empty, so
+        // only the (in this case pointless, but harmless) whole-file action
+        // would be offered if there were any fixes; there are none.
+        self::assertSame([], $codeActionResponses[0]['result']);
+    }
+
+    public function testAFixWithNoAttributedRectorsGetsAGenericLabelNotABlankOne(): void
+    {
+        // #91 self-review finding: RectorDiffParser's closest-hunk
+        // attribution can legitimately leave a hunk's `rectors` list empty.
+        // The diagnostic message and the quickfix title must never go blank
+        // as a result.
+        $fixes = [self::fix(3, 12, "fixed\n", '')];
+        $fixes[0]['rectors'] = [];
+        $server = new LspServer('1.0.0', self::fakeSource($fixes));
+
+        $responses = $server->handle([
+            'jsonrpc' => '2.0',
+            'method' => 'textDocument/didOpen',
+            'params' => ['textDocument' => ['uri' => 'file:///tmp/Sample.php', 'version' => 1]],
+        ]);
+
+        self::assertSame('Rector fix', $responses[0]['params']['diagnostics'][0]['message']);
+
+        $codeActionResponses = $server->handle([
+            'jsonrpc' => '2.0',
+            'id' => 3,
+            'method' => 'textDocument/codeAction',
+            'params' => [
+                'textDocument' => ['uri' => 'file:///tmp/Sample.php'],
+                'range' => ['start' => ['line' => 3, 'character' => 0], 'end' => ['line' => 12, 'character' => 0]],
+                'context' => ['diagnostics' => []],
+            ],
+        ]);
+
+        self::assertSame('Apply Rector: Rector fix', $codeActionResponses[0]['result'][0]['title']);
     }
 
     public function testDidSaveOnAnUnchangedFilePublishesEmptyDiagnostics(): void
@@ -286,6 +750,68 @@ final class LspServerTest extends TestCase
             'params' => [
                 'textDocument' => ['uri' => 'file:///tmp/Sample.php'],
                 'range' => ['start' => ['line' => 50, 'character' => 0], 'end' => ['line' => 51, 'character' => 0]],
+                'context' => ['diagnostics' => []],
+            ],
+        ]);
+
+        $actions = $responses[0]['result'];
+        self::assertCount(1, $actions);
+        self::assertSame('Apply all Rector fixes', $actions[0]['title']);
+    }
+
+    public function testCodeActionAtAnInsertOnlyHunksOwnZeroWidthRangeOffersItsQuickfix(): void
+    {
+        // #93 regression: #92 narrowed diagnostic ranges to the changed
+        // lines, so a pure-insertion hunk (e.g. NewlineAfterStatementRector
+        // adding a blank line) now gets a zero-width diagnostic range like
+        // `66:0-66:0`. The half-open overlap test treated an empty $b as
+        // never overlapping anything, so a codeAction request using the
+        // diagnostic's own range (exactly what a real editor sends for a
+        // cursor on that line) returned no per-hunk quickfix at all.
+        $fixes = [self::fix(66, 66, "\n", 'NewlineAfterStatementRector')];
+        $server = new LspServer('1.0.0', self::fakeSource($fixes));
+        $server->handle([
+            'jsonrpc' => '2.0',
+            'method' => 'textDocument/didOpen',
+            'params' => ['textDocument' => ['uri' => 'file:///tmp/Sample.php', 'version' => 1]],
+        ]);
+
+        $responses = $server->handle([
+            'jsonrpc' => '2.0',
+            'id' => 10,
+            'method' => 'textDocument/codeAction',
+            'params' => [
+                'textDocument' => ['uri' => 'file:///tmp/Sample.php'],
+                'range' => ['start' => ['line' => 66, 'character' => 0], 'end' => ['line' => 66, 'character' => 0]],
+                'context' => ['diagnostics' => []],
+            ],
+        ]);
+
+        $actions = $responses[0]['result'];
+        self::assertCount(2, $actions);
+        self::assertSame('Apply Rector: NewlineAfterStatementRector', $actions[0]['title']);
+    }
+
+    public function testCodeActionOnAnUnrelatedLineNearAnInsertOnlyHunkIsNotOffered(): void
+    {
+        // Negative-control pairing for the test above: a zero-width request
+        // range on a DIFFERENT line than an insert-only hunk's own
+        // zero-width diagnostic range must not surface that quickfix.
+        $fixes = [self::fix(66, 66, "\n", 'NewlineAfterStatementRector')];
+        $server = new LspServer('1.0.0', self::fakeSource($fixes));
+        $server->handle([
+            'jsonrpc' => '2.0',
+            'method' => 'textDocument/didOpen',
+            'params' => ['textDocument' => ['uri' => 'file:///tmp/Sample.php', 'version' => 1]],
+        ]);
+
+        $responses = $server->handle([
+            'jsonrpc' => '2.0',
+            'id' => 11,
+            'method' => 'textDocument/codeAction',
+            'params' => [
+                'textDocument' => ['uri' => 'file:///tmp/Sample.php'],
+                'range' => ['start' => ['line' => 70, 'character' => 0], 'end' => ['line' => 70, 'character' => 0]],
                 'context' => ['diagnostics' => []],
             ],
         ]);

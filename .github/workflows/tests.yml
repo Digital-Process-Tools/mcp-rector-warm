@@ -10,14 +10,38 @@ permissions:
   contents: read
 
 jobs:
+  # OS matrix rationale (#96/#97/#98): the ubuntu-latest legs keep the full
+  # PHP matrix (compatibility is what THAT axis tests); windows-latest and
+  # macos-latest each add exactly one PHP version via `include` -- their
+  # job is to exercise the OS, not re-run PHP-version compatibility a third
+  # and fourth time.
   tests:
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.os }}
     strategy:
       matrix:
+        os: [ubuntu-latest]
         php: ['8.2', '8.3', '8.4']
+        include:
+          # Windows: no pcntl, so RectorRunner::canFork() is false and the
+          # reboot-before-each-call fallback (#8) is the real path here --
+          # that is the point of this leg, not a gap in it (#97).
+          - os: windows-latest
+            php: '8.3'
+          # macOS: the maintainer's and the main consumer's actual platform,
+          # and where #79's BSD `ps` column parsing is observed rather than
+          # reasoned (#98).
+          - os: macos-latest
+            php: '8.3'
       fail-fast: false
 
     steps:
+      # #97: deliberate, not inherited -- a Windows runner's default
+      # core.autocrlf would rewrite every checked-out LF file to CRLF before
+      # a single test runs, making any line-ending result an accident of the
+      # runner rather than something this suite chose.
+      - name: Configure git line endings
+        run: git config --global core.autocrlf input
+
       - uses: actions/checkout@v7
 
       - name: Setup PHP ${{ matrix.php }}
@@ -26,18 +50,49 @@ jobs:
           php-version: ${{ matrix.php }}
           coverage: none
           tools: composer:v2
+          # #97 CI fix: mcp/sdk requires ext-fileinfo. ubuntu-latest/
+          # macos-latest ship it enabled by default; windows-latest does
+          # not, so `composer install` failed there before any test ran.
+          # intl/mbstring: the Rector cold path calls Normalizer (ext-intl);
+          # windows-latest ships intl disabled, which failed the
+          # cold-stdout-console-write-no-pcntl E2E scenario there.
+          extensions: fileinfo, intl, mbstring
+
+      # #97 self-review finding: ~/.composer/cache is not composer's real
+      # cache directory on Windows (typically under %LOCALAPPDATA%), so a
+      # hardcoded path there would silently cache nothing on that leg --
+      # not a failure, just a permanently-cold composer install every run.
+      # `composer config cache-files-dir` asks composer itself, cross-OS.
+      - name: Get composer cache directory
+        id: composer-cache
+        shell: bash
+        run: echo "dir=$(composer config cache-files-dir)" >> "$GITHUB_OUTPUT"
 
       - name: Cache composer
         uses: actions/cache@v6
         with:
-          path: ~/.composer/cache
-          key: composer-${{ matrix.php }}-${{ hashFiles('composer.json') }}
+          path: ${{ steps.composer-cache.outputs.dir }}
+          key: composer-${{ matrix.os }}-${{ matrix.php }}-${{ hashFiles('composer.json') }}
 
       - name: Install dependencies
         run: composer install --no-progress --prefer-dist
 
+      # #97 self-review finding: windows-latest's default shell is pwsh, and
+      # a path-qualified, extension-less script (./vendor/bin/phpunit, no
+      # .bat/.ps1 suffix) is a known PHP-on-Windows-CI trap under pwsh's own
+      # command resolution. `shell: bash` routes through Git Bash instead,
+      # same choice the e2e job below already makes for its own script.
+      # #97 follow-up: the windows-latest leg failed with "OK, but there were
+      # issues!" (1 warning trips phpunit.xml's failOnWarning="true") but the
+      # captured GH Actions log did not include PHPUnit's own "There was 1
+      # warning: ..." detail block -- only the summary counted it. --no-progress
+      # and --colors=never stop the \r-driven progress bar and ANSI codes from
+      # being mangled by the log capture, and --display-warnings makes PHPUnit
+      # print the warning detail unconditionally (it can be display-suppressed
+      # otherwise). No behavior change to which tests run or pass/fail.
       - name: Run tests
-        run: ./vendor/bin/phpunit --no-coverage
+        shell: bash
+        run: ./vendor/bin/phpunit --no-coverage --colors=never --no-progress --display-warnings
 
   # No-pcntl fallback: the ubuntu-latest matrix above always has pcntl, so
   # RectorRunner::canFork() is always true there and the reboot-before-each-call
@@ -47,6 +102,13 @@ jobs:
   # runs the fallback path for real, over a real subprocess. One PHP version:
   # it exercises the fallback branch, not PHP compatibility, which the matrix
   # above already covers.
+  #
+  # Deliberately kept ubuntu-only rather than also gaining OS legs (#97/#98
+  # asked about the unit/e2e jobs, not this one): windows-latest genuinely
+  # has no pcntl at all, so it already exercises this same fallback path for
+  # real, as a side effect of being Windows -- the `tests` job's own
+  # windows-latest leg covers that, and duplicating this job's ini-disabling
+  # trick there would test the identical thing a second way.
   no-pcntl:
     runs-on: ubuntu-latest
 
@@ -90,9 +152,18 @@ jobs:
   # it tests the protocol and the warm container, not PHP compatibility, which the
   # matrix above already covers. Known defects are strict xfails naming their issue.
   e2e:
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+      fail-fast: false
 
     steps:
+      # Same rationale as the tests job above (#97): deliberate, not
+      # inherited from the runner's own default.
+      - name: Configure git line endings
+        run: git config --global core.autocrlf input
+
       - uses: actions/checkout@v7
 
       - name: Setup PHP
@@ -101,6 +172,10 @@ jobs:
           php-version: '8.3'
           coverage: none
           tools: composer:v2
+          # Same fix as the tests job above (#97): fileinfo is not enabled
+          # by default on windows-latest, unlike ubuntu-latest/macos-latest.
+          # intl/mbstring: same reason as the tests job above (Normalizer).
+          extensions: fileinfo, intl, mbstring
 
       - name: Setup Python
         uses: actions/setup-python@v7
@@ -109,18 +184,31 @@ jobs:
           cache: pip
           cache-dependency-path: tests/E2E/requirements.txt
 
+      # Second-pass self-review finding: the same Windows-cache-path fix
+      # applied to the `tests` job above was missed here on the first pass,
+      # even though this job carries the identical exposure.
+      - name: Get composer cache directory
+        id: composer-cache
+        shell: bash
+        run: echo "dir=$(composer config cache-files-dir)" >> "$GITHUB_OUTPUT"
+
       - name: Cache composer
         uses: actions/cache@v6
         with:
-          path: ~/.composer/cache
-          key: composer-e2e-${{ hashFiles('composer.json') }}
+          path: ${{ steps.composer-cache.outputs.dir }}
+          key: composer-e2e-${{ matrix.os }}-${{ hashFiles('composer.json') }}
 
       - name: Install dependencies
+        shell: bash
         run: |
           composer install --no-progress --prefer-dist
           python -m pip install -r tests/E2E/requirements.txt
 
       - name: Run end-to-end suite
+        # tests/E2E/run.sh is a bash script; windows-latest runners carry
+        # Git Bash, and `shell: bash` (#97) routes there instead of the
+        # runner's pwsh default, uniformly across all three OSes.
+        shell: bash
         env:
           E2E_PYTHON: python
         run: tests/E2E/run.sh

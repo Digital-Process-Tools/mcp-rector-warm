@@ -58,7 +58,7 @@ final class RectorTool
         // disclosure on arbitrary files (e.g. ~/projects/*.php, /etc/php/*.php).
         $cwd = realpath(getcwd() ?: '.');
         $real = realpath($path);
-        if ($cwd === false || $real === false || ($real !== $cwd && !str_starts_with($real, $cwd . DIRECTORY_SEPARATOR))) {
+        if ($cwd === false || $real === false || !self::isWithinRoot($real, $cwd)) {
             return self::errorResult([
                 'exit_code'   => -1,
                 'output'      => '',
@@ -147,6 +147,44 @@ final class RectorTool
             isError: true,
             structuredContent: $details,
         );
+    }
+
+    /**
+     * #99: on Windows the filesystem is case-insensitive, so realpath()
+     * comparing a $cwd-derived drive letter against a $real-derived one can
+     * legitimately differ only in case for the SAME file (verified: no
+     * Windows here -- see the developer report's platform-band note; the
+     * string comparison this drives is exercised directly by
+     * RectorToolContainmentTest via reflection, independent of the host
+     * OS). A bare str_starts_with() there would misjudge an in-root file as
+     * out-of-root. $caseInsensitive defaults from the running OS's own
+     * DIRECTORY_SEPARATOR so production behaviour needs no wiring; a test
+     * can still force either branch to pin the string logic on any
+     * platform.
+     */
+    private static function isWithinRoot(string $real, string $cwd, ?bool $caseInsensitive = null): bool
+    {
+        $caseInsensitive ??= DIRECTORY_SEPARATOR === '\\';
+        // #99/#97: both branches hardcode their own separator rather than
+        // deferring to the host's DIRECTORY_SEPARATOR, and for the same
+        // reason on each side -- a test (or a merge-ref CI checkout) can
+        // force either branch on the "wrong" host OS to pin the string
+        // logic independent of platform. The case-insensitive branch is by
+        // definition the Windows one, so it uses '\\' explicitly (#99);
+        // symmetrically the case-sensitive branch is by definition the
+        // POSIX one, so it uses '/' explicitly (#97's windows-latest CI leg
+        // is what actually exposed this) -- otherwise a test forcing this
+        // branch on a real windows-latest CI runner (where
+        // DIRECTORY_SEPARATOR is '\\') would build a mismatched
+        // "/proj\..." prefix against forward-slash test paths.
+        $separator = $caseInsensitive ? '\\' : '/';
+        $prefix = $cwd . $separator;
+
+        if ($caseInsensitive) {
+            return strcasecmp($real, $cwd) === 0 || stripos($real, $prefix) === 0;
+        }
+
+        return $real === $cwd || str_starts_with($real, $prefix);
     }
 
     /**

@@ -72,6 +72,47 @@ final class RectorDiagnosticsSourceTest extends TestCase
             ->diagnose($this->workDir . '/Sample.php');
 
         self::assertSame([], $result['fixes']);
+        // Negative control for #90's must-fire test below: a clean report
+        // must not surface a spurious error either.
+        self::assertSame([], $result['errors']);
+    }
+
+    public function testASyntaxErrorProducesAnErrorDiagnosticInsteadOfSilentlyClearing(): void
+    {
+        // #90 must-fire: paired with testExtractsAReportWithTrailingNoiseAfterIt
+        // below (the existing positive control for a fixable file). A report
+        // whose `errors` is non-empty and whose `file_diffs` is empty used to
+        // come back looking identical to "nothing to report" -- a file that
+        // goes from fixable to a syntax error dropped to zero diagnostics,
+        // reading as clean in the editor.
+        $output = '{"totals":{"changed_files":0,"errors":1},'
+            . '"errors":[{"message":"Syntax error, unexpected token","line":7}],'
+            . '"file_diffs":[]}';
+
+        $result = $this->fakeSource($output)->diagnose($this->workDir . '/Sample.php');
+
+        self::assertSame([], $result['fixes']);
+        self::assertSame([['message' => 'Syntax error, unexpected token', 'line' => 7]], $result['errors']);
+    }
+
+    public function testAPathOutsideTheWorkingDirectoryBecomesAnErrorRatherThanSilence(): void
+    {
+        // #90: the SecurityError/CallToolResult refusal path used to log to
+        // stderr (where an editor never looks) and come back with an empty
+        // `fixes` list and nothing else -- indistinguishable from "clean".
+        $outside = sys_get_temp_dir() . '/mcp-rector-lsp-outside-' . bin2hex(random_bytes(4)) . '.php';
+        file_put_contents($outside, "<?php\n");
+
+        try {
+            $result = $this->fakeSource('{"totals":{"changed_files":0,"errors":0}}')->diagnose($outside);
+
+            self::assertSame([], $result['fixes']);
+            self::assertCount(1, $result['errors']);
+            self::assertSame(0, $result['errors'][0]['line']);
+            self::assertStringContainsString('outside the configured working directory', $result['errors'][0]['message']);
+        } finally {
+            @unlink($outside);
+        }
     }
 
     public function testExtractsAReportWithLeadingNoiseBeforeIt(): void
@@ -117,12 +158,18 @@ final class RectorDiagnosticsSourceTest extends TestCase
         self::assertCount(1, $result['fixes']);
     }
 
-    public function testNoParsableJsonAtAllProducesNoFixesRatherThanAnError(): void
+    public function testNoParsableJsonAtAllBecomesAnErrorRatherThanSilentlyClean(): void
     {
-        // Negative control: genuinely unparsable output must degrade to "no
-        // diagnostics", not throw and take the whole LSP loop down with it.
+        // Self-review finding on #90 (independent auditor pass): genuinely
+        // unparsable output -- truncated, corrupted, no `{"totals":...}`
+        // anywhere -- used to degrade all the way to "no diagnostics",
+        // identical to a genuinely clean file. It must never throw (the
+        // negative control this test used to be named for still holds --
+        // no exception takes the LSP loop down), but it must surface as an
+        // error rather than silence.
         $result = $this->fakeSource('not json at all')->diagnose($this->workDir . '/Sample.php');
 
         self::assertSame([], $result['fixes']);
+        self::assertNotSame([], $result['errors']);
     }
 }

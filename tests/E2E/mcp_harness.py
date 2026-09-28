@@ -18,6 +18,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, AsyncIterator
 
+import pytest
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 from mcp.types import Implementation
@@ -34,6 +35,17 @@ FIXTURE_PROJECT = REPO / "tests" / "Fixtures" / "project"
 RECTOR_FLAGS = ["process", "--output-format=json", "--debug", "--no-progress-bar"]
 
 CALL_TIMEOUT = float(os.environ.get("E2E_CALL_TIMEOUT", "180"))
+
+# #97/#31: PHP ships with no pcntl extension on Windows at all -- RectorRunner's own
+# canFork() (function_exists('pcntl_fork') etc.) is therefore always False there, so
+# run() always takes the runCold() branch and reports warm_boot=False for EVERY call
+# in a session, never True, no matter how many calls share the session or whether the
+# config changed (see RectorRunner's own class docblock). A warm_boot assertion that
+# does not account for this fails on windows-latest not because the mechanism is
+# broken, but because it is doing exactly what it is documented to do. Folding this
+# in here (rather than skipping the assertion outright) keeps it a real check on
+# Windows too: it still pins that every call actually goes cold there.
+NO_PCNTL_PLATFORM = sys.platform.startswith("win")
 
 
 def php_binary() -> str:
@@ -129,12 +141,12 @@ def non_jsonrpc_lines(lines: list[str]) -> list[str]:
 
 def exit_record(record_dir: Path) -> dict[str, Any] | None:
     path = record_dir / "exit.json"
-    return json.loads(path.read_text()) if path.exists() else None
+    return json.loads(path.read_bytes().decode("utf-8")) if path.exists() else None
 
 
 def stderr_tail(record_dir: Path, limit: int = 2000) -> str:
     path = record_dir / "server.stderr"
-    text = path.read_text(errors="replace") if path.exists() else ""
+    text = path.read_bytes().decode("utf-8", errors="replace") if path.exists() else ""
     return text[-limit:]
 
 
@@ -147,7 +159,7 @@ def daemon_pid(record_dir: Path) -> int:
     moment it starts. This is the pid every RectorRunner::boot()/forkAndExecute()
     fork happens underneath -- the root #48's "list the daemon's children"
     check needs."""
-    data = json.loads((record_dir / "started.json").read_text())
+    data = json.loads((record_dir / "started.json").read_bytes().decode("utf-8"))
     return int(data["pid"])
 
 
@@ -158,8 +170,11 @@ def process_descendants(root_pid: int) -> list[tuple[int, int, str]]:
     call... a <defunct> entry confirms it"). One `ps -eo pid,ppid,stat` snapshot
     (not `ps --ppid`, which some `ps` builds refuse for a pid with no children at
     all rather than returning empty) walked as a tree from root_pid, POSIX `ps`
-    output, portable across the ubuntu-latest runners this repo's CI actually
-    uses; CI itself never runs this on anything but ubuntu-latest (#79).
+    output, portable across the ubuntu-latest runners this repo's CI used to
+    run exclusively on (#79). #97/#98 self-review correction: CI now also has
+    a macos-latest leg (see below) and a windows-latest leg (see the skip
+    guard below) -- this sentence used to say CI never ran anything but
+    ubuntu-latest, which the workflow this diff ships makes false.
 
     #79 follow-up, observed rather than reasoned: `ps -eo pid,ppid,stat` was run
     directly against a real macOS (Darwin/BSD `ps`) process tree, including one
@@ -172,11 +187,22 @@ def process_descendants(root_pid: int) -> list[tuple[int, int, str]]:
     padding inside parts[2] rather than splitting on it), and `"Z" in d[2]`
     membership checks below are unaffected by trailing whitespace, so zombie
     detection was confirmed working on this platform. This does not extend to
-    every BSD/macOS `ps` build or flag ordering, and CI still only runs Linux, so
-    the gap this issue names — no CI leg ever exercises this — remains real; only
-    the "does the parsing itself break" half of the reasoning has now been
-    checked on one real BSD-family `ps`, not merely assumed.
+    every BSD/macOS `ps` build or flag ordering, and only one real BSD-family
+    `ps` has been checked by hand, not merely assumed. #98 adds a real
+    macos-latest CI leg that now exercises this for real on every run; its
+    own first execution there (reasoned, not yet observed, as of this diff)
+    is what settles whether a GitHub-hosted macOS runner's `ps` build matches
+    what was checked by hand above.
+
+    #97: Windows has no `ps` at all (and no pcntl/fork either -- the daemon
+    never has a forked descendant to look for there in the first place, see
+    RectorRunner's own class docblock), so this is a named skip rather than
+    letting a bare `FileNotFoundError` from spawning "ps" stand in for a
+    result -- a crash there would abort the whole test, not read as "no
+    descendants found", so it cannot silently pass either.
     """
+    if sys.platform.startswith("win"):
+        pytest.skip("ps -eo pid,ppid,stat has no Windows equivalent this harness parses (#79, #97)")
     proc = subprocess.run(["ps", "-eo", "pid,ppid,stat"], capture_output=True, text=True, timeout=10)
     # A failed `ps` invocation (nonzero exit, e.g. a sandboxed/restricted
     # environment) must never be read as "the daemon has no descendants" --
@@ -323,7 +349,7 @@ def run_cold(tree: Path, rel_path: str, dry_run: bool) -> dict[str, Any]:
 
 def tree_contents(root: Path) -> dict[str, str]:
     return {
-        p.relative_to(root).as_posix(): p.read_text(errors="replace")
+        p.relative_to(root).as_posix(): p.read_bytes().decode("utf-8", errors="replace")
         for p in sorted(root.rglob("*"))
         if p.is_file()
     }

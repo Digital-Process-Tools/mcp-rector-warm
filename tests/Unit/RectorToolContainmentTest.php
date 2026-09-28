@@ -71,4 +71,36 @@ final class RectorToolContainmentTest extends TestCase
         self::assertSame(-1, $details['exit_code']);
         self::assertSame('SecurityError', $details['error_class'] ?? null);
     }
+
+    /**
+     * #99: on a real Windows filesystem, realpath() can hand back a drive
+     * letter in a different case than getcwd() did (or vice versa) for the
+     * same file -- the filesystem itself is case-insensitive there, so
+     * neither case is "wrong". The plain str_starts_with() containment
+     * check used before this fix is case-SENSITIVE and would misjudge an
+     * in-root file as out-of-root purely on a drive-letter case mismatch.
+     * No Windows machine is available here, so this drives the extracted
+     * comparison directly (via reflection) with $caseInsensitive forced
+     * true/false, rather than relying on the host OS's own
+     * DIRECTORY_SEPARATOR to select the branch -- the string logic itself
+     * is what this pins, independent of platform.
+     */
+    public function testIsWithinRootIgnoresDriveLetterCaseWhenCaseInsensitive(): void
+    {
+        $method = new \ReflectionMethod(RectorTool::class, 'isWithinRoot');
+
+        self::assertTrue($method->invoke(null, 'C:\proj\src\A.php', 'c:\proj', true));
+        self::assertTrue($method->invoke(null, 'c:\proj\src\A.php', 'C:\proj', true));
+    }
+
+    public function testIsWithinRootStaysCaseSensitiveOnPosix(): void
+    {
+        // Positive control's pair: on a case-sensitive filesystem, a case
+        // mismatch is a genuinely different path and must NOT be folded
+        // into "in root".
+        $method = new \ReflectionMethod(RectorTool::class, 'isWithinRoot');
+
+        self::assertFalse($method->invoke(null, '/Proj/src/A.php', '/proj', false));
+        self::assertTrue($method->invoke(null, '/proj/src/A.php', '/proj', false));
+    }
 }
