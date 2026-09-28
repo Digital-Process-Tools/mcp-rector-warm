@@ -77,7 +77,7 @@ VS Code 1.102+ runs MCP servers natively. Add `.vscode/mcp.json` to the project:
 
 With `composer global require`, use `"command": "mcp-rector-warm"` instead. If Composer's `vendor-dir` is not `vendor/`, adjust the path.
 
-This gives Rector to chat and agent mode. It does **not** run Rector on save or underline code in the editor. That needs a language server, tracked in [#51](https://github.com/Digital-Process-Tools/mcp-rector-warm/issues/51).
+This gives Rector to chat and agent mode. It does **not** run Rector on save or underline code in the editor. That needs a language server -- see [Language server](#language-server) below.
 
 ### Cline / Continue / Cursor / Zed / any MCP client
 
@@ -232,6 +232,11 @@ call), just not pushed to documents the editor does not re-save (#105).
 
 Out of v1 scope: unsaved buffers (Rector reads from disk), workspace-wide
 scans, and `workspace/configuration`.
+
+For the architecture, the design decisions behind it, correctness (the warm
+== cold oracle) and current benchmark numbers -- written for someone
+evaluating this in five minutes, see
+[docs/lsp-for-rector-maintainers.md](docs/lsp-for-rector-maintainers.md).
 
 ### Editor setup
 
