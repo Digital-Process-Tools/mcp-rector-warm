@@ -251,6 +251,7 @@ PhpStorm/LSP4IJ were not.
 Tested on Neovim 0.11.3, 0.11.4 and 0.12.5, including starting Neovim outside
 the project directory.
 
+<!-- snippet:nvim-native-config -->
 ```lua
 -- ~/.config/nvim/lsp/rector.lua   (Neovim 0.11.3+)
 -- `cmd` is a function, not a static list: `--working-dir` has to be the
@@ -265,11 +266,14 @@ return {
   root_markers = { 'composer.json', 'rector.php' },
 }
 ```
+<!-- /snippet:nvim-native-config -->
 
+<!-- snippet:nvim-native-enable -->
 ```lua
 -- init.lua
 vim.lsp.enable('rector')
 ```
+<!-- /snippet:nvim-native-enable -->
 
 This needs 0.11.3 or later: Neovim 0.11.0 to 0.11.2 do not pass `config` to a
 function `cmd`, so the snippet fails there with
@@ -315,6 +319,7 @@ a gap for a follow-up rather than guessed at.
 
 Tested on Helix 25.07.1.
 
+<!-- snippet:helix-languages -->
 ```toml
 # ~/.config/helix/languages.toml
 [language-server.rector-warm-lsp]
@@ -326,6 +331,7 @@ name = "php"
 roots = ["composer.json", "rector.php"]
 language-servers = ["rector-warm-lsp"]
 ```
+<!-- /snippet:helix-languages -->
 
 Helix spawns language servers with the workspace root as the working
 directory, so `--working-dir=.` resolves to it. `roots` is needed: Helix's
