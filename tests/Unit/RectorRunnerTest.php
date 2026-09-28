@@ -11,49 +11,80 @@ use PHPUnit\Framework\TestCase;
 final class RectorRunnerTest extends TestCase
 {
     /**
-     * Calls $attempt up to $attempts times total, sleeping $delayMicroseconds
-     * between attempts (never after the last one), stopping as soon as one
-     * call returns true. $attempt receives whether this is its final call so
-     * it can behave differently there (e.g. stop suppressing a real error) --
-     * this is generic on purpose so it can be pinned by a unit test
-     * (testRetryUntilTrue* below) independently of rmdir()/the filesystem.
+     * Calls $attempt up to $attempts times total, sleeping between attempts
+     * (never after the last one), stopping as soon as one call returns true.
+     * The sleep starts at $delayMicroseconds and grows by $backoffMultiplier
+     * after each attempt, capped at $maxDelayMicroseconds (a multiplier of
+     * 1.0, the default, keeps the delay fixed -- unchanged behaviour for any
+     * caller that does not ask for growth). $attempt receives whether this
+     * is its final call so it can behave differently there (e.g. stop
+     * suppressing a real error) -- this is generic on purpose so it can be
+     * pinned by a unit test (testRetryUntilTrue* below) independently of
+     * rmdir()/the filesystem. $sleep defaults to usleep() but can be
+     * substituted by a test to observe the delay sequence without actually
+     * waiting it out.
      */
-    private static function retryUntilTrue(callable $attempt, int $attempts, int $delayMicroseconds): void
-    {
+    private static function retryUntilTrue(
+        callable $attempt,
+        int $attempts,
+        int $delayMicroseconds,
+        float $backoffMultiplier = 1.0,
+        int $maxDelayMicroseconds = PHP_INT_MAX,
+        ?callable $sleep = null,
+    ): void {
+        $sleep ??= 'usleep';
+        $delay = $delayMicroseconds;
         for ($i = 1; $i <= $attempts; $i++) {
             if ($attempt($i === $attempts)) {
                 return;
             }
             if ($i < $attempts) {
-                usleep($delayMicroseconds);
+                $sleep($delay);
+                $delay = min((int) round($delay * $backoffMultiplier), $maxDelayMicroseconds);
             }
         }
     }
 
     /**
-     * rmdir() with a short retry-with-backoff, for cleaning up a temp
+     * rmdir() with a retry-with-exponential-backoff, for cleaning up a temp
      * directory that was the cwd of a subprocess this test just killed.
      * TerminateProcess() on Windows can leave the OS holding the killed
-     * process's handle on its own working directory for a short window
-     * after proc_terminate()/proc_close() return (see
-     * RectorRunner::runCold(), which does not itself wait for handle
-     * release), so rmdir() can transiently fail there with "Resource
-     * temporarily unavailable". POSIX releases the handle synchronously
-     * with the kill, so on POSIX this always succeeds on the first
-     * attempt -- the retry is unconditional rather than
-     * PHP_OS_FAMILY-gated because it costs nothing there. 10 attempts, 9
-     * 100ms gaps between them (mirroring runCold()'s own poll interval) --
-     * ~900ms of total backoff. If the directory is still locked after the
-     * 10th attempt, that attempt's own real (unsuppressed) error is left to
-     * surface -- retrying forever would hide a genuine leak behind what
-     * looks like a transient race.
+     * process's handle on its own working directory for a window after
+     * proc_terminate()/proc_close() return (see RectorRunner::runCold(),
+     * which does not itself wait for handle release), so rmdir() can
+     * transiently fail there with "Resource temporarily unavailable". POSIX
+     * releases the handle synchronously with the kill, so on POSIX this
+     * always succeeds on the first attempt -- the retry is unconditional
+     * rather than PHP_OS_FAMILY-gated because it costs nothing there.
+     *
+     * Budget: 12 attempts, starting at 150ms and multiplying by 1.5 each
+     * time up to a 1s cap -- roughly 8s of total backoff (150 + 225 + 337 +
+     * 506 + 759 + 1000*6 ms), reached only if every attempt but the last
+     * fails. This is deliberately wider than a single leaked handle should
+     * ever need: issue #114 tracks a leaked grandchild php process on
+     * Windows that can hold this same handle open for a few seconds while
+     * the OS reaps it, well past the ~900ms this retry originally budgeted
+     * (10 attempts, fixed 100ms gaps) -- that budget was exceeded again on
+     * CI (see trap.d/96.windows-rmdir-race-fixed.md). #114 is the real fix
+     * (killing the leaked process itself); this widened budget is a
+     * pragmatic test-side mitigation against it, not a fix for it. If the
+     * directory is still locked after the last attempt, that attempt's own
+     * real (unsuppressed) error is left to surface -- retrying forever
+     * would hide a genuine leak behind what looks like a transient race.
      */
-    private static function rmdirWithRetry(string $dir, int $attempts = 10, int $delayMicroseconds = 100_000): void
-    {
+    private static function rmdirWithRetry(
+        string $dir,
+        int $attempts = 12,
+        int $initialDelayMicroseconds = 150_000,
+        float $backoffMultiplier = 1.5,
+        int $maxDelayMicroseconds = 1_000_000,
+    ): void {
         self::retryUntilTrue(
             static fn (bool $isFinalAttempt): bool => $isFinalAttempt ? rmdir($dir) : @rmdir($dir),
             $attempts,
-            $delayMicroseconds,
+            $initialDelayMicroseconds,
+            $backoffMultiplier,
+            $maxDelayMicroseconds,
         );
     }
 
@@ -86,7 +117,12 @@ final class RectorRunnerTest extends TestCase
      * Pins the terminal-failure shape: exactly $attempts calls total (not
      * $attempts + 1), and only the last of them is marked final -- the
      * signal rmdirWithRetry() uses to switch from a suppressed @rmdir() to a
-     * real one that is allowed to surface its own error.
+     * real one that is allowed to surface its own error. Uses delay=0 and
+     * its own attempt count (4), independently of whatever attempts/delay
+     * rmdirWithRetry() itself defaults to -- this pins retryUntilTrue()'s
+     * generic call-count/final-flag mechanics, not rmdirWithRetry()'s
+     * concrete budget (see testRmdirWithRetryDefaultBudgetTotalsAroundEightSeconds
+     * below for that).
      */
     public function testRetryUntilTrueMakesExactlyAttemptsCallsAndMarksOnlyTheLastFinal(): void
     {
@@ -101,6 +137,60 @@ final class RectorRunnerTest extends TestCase
             0,
         );
         self::assertSame([false, false, false, true], $isFinalPerCall);
+    }
+
+    /**
+     * Pins retryUntilTrue()'s exponential-backoff mechanics directly, via an
+     * injected $sleep spy instead of a real usleep() -- runs instantly and
+     * asserts the actual microsecond delay sequence: growing by
+     * $backoffMultiplier after each attempt, capped at
+     * $maxDelayMicroseconds. This is the half of the mechanics the two
+     * delay=0 tests above cannot see (they pin call count/final-flag shape
+     * only, decoupled from any real delay).
+     */
+    public function testRetryUntilTrueBackoffGrowsThenCaps(): void
+    {
+        $delays = [];
+        self::retryUntilTrue(
+            static fn (bool $isFinalAttempt): bool => false,
+            5,
+            10,
+            2.0,
+            35,
+            static function (int $delayMicroseconds) use (&$delays): void {
+                $delays[] = $delayMicroseconds;
+            },
+        );
+        self::assertSame([10, 20, 35, 35], $delays, 'must double each gap until the cap, then hold at the cap');
+    }
+
+    /**
+     * Pins rmdirWithRetry()'s own concrete default budget: 12 attempts,
+     * starting at 150ms and multiplying by 1.5 up to a 1s cap. Computed
+     * directly from the same defaults documented on rmdirWithRetry()'s
+     * docblock, via the same $sleep-spy technique as
+     * testRetryUntilTrueBackoffGrowsThenCaps() above -- if either drifts
+     * out of sync with the other, this test (or that one) fails rather than
+     * both silently going stale together. Runs instantly (no real sleeping)
+     * despite the ~8s the real budget represents.
+     */
+    public function testRmdirWithRetryDefaultBudgetTotalsAroundEightSeconds(): void
+    {
+        $delays = [];
+        self::retryUntilTrue(
+            static fn (bool $isFinalAttempt): bool => false,
+            12,
+            150_000,
+            1.5,
+            1_000_000,
+            static function (int $delayMicroseconds) use (&$delays): void {
+                $delays[] = $delayMicroseconds;
+            },
+        );
+        self::assertCount(11, $delays, 'must sleep once between each of the 12 attempts, never after the last');
+        self::assertSame(1_000_000, $delays[array_key_last($delays)], 'must have reached the cap well before the last attempt');
+        self::assertGreaterThan(7_000_000, array_sum($delays), 'total budget must give real headroom over the original ~900ms');
+        self::assertLessThan(10_000_000, array_sum($delays), 'total budget must stay inside the requested 5-10s range');
     }
 
     public function testIsWarmFalseBeforeBoot(): void
