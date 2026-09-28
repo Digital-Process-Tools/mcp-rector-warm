@@ -105,7 +105,7 @@ def test_tools_list_describes_rector_process(project: Path, record: Path) -> Non
 
 def test_dry_run_returns_a_diff_and_leaves_the_file_alone(project: Path, record: Path) -> None:
     target = project / "src" / "Money.php"
-    before = target.read_text()
+    before = target.read_bytes().decode("utf-8")
 
     async def scenario():
         async with open_server(project, record, project / "rector.php") as server:
@@ -124,7 +124,7 @@ def test_dry_run_returns_a_diff_and_leaves_the_file_alone(project: Path, record:
     assert "-final class Money" in diff
     assert "+final readonly class Money" in diff
     assert payload["exit_code"] == 2, "Rector exits 2 on a dry run that found changes"
-    assert target.read_text() == before, "a dry run must not write the file"
+    assert target.read_bytes().decode("utf-8") == before, "a dry run must not write the file"
 
 
 def test_second_call_in_the_same_session_is_warm_and_agrees_with_the_first(project: Path, record: Path) -> None:
@@ -180,13 +180,13 @@ def test_apply_rewrites_the_file(project: Path, record: Path) -> None:
     payload = structured(anyio.run(scenario))
 
     assert normalise(payload, project)["changed_files"] == ["src/Money.php"]
-    assert "final readonly class Money" in target.read_text()
+    assert "final readonly class Money" in target.read_bytes().decode("utf-8")
 
 
 def test_path_outside_the_working_dir_is_refused(project: Path, record: Path, tmp_path: Path) -> None:
     outside = tmp_path / "Outside.php"
-    outside.write_text((project / "src" / "Money.php").read_text())
-    before = outside.read_text()
+    outside.write_text((project / "src" / "Money.php").read_bytes().decode("utf-8"), encoding="utf-8", newline="")
+    before = outside.read_bytes().decode("utf-8")
 
     async def scenario():
         async with open_server(project, record, project / "rector.php") as server:
@@ -201,7 +201,7 @@ def test_path_outside_the_working_dir_is_refused(project: Path, record: Path, tm
     assert refused["exit_code"] == -1
     assert refused["error_class"] == "SecurityError"
     assert "outside the configured working directory" in refused["error"]
-    assert outside.read_text() == before, "a refused call must not write the file"
+    assert outside.read_bytes().decode("utf-8") == before, "a refused call must not write the file"
     assert normalise(allowed, project)["changed_files"] == ["src/Money.php"]
 
 

@@ -120,7 +120,7 @@ def test_did_open_on_an_unchanged_file_publishes_empty_diagnostics(server, proje
 def test_code_action_edit_matches_a_cold_rector_apply(server, project):
     path = project / "src" / "Fixable.php"
     uri = path.as_uri()
-    original = path.read_text()
+    original = path.read_bytes().decode("utf-8")
 
     notification = did_open(server, uri)
     diagnostic = notification["params"]["diagnostics"][0]
@@ -155,7 +155,7 @@ def test_code_action_edit_matches_a_cold_rector_apply(server, project):
         cwd=cold_copy, capture_output=True, text=True, timeout=60,
     )
     assert done.returncode == 0, done.stderr
-    cold_applied = (cold_copy / "src" / "Fixable.php").read_text()
+    cold_applied = (cold_copy / "src" / "Fixable.php").read_bytes().decode("utf-8")
 
     assert warm_applied == cold_applied
 
@@ -223,7 +223,7 @@ def test_did_open_on_a_file_outside_the_root_publishes_a_visible_diagnostic(serv
     # to "nothing to report" -- only a stderr line traced it. It must be a
     # visible Error diagnostic instead.
     outside = project.parent / "outside.php"
-    outside.write_text((project / "src" / "Fixable.php").read_text())
+    outside.write_text((project / "src" / "Fixable.php").read_bytes().decode("utf-8"), encoding="utf-8", newline="")
     uri = outside.as_uri()
 
     notification = did_open(server, uri)
@@ -369,7 +369,7 @@ def test_a_second_save_on_the_same_warm_worker_is_not_stale(server, project):
     # Same self-review fix as test_did_save_on_a_file_fixed_after_being_broken_
     # does_not_drop_to_clean above: bytes in, bytes out, no os.linesep
     # translation on write.
-    clean_text = (project / "src" / "Clean.php").read_text().replace("Clean", "Fixable")
+    clean_text = (project / "src" / "Clean.php").read_bytes().decode("utf-8").replace("Clean", "Fixable")
     path.write_bytes(clean_text.encode("utf-8"))
     first_save = did_save(server, uri, version=2)
     assert first_save["params"]["diagnostics"] == []  # now clean

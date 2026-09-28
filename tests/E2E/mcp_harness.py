@@ -141,12 +141,12 @@ def non_jsonrpc_lines(lines: list[str]) -> list[str]:
 
 def exit_record(record_dir: Path) -> dict[str, Any] | None:
     path = record_dir / "exit.json"
-    return json.loads(path.read_text()) if path.exists() else None
+    return json.loads(path.read_bytes().decode("utf-8")) if path.exists() else None
 
 
 def stderr_tail(record_dir: Path, limit: int = 2000) -> str:
     path = record_dir / "server.stderr"
-    text = path.read_text(errors="replace") if path.exists() else ""
+    text = path.read_bytes().decode("utf-8", errors="replace") if path.exists() else ""
     return text[-limit:]
 
 
@@ -159,7 +159,7 @@ def daemon_pid(record_dir: Path) -> int:
     moment it starts. This is the pid every RectorRunner::boot()/forkAndExecute()
     fork happens underneath -- the root #48's "list the daemon's children"
     check needs."""
-    data = json.loads((record_dir / "started.json").read_text())
+    data = json.loads((record_dir / "started.json").read_bytes().decode("utf-8"))
     return int(data["pid"])
 
 
@@ -349,7 +349,7 @@ def run_cold(tree: Path, rel_path: str, dry_run: bool) -> dict[str, Any]:
 
 def tree_contents(root: Path) -> dict[str, str]:
     return {
-        p.relative_to(root).as_posix(): p.read_text(errors="replace")
+        p.relative_to(root).as_posix(): p.read_bytes().decode("utf-8", errors="replace")
         for p in sorted(root.rglob("*"))
         if p.is_file()
     }

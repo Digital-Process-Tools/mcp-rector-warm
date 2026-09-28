@@ -142,7 +142,7 @@ EXPECT_KEYS = {
 def load(path: Path) -> dict[str, Any]:
     """Parse and validate one scenario. A typo in a key fails collection loudly
     rather than silently testing less than the file says."""
-    data = yaml.safe_load(path.read_text())
+    data = yaml.safe_load(path.read_bytes().decode("utf-8"))
     where = path.name
     if not isinstance(data, dict):
         raise ValueError(f"{where}: top level must be a mapping")
@@ -208,11 +208,11 @@ class Tree:
     def write(self, rel: str, content: str) -> None:
         target = self.path(rel)
         target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(content)
+        target.write_text(content, encoding="utf-8", newline="")
         self.touch_forward(target)
 
     def edit(self, rel: str, old: str, new: str) -> None:
-        text = self.path(rel).read_text()
+        text = self.path(rel).read_bytes().decode("utf-8")
         count = text.count(old)
         if count != 1:
             raise ValueError(f"edit {rel}: 'old' occurs {count} times, expected exactly once: {old!r}")
