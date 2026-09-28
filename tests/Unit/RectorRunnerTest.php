@@ -589,16 +589,22 @@ final class RectorRunnerTest extends TestCase
         }
     }
 
+    /**
+     * Self-review finding: the three early-return arms below used to make a
+     * green test indistinguishable from "the ps probe was unavailable, so
+     * nothing was actually checked" -- markTestSkipped() instead, so an
+     * environment missing shell_exec()/ps (disable_functions hardening, a
+     * minimal container base image, or Windows) shows up as an honest skip
+     * rather than a silent, uninformative pass.
+     */
     private static function assertNoZombieDescendants(int $rootPid): void
     {
         if (!\function_exists('shell_exec') || \stripos(\PHP_OS, 'WIN') === 0) {
-            // No portable `ps` on Windows; the pcntl/posix guard above already
-            // skips this whole test there.
-            return;
+            self::markTestSkipped('shell_exec()/`ps` unavailable in this environment -- cannot confirm no zombie descendant');
         }
         $ps = @\shell_exec('ps -eo pid,ppid,stat 2>/dev/null');
         if (!\is_string($ps) || $ps === '') {
-            return;
+            self::markTestSkipped('`ps -eo pid,ppid,stat` produced no output in this environment -- cannot confirm no zombie descendant');
         }
         $byPpid = [];
         foreach (\explode("\n", \trim($ps)) as $i => $line) {
