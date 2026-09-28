@@ -917,6 +917,17 @@ class RectorRunner implements RunnerInterface
     /** Escape hatch: the pre-#108 cold `php` subprocess per call (runCold()). */
     public const NO_PCNTL_MODE_COLD = 'cold';
 
+    /** Recorded for a bootstrap file modified while the container booted: matches no
+     *  real hash, so the next check always reboots. See resolveBootstrapFileHashes(). */
+    private const BOOT_RACE_HASH = 'modified-during-boot';
+
+    /** serveProcessWorker()'s exit code when its daemon died while it waited. */
+    public const WORKER_EXIT_ORPHANED = 3;
+
+    /** How often an idle standby checks that its daemon is alive. 2s, not less: on
+     *  Windows each check starts a `tasklist`. */
+    private const ORPHAN_POLL_SECONDS = 2;
+
     /** The no-pcntl worker this instance talks to, or null.
      *  @var array{proc: resource, pid: int, server: resource|null, socket: resource|null, token: string, stderr: string, ready: bool}|null */
     private ?array $procWorker = null;
@@ -1048,6 +1059,8 @@ class RectorRunner implements RunnerInterface
                 'cwd' => \getcwd(),
                 'address' => $address,
                 'token' => $token,
+                'daemon_pid' => \getmypid(),
+                'stderr_file' => $stderrFile,
             ],
             \JSON_INVALID_UTF8_SUBSTITUTE,
         ));
@@ -1079,17 +1092,30 @@ class RectorRunner implements RunnerInterface
         $timedOut = fn (): bool => $deadlineNs !== null && \hrtime(true) >= $deadlineNs;
 
         while ($this->procWorker['socket'] === null) {
+            // Checked on EVERY pass, not only when nobody connected: a local process
+            // that keeps connecting must not keep this wait alive past the deadline.
+            if ($timedOut()) {
+                throw new \RuntimeException(
+                    "rector call exceeded its configured --call-timeout ({$this->callTimeoutSeconds}s) before the "
+                    . 'warm worker finished booting; the worker was killed',
+                );
+            }
             $server = $this->procWorker['server'];
             \assert($server !== null);
             $connection = @\stream_socket_accept($server, 1);
             if ($connection !== false) {
                 // Loopback is reachable by any local process: only a peer that
                 // sends the token first is our worker. Fixed length, so a stranger
-                // cannot make this read allocate more.
+                // cannot make this read allocate more; and at most 5s, never past
+                // the call's own deadline.
                 \stream_set_timeout($connection, 1);
                 $expected = \pack('N', 32) . $this->procWorker['token'];
+                $helloDeadline = \hrtime(true) + 5_000_000_000;
+                if ($deadlineNs !== null) {
+                    $helloDeadline = \min($helloDeadline, $deadlineNs);
+                }
                 try {
-                    $hello = $this->readExactly($connection, \strlen($expected), \hrtime(true) + 5_000_000_000);
+                    $hello = $this->readExactly($connection, \strlen($expected), $helloDeadline);
                 } catch (RectorCallTimeoutException) {
                     $hello = null;
                 }
@@ -1104,12 +1130,6 @@ class RectorRunner implements RunnerInterface
             }
             if (!$this->procWorkerAlive()) {
                 throw new \RuntimeException('the warm worker process exited before it connected: ' . $this->procWorkerStderrTail());
-            }
-            if ($timedOut()) {
-                throw new \RuntimeException(
-                    "rector call exceeded its configured --call-timeout ({$this->callTimeoutSeconds}s) before the "
-                    . 'warm worker finished booting; the worker was killed',
-                );
             }
         }
 
@@ -1297,10 +1317,17 @@ class RectorRunner implements RunnerInterface
      * taken BEFORE the boot requires anything, so an edit that races the boot can only
      * make the daemon's next check see a change (a needless reboot), never hide one.
      *
+     * $daemonPid: the daemon that spawned this worker. While idle, the worker checks it
+     * is still alive and exits (WORKER_EXIT_ORPHANED) once it is not: a daemon killed
+     * without cleaning up (kill -9, a crash) never closes this connection, because a
+     * standby waits in the daemon's accept backlog and holds an inherited copy of
+     * that very listening socket -- so EOF alone never comes, and without this check
+     * the booted standby lived on forever.
+     *
      * @param resource $socket
      * @return int exit code
      */
-    public function serveProcessWorker($socket, string $token): int
+    public function serveProcessWorker($socket, string $token, ?int $daemonPid = null): int
     {
         $this->writeFrame($socket, $token);
 
@@ -1332,7 +1359,30 @@ class RectorRunner implements RunnerInterface
         ));
 
         // Idle until the call arrives: a standby legitimately waits here for as long
-        // as the caller takes, so no deadline. EOF = the daemon discarded it.
+        // as the caller takes, so no deadline -- but not past its daemon's death.
+        // EOF = the daemon discarded it.
+        while ($daemonPid !== null) {
+            $read = [$socket];
+            $write = $except = null;
+            $ready = @\stream_select($read, $write, $except, self::ORPHAN_POLL_SECONDS);
+            if ($ready !== 0) {
+                break; // readable (a frame, or EOF), or select failed: readFrame() decides
+            }
+            // POSIX: the daemon is this worker's direct parent (proc_open() with an
+            // array command, no shell between them). A dead daemon's children are
+            // reparented at once, while the daemon itself can linger as a zombie its
+            // own parent has not reaped yet -- and a zombie still answers kill(pid, 0),
+            // so asking whether the daemon is alive would keep waiting on a corpse.
+            // Windows (and POSIX without the posix extension): no reparenting to
+            // watch, so ask whether it still runs. An unknown answer (null) keeps
+            // waiting -- never exit on a guess.
+            $orphaned = \function_exists('posix_getppid')
+                ? \posix_getppid() !== $daemonPid
+                : ProcessTree::isAlive($daemonPid) === false;
+            if ($orphaned) {
+                return self::WORKER_EXIT_ORPHANED;
+            }
+        }
         $frame = $this->readFrame($socket);
         if ($frame === null) {
             return 0;
@@ -1616,6 +1666,8 @@ class RectorRunner implements RunnerInterface
      */
     private function bootInPlace(): void
     {
+        // Before anything is required: see resolveBootstrapFileHashes().
+        $bootStartedAt = \time();
         $this->ensureRectorAutoloaded();
         $this->ensureProjectAutoloaded();
 
@@ -1661,7 +1713,7 @@ class RectorRunner implements RunnerInterface
             throw new \RuntimeException('Could not detect Rector prefix namespace.');
         }
 
-        $this->bootstrapFileHashes = $this->resolveBootstrapFileHashes();
+        $this->bootstrapFileHashes = $this->resolveBootstrapFileHashes($bootStartedAt);
 
         $this->appClass = $this->resolvePrefixed('Symfony\\Component\\Console\\Application');
         $this->inputClass = $this->resolvePrefixed('Symfony\\Component\\Console\\Input\\ArgvInput');
@@ -1723,9 +1775,19 @@ class RectorRunner implements RunnerInterface
      * return to pre-#33 behaviour indistinguishable from "this config simply
      * registers no bootstrap files".
      *
+     * Hashed AFTER the boot that required them, so an edit landing between Rector's
+     * require and this hash would be recorded as the version the container holds --
+     * no reboot, a stale container, a silent wrong answer (#108 review; the no-pcntl
+     * standby boots in the background after every call, which reopens this window
+     * after every call). A file modified at or after $bootStartedAt is therefore
+     * recorded as BOOT_RACE_HASH, which no real hash equals: the next
+     * configFileChanged() reports it changed. filemtime() has 1s resolution, so an
+     * edit in the same second just before the boot costs one needless reboot --
+     * the safe direction.
+     *
      * @return array<string, string|null>
      */
-    private function resolveBootstrapFileHashes(): array
+    private function resolveBootstrapFileHashes(int $bootStartedAt): array
     {
         try {
             $bootstrapFiles = \Rector\Configuration\Parameter\SimpleParameterProvider::provideArrayParameter('bootstrap_files');
@@ -1741,9 +1803,14 @@ class RectorRunner implements RunnerInterface
 
         $hashes = [];
         foreach ($bootstrapFiles as $bootstrapFile) {
-            if (is_string($bootstrapFile)) {
-                $hashes[$bootstrapFile] = $this->hashConfigFile($bootstrapFile);
+            if (!is_string($bootstrapFile)) {
+                continue;
             }
+            \clearstatcache(true, $bootstrapFile);
+            $mtime = @\filemtime($bootstrapFile);
+            $hashes[$bootstrapFile] = $mtime !== false && $mtime >= $bootStartedAt
+                ? self::BOOT_RACE_HASH
+                : $this->hashConfigFile($bootstrapFile);
         }
 
         return $hashes;

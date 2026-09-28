@@ -52,4 +52,14 @@ if ($socket === false) {
     exit(1);
 }
 
-exit((new RectorRunner())->serveProcessWorker($socket, $request['token']));
+$daemonPid = is_int($request['daemon_pid'] ?? null) ? $request['daemon_pid'] : null;
+$code = (new RectorRunner())->serveProcessWorker($socket, $request['token'], $daemonPid);
+
+if ($code === RectorRunner::WORKER_EXIT_ORPHANED && is_string($request['stderr_file'] ?? null)) {
+    // The daemon that would have removed our stderr file is gone. Close it first:
+    // Windows cannot delete a file that is still open.
+    fclose(STDERR);
+    @unlink($request['stderr_file']);
+}
+
+exit($code);

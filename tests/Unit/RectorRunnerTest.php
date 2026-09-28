@@ -1439,7 +1439,7 @@ final class RectorRunnerTest extends TestCase
         self::assertNotFalse($filter);
 
         try {
-            $result = $method->invoke($runner);
+            $result = $method->invoke($runner, \time());
         } finally {
             stream_filter_remove($filter);
             \Rector\Configuration\Parameter\SimpleParameterProvider::setParameter('bootstrap_files', []);

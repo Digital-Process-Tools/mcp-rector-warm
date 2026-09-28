@@ -135,6 +135,123 @@ final class RectorRunnerStandbyWorkerTest extends TestCase
         }
     }
 
+    /**
+     * A daemon that dies without cleaning up (kill -9, a crash) must not leave its
+     * booted standby behind: nothing ever connects to it again, and before this fix
+     * it blocked forever in its idle read -- it holds an inherited copy of the
+     * daemon's listening socket, so its own still-unaccepted connection never saw
+     * EOF. Paired control: the same standby is alive while the daemon is.
+     */
+    public function testTheStandbyExitsWhenTheDaemonIsKilled(): void
+    {
+        $project = $this->makeDependencyProject();
+        $script = $project . '/daemon.php';
+        file_put_contents($script, "<?php\n"
+            . 'require ' . var_export(dirname(__DIR__, 2) . '/vendor/autoload.php', true) . ";\n"
+            . 'chdir(' . var_export($project, true) . ");\n"
+            . "\$_SERVER['argv'] = ['rector'];\n"
+            . "\$r = new class(120) extends \\Dpt\\McpRectorWarm\\RectorRunner { protected function canFork(): bool { return false; } };\n"
+            . '$r->run(' . var_export(self::argv($project . '/src/Caller.php'), true) . ");\n"
+            . "\$w = (new \\ReflectionProperty(\\Dpt\\McpRectorWarm\\RectorRunner::class, 'procWorker'))->getValue(\$r);\n"
+            . "echo \$w['pid'], ' ', \$w['stderr'], \"\\n\";\n"
+            . "fflush(STDOUT);\n"
+            . "sleep(300);\n");
+
+        $null = \PHP_OS_FAMILY === 'Windows' ? 'NUL' : '/dev/null';
+        $daemon = proc_open([\PHP_BINARY, $script], [0 => ['file', $null, 'r'], 1 => ['pipe', 'w'], 2 => ['file', $null, 'w']], $pipes);
+        self::assertIsResource($daemon);
+        $workerPid = 0;
+        try {
+            $line = (string) fgets($pipes[1]);
+            self::assertMatchesRegularExpression('/^\d+ \S+$/', trim($line), 'the daemon must report its standby: ' . $line);
+            [$pid, $stderrFile] = explode(' ', trim($line), 2);
+            $workerPid = (int) $pid;
+
+            // Let the standby finish booting, connect, and settle into its idle wait.
+            sleep(4);
+            self::assertTrue(self::isAlive($workerPid), 'control: the standby is alive while the daemon is');
+
+            proc_terminate($daemon, 9);
+
+            $deadline = microtime(true) + 15.0;
+            while (self::isAlive($workerPid) && microtime(true) < $deadline) {
+                usleep(200_000);
+            }
+            self::assertFalse(self::isAlive($workerPid), 'the standby must exit once its daemon is gone (#108)');
+            self::assertFileDoesNotExist($stderrFile, 'an orphaned standby must not leave its stderr temp file behind');
+        } finally {
+            fclose($pipes[1]);
+            proc_terminate($daemon, 9);
+            proc_close($daemon);
+            if ($workerPid > 0 && self::isAlive($workerPid)) {
+                \Dpt\McpRectorWarm\Support\ProcessTree::killTree($workerPid);
+            }
+        }
+    }
+
+    /**
+     * The whole accept loop runs under the call deadline: a local process that
+     * connects and says nothing costs at most the remaining deadline, not 5s per
+     * connection with the deadline never checked in between.
+     */
+    public function testSilentStrangersCannotStallTheBootWaitPastTheDeadline(): void
+    {
+        $runner = self::noPcntlRunner();
+        $server = stream_socket_server('tcp://127.0.0.1:0', $errno, $errstr);
+        self::assertNotFalse($server);
+        $address = (string) stream_socket_get_name($server, false);
+        $null = \PHP_OS_FAMILY === 'Windows' ? 'NUL' : '/dev/null';
+        // Stands in for a worker that is alive but slow to connect.
+        $proc = proc_open([\PHP_BINARY, '-r', 'sleep(60);'], [0 => ['file', $null, 'r'], 1 => ['file', $null, 'w'], 2 => ['file', $null, 'w']], $pipes);
+        self::assertIsResource($proc);
+        $strangers = [];
+        for ($i = 0; $i < 4; $i++) {
+            $strangers[] = stream_socket_client('tcp://' . $address);
+        }
+
+        $property = new \ReflectionProperty(RectorRunner::class, 'procWorker');
+        $property->setValue($runner, [
+            'proc' => $proc,
+            'pid' => (int) proc_get_status($proc)['pid'],
+            'server' => $server,
+            'socket' => null,
+            'token' => str_repeat('a', 32),
+            'stderr' => (string) tempnam(sys_get_temp_dir(), 'standby-test-'),
+            'ready' => false,
+        ]);
+        $await = new \ReflectionMethod(RectorRunner::class, 'awaitProcWorkerReady');
+
+        $start = microtime(true);
+        $message = null;
+        try {
+            $await->invoke($runner, hrtime(true) + 2_000_000_000);
+        } catch (\RuntimeException $e) {
+            $message = $e->getMessage();
+        } finally {
+            $runner->reboot();
+            foreach ($strangers as $stranger) {
+                fclose($stranger);
+            }
+        }
+        $elapsed = microtime(true) - $start;
+
+        self::assertNotNull($message, 'must fire: the wait must end in a timeout error');
+        self::assertStringContainsString('--call-timeout', (string) $message);
+        self::assertLessThan(5.0, $elapsed, "4 silent connections must not stretch a 2s deadline (took {$elapsed}s)");
+    }
+
+    private static function isAlive(int $pid): bool
+    {
+        if (\PHP_OS_FAMILY === 'Windows') {
+            return str_contains((string) shell_exec('tasklist /FI "PID eq ' . $pid . '" /NH /FO CSV 2>NUL'), '"' . $pid . '"');
+        }
+        if (\function_exists('posix_kill')) {
+            return posix_kill($pid, 0) || posix_get_last_error() === 1;
+        }
+
+        return trim((string) shell_exec('ps -o pid= -p ' . $pid . ' 2>/dev/null')) !== '';
+    }
+
     private static function noPcntlRunner(): RectorRunner
     {
         return new class(120) extends RectorRunner {
