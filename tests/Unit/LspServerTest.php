@@ -68,6 +68,23 @@ final class LspServerTest extends TestCase
         );
     }
 
+    /**
+     * @param array<string, mixed> $capabilities
+     */
+    private static function initialize(LspServer $server, array $capabilities): void
+    {
+        $server->handle([
+            'jsonrpc' => '2.0',
+            'id' => 1,
+            'method' => 'initialize',
+            'params' => ['processId' => null, 'rootUri' => null, 'capabilities' => $capabilities],
+        ]);
+    }
+
+    private const WATCHED_FILES_DYNAMIC = [
+        'workspace' => ['didChangeWatchedFiles' => ['dynamicRegistration' => true]],
+    ];
+
     public function testInitializedNotificationRegistersAConfigFileWatcher(): void
     {
         // #101: `initialized` used to produce no reply at all. Now it sends
@@ -77,8 +94,13 @@ final class LspServerTest extends TestCase
         // the missing trigger the issue names. This is a request, not a
         // notification, so it carries an id the client is expected to
         // reply to (the reply itself needs no handling: nothing in this
-        // server depends on its result).
+        // server depends on its result -- see
+        // testAResponseFromTheClientIsNeverAnswered).
+        //
+        // #105: only when the client declared it can take the registration
+        // (`workspace.didChangeWatchedFiles.dynamicRegistration: true`).
         $server = new LspServer('0.1.0-prototype');
+        self::initialize($server, self::WATCHED_FILES_DYNAMIC);
 
         $responses = $server->handle(['jsonrpc' => '2.0', 'method' => 'initialized']);
 
@@ -104,6 +126,111 @@ final class LspServerTest extends TestCase
 
         self::assertSame(7, $responses[0]['id']);
         self::assertSame(-32601, $responses[0]['error']['code']);
+    }
+
+    /**
+     * @return iterable<string, array{array<string, mixed>}>
+     */
+    public static function clientCapabilitiesWithoutDynamicWatchedFiles(): iterable
+    {
+        yield 'empty capabilities' => [[]];
+        yield 'workspace without didChangeWatchedFiles' => [['workspace' => ['applyEdit' => true]]];
+        yield 'dynamicRegistration false' => [['workspace' => ['didChangeWatchedFiles' => ['dynamicRegistration' => false]]]];
+        yield 'didChangeWatchedFiles without dynamicRegistration' => [['workspace' => ['didChangeWatchedFiles' => []]]];
+    }
+
+    /**
+     * #105: the LSP spec only lets a server register a capability
+     * dynamically when the client declared `dynamicRegistration: true` for
+     * it. Paired with testInitializedNotificationRegistersAConfigFileWatcher
+     * (the must-fire half), so an `initialized` that silently produces
+     * nothing for every client cannot pass both.
+     *
+     * @param array<string, mixed> $capabilities
+     */
+    #[\PHPUnit\Framework\Attributes\DataProvider('clientCapabilitiesWithoutDynamicWatchedFiles')]
+    public function testInitializedDoesNotRegisterWithoutTheClientCapability(array $capabilities): void
+    {
+        $server = new LspServer('0.1.0-prototype');
+        self::initialize($server, $capabilities);
+
+        self::assertSame([], $server->handle(['jsonrpc' => '2.0', 'method' => 'initialized']));
+    }
+
+    /**
+     * #105, the other half of "not registered": with no watcher, a config
+     * change still reaches diagnostics on the next didSave, because every
+     * didSave calls the DiagnosticsSource again and the warm worker reloads
+     * the config itself on that call (RectorRunner::configFileChanged(),
+     * pinned in RectorRunnerTest and end to end in test_lsp_diagnostics.py).
+     * This source stands in for that: its answer changes between the two
+     * calls the way a reloaded config's does.
+     */
+    public function testWithoutTheWatcherTheNextSaveStillPublishesTheReloadedResult(): void
+    {
+        $source = new class implements DiagnosticsSource {
+            public int $calls = 0;
+
+            public function diagnose(string $absolutePath): array
+            {
+                $this->calls++;
+
+                return $this->calls === 1
+                    ? ['fixes' => [[
+                        'range' => ['start' => ['line' => 1, 'character' => 0], 'end' => ['line' => 2, 'character' => 0]],
+                        'newText' => 'x',
+                        'rectors' => ['BeforeConfigRector'],
+                    ]]]
+                    : ['fixes' => []];
+            }
+        };
+        $server = new LspServer('0.1.0-prototype', $source);
+        self::initialize($server, []);
+        self::assertSame([], $server->handle(['jsonrpc' => '2.0', 'method' => 'initialized']));
+
+        $uri = 'file:///tmp/A.php';
+        $opened = $server->handle([
+            'jsonrpc' => '2.0',
+            'method' => 'textDocument/didOpen',
+            'params' => ['textDocument' => ['uri' => $uri, 'version' => 1, 'text' => '']],
+        ]);
+        self::assertCount(1, $opened[0]['params']['diagnostics']);
+
+        $saved = $server->handle([
+            'jsonrpc' => '2.0',
+            'method' => 'textDocument/didSave',
+            'params' => ['textDocument' => ['uri' => $uri]],
+        ]);
+
+        self::assertSame(2, $source->calls);
+        self::assertSame('textDocument/publishDiagnostics', $saved[0]['method']);
+        self::assertSame([], $saved[0]['params']['diagnostics']);
+    }
+
+    /**
+     * #105: a RESPONSE (id + result/error, no method) -- e.g. the client's
+     * reply to this server's own client/registerCapability -- must never be
+     * answered; JSON-RPC forbids replying to a response. Paired with
+     * testUnknownRequestGetsAMethodNotFoundError (the must-still-fire half).
+     *
+     * @return iterable<string, array{array<string, mixed>}>
+     */
+    public static function responseFrames(): iterable
+    {
+        yield 'result null' => [['jsonrpc' => '2.0', 'id' => 'rector-warm-lsp/config-watch', 'result' => null]];
+        yield 'error' => [['jsonrpc' => '2.0', 'id' => 'rector-warm-lsp/config-watch', 'error' => ['code' => -32601, 'message' => 'nope']]];
+        yield 'integer id' => [['jsonrpc' => '2.0', 'id' => 3, 'result' => ['ok' => true]]];
+    }
+
+    /**
+     * @param array<string, mixed> $response
+     */
+    #[\PHPUnit\Framework\Attributes\DataProvider('responseFrames')]
+    public function testAResponseFromTheClientIsNeverAnswered(array $response): void
+    {
+        $server = new LspServer('0.1.0-prototype');
+
+        self::assertSame([], $server->handle($response));
     }
 
     public function testUnknownNotificationIsIgnored(): void
