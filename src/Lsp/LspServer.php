@@ -120,11 +120,18 @@ final class LspServer
         $path = self::uriToPath($uri);
         $result = $this->diagnostics->diagnose($path);
 
-        // Drop a stale result (#53): a call's diagnose() can itself take long
-        // enough for a later didSave to land and bump the tracked version
-        // before this one returns. Comparing against the version THIS call
+        // Drop a stale result (#53): comparing against the version THIS call
         // started with, not whatever is tracked now, is what makes a stale
-        // result discardable at all.
+        // result discardable at all. Self-review note: the real bin/rector-
+        // warm-lsp loop reads and handles one message at a time (no async
+        // I/O, no forking at the LSP-message level), so nothing can bump
+        // documentVersions[$uri] between the assignment above and this check
+        // in the SHIPPED binary today -- this branch is unreachable there,
+        // exercised only by a test double that reenters handle() from inside
+        // diagnose() (LspServerTest::testAStaleResultIsDiscardedWhenTheVersionChangedMidCall).
+        // Kept as defense-in-depth for whenever that loop stops being
+        // strictly synchronous (a future async/pipelined transport), and
+        // documented here as inert-today rather than as a live guarantee.
         if (($this->documentVersions[$uri] ?? null) !== $version) {
             return [];
         }
@@ -225,13 +232,32 @@ final class LspServer
      */
     private static function rangesOverlap(array $a, array $b): bool
     {
+        if ($a['start']['line'] === $a['end']['line']) {
+            // $a is a zero-width (cursor) request range -- a real editor's
+            // "no selection, act on this line" codeAction request. Ordinary
+            // half-open interval overlap (s1 < e2 && s2 < e1) treats an empty
+            // interval as never overlapping anything, which silently drops
+            // the quick fix whenever the cursor sits exactly on the fix's
+            // FIRST line (the most common place to invoke it from). Test
+            // point-in-half-open-range instead: [b.start, b.end).
+            return $a['start']['line'] >= $b['start']['line'] && $a['start']['line'] < $b['end']['line'];
+        }
+
         return $a['start']['line'] < $b['end']['line'] && $b['start']['line'] < $a['end']['line'];
     }
 
     /**
-     * `file:///path` -> `/path`, decoded, with the Windows `/C:/...` ->
-     * `C:/...` correction every `file://` URI needs there (reasoned, not
-     * observed on this machine -- see the developer report).
+     * `file:///path` -> `/path`, decoded. Self-review correction: for a plain
+     * `file:///C:/Users/...` URI, PHP's own `parse_url()` already returns
+     * `C:/Users/...` with no leading slash (verified: PHP 8.2.0) -- the
+     * `/[A-Za-z]:` strip below does NOT fire for that shape and was never
+     * needed for it. It exists for the OTHER Windows shape some clients
+     * (vscode-uri-style, percent-encoded colon) produce instead --
+     * `file:///c%3A/Users/...` -- where `parse_url()` returns
+     * `/c%3A/Users/...`, `rawurldecode()` turns that into `/c:/Users/...`,
+     * and ONLY THEN does the leading slash need stripping. Reasoned, not
+     * observed on this machine (no Windows available) -- see the developer
+     * report for the platform-band note.
      */
     private static function uriToPath(string $uri): string
     {

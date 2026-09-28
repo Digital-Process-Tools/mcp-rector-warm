@@ -49,17 +49,70 @@ final class RectorDiagnosticsSource implements DiagnosticsSource
     }
 
     /**
+     * Rector's own JSON report out of raw process output, skipping any text
+     * BEFORE it (e.g. a no-config warning) and tolerating any text AFTER it
+     * too (a self-review finding on #53: decoding `substr($output, $pos)`
+     * whole -- to the end of the string -- fails on ANY trailing byte after
+     * the closing `}`, e.g. a PHP deprecation notice a future Rector/PHP
+     * version prints after its JSON, and fails SILENTLY here, since a null
+     * report reads identically to "0 changes"). This scans for the matching
+     * closing brace instead, so only the JSON object itself is decoded.
+     *
      * @return array<string, mixed>|null
      */
     private static function extractReport(string $output): ?array
     {
-        $pos = strpos($output, '{');
-        while ($pos !== false) {
-            $decoded = json_decode(substr($output, $pos), true);
+        for ($pos = strpos($output, '{'); $pos !== false; $pos = strpos($output, '{', $pos + 1)) {
+            $end = self::matchingBraceEnd($output, $pos);
+            if ($end === null) {
+                continue;
+            }
+
+            $decoded = json_decode(substr($output, $pos, $end - $pos + 1), true);
             if (is_array($decoded) && array_key_exists('totals', $decoded)) {
                 return $decoded;
             }
-            $pos = strpos($output, '{', $pos + 1);
+        }
+
+        return null;
+    }
+
+    /**
+     * The index of the `}` that closes the `{` at $start, respecting JSON
+     * string literals (so a brace inside a quoted string, e.g. a rule's diff
+     * text, is never mistaken for structure) -- null if $output ends before
+     * the brace at $start closes.
+     */
+    private static function matchingBraceEnd(string $output, int $start): ?int
+    {
+        $depth = 0;
+        $inString = false;
+        $escaped = false;
+
+        for ($i = $start, $len = strlen($output); $i < $len; $i++) {
+            $char = $output[$i];
+
+            if ($inString) {
+                if ($escaped) {
+                    $escaped = false;
+                } elseif ($char === '\\') {
+                    $escaped = true;
+                } elseif ($char === '"') {
+                    $inString = false;
+                }
+                continue;
+            }
+
+            if ($char === '"') {
+                $inString = true;
+            } elseif ($char === '{') {
+                $depth++;
+            } elseif ($char === '}') {
+                $depth--;
+                if ($depth === 0) {
+                    return $i;
+                }
+            }
         }
 
         return null;

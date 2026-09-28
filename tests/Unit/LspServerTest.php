@@ -104,6 +104,46 @@ final class LspServerTest extends TestCase
         self::assertTrue($server->isShuttingDown());
     }
 
+    public function testDidOpenTurnsTheUriIntoAPlainFilesystemPath(): void
+    {
+        // Self-review addition: uriToPath() had no direct test at all (every
+        // fake diagnose() in this file used to ignore its argument). Pins the
+        // POSIX case and the two Windows file:// shapes the docblock
+        // distinguishes (plain drive letter vs. percent-encoded colon) --
+        // the second is reasoned rather than observed (no Windows here), but
+        // the string transformation itself is exercised on any platform.
+        $seen = null;
+        $capturing = new class ($seen) implements DiagnosticsSource {
+            public function __construct(private mixed &$seen)
+            {
+            }
+
+            public function diagnose(string $absolutePath): array
+            {
+                $this->seen = $absolutePath;
+
+                return ['fixes' => []];
+            }
+        };
+
+        $cases = [
+            'file:///tmp/Sample.php' => '/tmp/Sample.php',
+            'file:///C:/Users/x/Sample.php' => 'C:/Users/x/Sample.php',
+            'file:///c%3A/Users/x/Sample.php' => 'c:/Users/x/Sample.php',
+        ];
+
+        foreach ($cases as $uri => $expectedPath) {
+            $seen = null;
+            $server = new LspServer('1.0.0', $capturing);
+            $server->handle([
+                'jsonrpc' => '2.0',
+                'method' => 'textDocument/didOpen',
+                'params' => ['textDocument' => ['uri' => $uri, 'version' => 1]],
+            ]);
+            self::assertSame($expectedPath, $seen, $uri);
+        }
+    }
+
     public function testDidOpenPublishesOneDiagnosticPerFix(): void
     {
         $fixes = [self::fix(3, 12, "fixed\n", 'Rector\\CodeQuality\\Rector\\If_\\SimplifyIfReturnBoolRector')];
@@ -192,6 +232,38 @@ final class LspServerTest extends TestCase
         self::assertSame($fixes[0]['range'], $edit['range']);
         self::assertSame('fixed' . "\n", $edit['newText']);
         self::assertSame('Apply all Rector fixes', $actions[1]['title']);
+    }
+
+    public function testCodeActionWithAZeroWidthCursorOnTheFixsFirstLineStillOffersIt(): void
+    {
+        // Self-review finding on #53: a real editor commonly sends a
+        // zero-width (no-selection) request range at the cursor position.
+        // Half-open interval overlap treats an empty interval as never
+        // overlapping anything, so a naive implementation drops the quick
+        // fix exactly when the cursor sits on the fix's OWN first line --
+        // the most likely place to invoke it from.
+        $fixes = [self::fix(3, 12, "fixed\n", 'SimplifyIfReturnBoolRector')];
+        $server = new LspServer('1.0.0', self::fakeSource($fixes));
+        $server->handle([
+            'jsonrpc' => '2.0',
+            'method' => 'textDocument/didOpen',
+            'params' => ['textDocument' => ['uri' => 'file:///tmp/Sample.php', 'version' => 1]],
+        ]);
+
+        $responses = $server->handle([
+            'jsonrpc' => '2.0',
+            'id' => 8,
+            'method' => 'textDocument/codeAction',
+            'params' => [
+                'textDocument' => ['uri' => 'file:///tmp/Sample.php'],
+                'range' => ['start' => ['line' => 3, 'character' => 0], 'end' => ['line' => 3, 'character' => 0]],
+                'context' => ['diagnostics' => []],
+            ],
+        ]);
+
+        $actions = $responses[0]['result'];
+        self::assertCount(2, $actions);
+        self::assertSame('Apply Rector: SimplifyIfReturnBoolRector', $actions[0]['title']);
     }
 
     public function testCodeActionOutsideTheFixRangeIsNotOffered(): void
