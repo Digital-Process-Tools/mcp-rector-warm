@@ -501,10 +501,10 @@ final class RectorRunnerTest extends TestCase
             chdir($tmp);
             $_SERVER['argv'] = ['rector'];
 
-            // 1s deadline: long enough that the worker's own boot (a real,
-            // zero-rule Rector container) reliably finishes well before it, short
-            // enough that this test does not itself become the next slow test in
-            // the suite.
+            // 1s deadline: short enough that this test does not itself become
+            // the next slow test in the suite. The worker's own boot (a real,
+            // zero-rule Rector container) does NOT reliably finish within it
+            // (#113), so bootDeadlineNs() below takes the boot out of it.
             // Whether THIS call sleeps travels in $argv, not in object state: the
             // worker forked once, at boot(), and keeps running its OWN copy of
             // $this from that instant on (serveWorker()'s loop) -- a later
@@ -513,6 +513,16 @@ final class RectorRunnerTest extends TestCase
             // by the worker on every request (serveWorker()'s readFrame() loop),
             // so it is the only per-call signal available here.
             $runner = new class(1) extends RectorRunner {
+                // #113: a real zero-rule container build takes ~0.9s idle and
+                // 1.3-1.6s under CPU load -- over this test's 1s budget, which
+                // killed the BOOT and failed the timing bounds below with a
+                // message that looked like the outer backstop. The boot is not
+                // what this test measures; the call's two kill sites are.
+                protected function bootDeadlineNs(): ?int
+                {
+                    return null;
+                }
+
                 protected function execute(array $argv, bool $warmBoot): array
                 {
                     if (($argv[1] ?? null) === 'wedge') {
@@ -525,6 +535,12 @@ final class RectorRunnerTest extends TestCase
                     return ['exit_code' => 0, 'output' => '', 'warm_boot' => $warmBoot];
                 }
             };
+
+            // #113: boot the worker before the clock starts. The timing bounds
+            // below are about the CALL's kill sites; a real boot inside the timed
+            // window added 1-5s under load and failed the inner site's < 3s bound.
+            self::assertSame(0, $runner->run(['rector'])['exit_code']);
+            self::assertTrue($runner->isWarm(), 'the worker must be booted before the timed wedge call');
 
             $start = microtime(true);
             try {
@@ -721,7 +737,14 @@ final class RectorRunnerTest extends TestCase
             chdir($tmp);
             $_SERVER['argv'] = ['rector'];
 
-            $runner = new RectorRunner(1);
+            // #113: the boot is only this test's setup, so keep it out of the 1s
+            // budget; the outer backstop's own deadline is untouched.
+            $runner = new class(1) extends RectorRunner {
+                protected function bootDeadlineNs(): ?int
+                {
+                    return null;
+                }
+            };
             // A real boot(): the zero-rule config above makes the analysis itself
             // refuse ("registers no rules") one step later, in execute() --
             // workerPid/workerSocket are already set by the time this throws, same
@@ -840,6 +863,13 @@ final class RectorRunnerTest extends TestCase
             // completion, unkilled) does not itself become the slowest test
             // in the suite.
             $runner = new class(1) extends RectorRunner {
+                // #113: keep the real boot out of the 1s budget, same as the
+                // sibling wedge test above.
+                protected function bootDeadlineNs(): ?int
+                {
+                    return null;
+                }
+
                 protected function execute(array $argv, bool $warmBoot): array
                 {
                     if (($argv[1] ?? null) === 'wedge') {
@@ -1025,7 +1055,18 @@ final class RectorRunnerTest extends TestCase
             chdir($tmp);
             $_SERVER['argv'] = ['rector'];
 
-            $runner = new RectorRunner(1);
+            // $unboundedBoot stays false for the wedged half: that boot's own
+            // deadline is what is under test. #113: the fast-config half only
+            // needs a boot to succeed, and a real one can itself outrun 1s
+            // under load, so it lifts the bound there.
+            $runner = new class(1) extends RectorRunner {
+                public bool $unboundedBoot = false;
+
+                protected function bootDeadlineNs(): ?int
+                {
+                    return $this->unboundedBoot ? null : parent::bootDeadlineNs();
+                }
+            };
 
             $start = microtime(true);
             try {
@@ -1052,6 +1093,7 @@ final class RectorRunnerTest extends TestCase
             // longer wedges, so isWarm() is what matters, not whether the call
             // that follows a successful boot happens to also succeed.
             file_put_contents($tmp . '/rector.php', $fastConfig);
+            $runner->unboundedBoot = true;
             try {
                 $runner->run(['rector', 'process']);
                 self::fail('expected the zero-rule config to refuse, same as any other call against it');
@@ -1059,6 +1101,90 @@ final class RectorRunnerTest extends TestCase
                 self::assertStringContainsString('registers no rules', $e->getMessage());
             }
             self::assertTrue($runner->isWarm(), 'a fresh boot against a config that no longer wedges must succeed');
+        } finally {
+            chdir($previousCwd);
+            $_SERVER['argv'] = $previousArgv;
+            unlink($tmp . '/rector.php');
+            rmdir($tmp);
+        }
+    }
+
+    /**
+     * #113: macOS CI saw "rector call exceeded its configured --call-timeout
+     * waiting on the warm worker" -- runForked()'s OUTER backstop message --
+     * after only ~1.02s, in a test whose outer deadline is 1s + the 5s
+     * RUN_FORKED_DEADLINE_GRACE_SECONDS. It was not the outer backstop at all:
+     * boot()'s handshake read goes through the same readExactly() and threw the
+     * same message on its own, ungraced 1s deadline, because a real zero-rule
+     * container build takes ~0.9s idle and 1.3-1.6s under CPU load. Two halves:
+     *
+     * 1. A boot killed at the deadline must say it was the boot, never borrow
+     *    the outer backstop's words -- so "outer backstop at ~1s" is impossible
+     *    by construction again, not merely unlikely.
+     * 2. bootDeadlineNs() is the seam the wedge tests use to keep a real boot out
+     *    of the 1s budget they measure the CALL against. Same slow config, same
+     *    1s --call-timeout: the plain runner is killed (the must-fire control
+     *    for half 1), the one whose bootDeadlineNs() is unbounded boots fine.
+     */
+    public function testBootTimeoutReportsItsOwnMessageAndItsDeadlineIsOverridable(): void
+    {
+        if (!\function_exists('posix_kill') || !\function_exists('pcntl_fork')) {
+            self::markTestSkipped('posix_kill/pcntl_fork unavailable in this environment');
+        }
+
+        $tmp = sys_get_temp_dir() . '/rector-runner-boot-message-test-' . bin2hex(random_bytes(8));
+        mkdir($tmp);
+        // 2.5s: past the 1s --call-timeout, well short of the outer backstop's
+        // 1s + 5s grace, so the only kill site that can fire in half 1 is boot's.
+        file_put_contents(
+            $tmp . '/rector.php',
+            "<?php\n\ndeclare(strict_types=1);\n\nuse Rector\\Config\\RectorConfig;\n\n"
+            . "usleep(2_500_000);\n\nreturn RectorConfig::configure();\n",
+        );
+        $previousCwd = getcwd();
+        $previousArgv = $_SERVER['argv'] ?? ['rector'];
+
+        try {
+            chdir($tmp);
+            $_SERVER['argv'] = ['rector'];
+
+            $message = '';
+            $start = microtime(true);
+            try {
+                (new RectorRunner(1))->run(['rector', 'process']);
+                self::fail('expected the slow boot to be killed at its 1s --call-timeout');
+            } catch (\RuntimeException $e) {
+                $message = $e->getMessage();
+            }
+            $elapsed = microtime(true) - $start;
+            self::assertStringContainsString('--call-timeout', $message);
+            self::assertStringContainsString('booting', $message, "the boot kill site must name itself -- got '{$message}'");
+            self::assertStringNotContainsString(
+                'waiting on the warm worker',
+                $message,
+                'a boot timeout must never report itself with runForked()\'s outer-backstop message (#113)',
+            );
+            self::assertStringNotContainsString(
+                'exceeded 1s',
+                $message,
+                'nor with the figure the wedge tests use to recognise forkAndExecute()\'s inner kill site',
+            );
+            self::assertLessThan(2.4, $elapsed, "the boot must be killed at its 1s deadline -- took {$elapsed}s");
+
+            $runner = new class(1) extends RectorRunner {
+                protected function bootDeadlineNs(): ?int
+                {
+                    return null;
+                }
+            };
+            try {
+                $runner->run(['rector', 'process']);
+                self::fail('expected the zero-rule config to refuse once booted');
+            } catch (\RuntimeException $e) {
+                self::assertStringContainsString('registers no rules', $e->getMessage());
+            }
+            self::assertTrue($runner->isWarm(), 'an unbounded bootDeadlineNs() must let the same slow boot finish');
+            $runner->reboot();
         } finally {
             chdir($previousCwd);
             $_SERVER['argv'] = $previousArgv;

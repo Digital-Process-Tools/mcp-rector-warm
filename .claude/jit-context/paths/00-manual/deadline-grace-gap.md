@@ -49,3 +49,13 @@ answers, so the outer backstop is guaranteed rather than merely likely to fire),
 wedge tests branch their `isWarm()` assertion on which kill site's message came back. This still
 does not touch the 5s value itself -- it is still a guess, not a derived bound, and the paragraph
 above still applies in full to anyone touching either deadline.
+
+**#113: there is a THIRD kill site, and it used to borrow the outer backstop's message.** `boot()`'s
+handshake read goes through the same `readExactly()` on the bare, ungraced `callDeadlineNs()`, and
+rethrew readExactly()'s "... waiting on the warm worker" text -- so a slow container build (~0.9s
+idle, 1.3-1.6s under CPU load inside phpunit) looked like the outer backstop firing at ~1s. `boot()`
+now throws its own "... before the warm worker finished booting" message; keep every kill site's
+message distinct, and never let one contain another's figure ("exceeded 1s" is how the wedge tests
+recognise the inner site). A unit test that measures a CALL against a short `--call-timeout` must
+boot its worker outside that budget: override `bootDeadlineNs()` to null and warm the worker before
+starting the clock (`testWedgedCallIsKilledAtTheDeadlineAndTheWorkerStaysUsable`).
