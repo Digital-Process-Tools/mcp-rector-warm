@@ -578,17 +578,38 @@ final class RectorRunnerTest extends TestCase
                 . '(this is the exact regression #58 reports: PR #57 removed the old upper bound)',
             );
 
-            self::assertTrue(
-                $runner->isWarm(),
-                'only the wedged GRANDCHILD should be killed -- the worker itself must survive a single '
-                . 'timed-out call so the very next one does not need a fresh boot',
-            );
+            // #87: which assertion is correct here depends on WHICH kill site fired,
+            // not one that holds unconditionally -- see
+            // testRunForkedOuterBackstopKillsTheWholeWorkerNotOnlyTheGrandchild above
+            // for the deterministic pin of the mechanism. The inner site kills only
+            // the forked grandchild (worker survives); the outer/daemon-side backstop
+            // also SIGKILLs and forgets the WHOLE worker (RectorRunner.php's
+            // runForked() catch block), so isWarm() is false there, and the very next
+            // call must self-heal into a brand-new worker rather than reuse this one.
+            if (str_contains($message, 'exceeded 1s')) {
+                self::assertTrue(
+                    $runner->isWarm(),
+                    'only the wedged GRANDCHILD should be killed -- the worker itself must survive a single '
+                    . 'timed-out call so the very next one does not need a fresh boot',
+                );
 
-            // The worker must still be genuinely usable, not merely "isWarm()
-            // reports true" -- a real call through it must succeed.
-            $result = $runner->run(['rector', 'process']);
-            self::assertSame(0, $result['exit_code']);
-            self::assertTrue($result['warm_boot'], 'the SAME worker must have served this call, not a fresh boot');
+                // The worker must still be genuinely usable, not merely "isWarm()
+                // reports true" -- a real call through it must succeed.
+                $result = $runner->run(['rector', 'process']);
+                self::assertSame(0, $result['exit_code']);
+                self::assertTrue($result['warm_boot'], 'the SAME worker must have served this call, not a fresh boot');
+            } else {
+                self::assertFalse(
+                    $runner->isWarm(),
+                    'the outer backstop kills and forgets the WHOLE worker, not only the grandchild -- #87',
+                );
+
+                // Self-heal: the next call boots a brand-new worker instead of
+                // hanging or repeating the failure forever.
+                $result = $runner->run(['rector', 'process']);
+                self::assertSame(0, $result['exit_code']);
+                self::assertFalse($result['warm_boot'], 'the old worker was killed -- this call must boot a fresh one');
+            }
         } finally {
             chdir($previousCwd);
             $_SERVER['argv'] = $previousArgv;
@@ -656,6 +677,127 @@ final class RectorRunnerTest extends TestCase
             }
         } finally {
             fclose($server);
+        }
+    }
+
+    /**
+     * #87: the daemon-side backstop (runForked()'s own deadline, callDeadlineNs()
+     * with RUN_FORKED_DEADLINE_GRACE_SECONDS added on top) firing is not merely "a
+     * different kill message" from the inner (worker-side) site -- its catch block
+     * also SIGKILLs and reaps the WHOLE worker (killAndReap($this->workerPid)) and
+     * forgets it (forgetDeadWorker(), which nulls workerPid), not only the forked
+     * grandchild the inner site kills. isWarm() therefore goes FALSE once this path
+     * fires. #87 reports exactly this: the two wedge tests below used to assert
+     * isWarm() TRUE unconditionally after a kill, regardless of which site actually
+     * fired, and one real run under CPU contention hit the outer site and flaked.
+     *
+     * Reached here deterministically -- a real, booted worker, but its daemon-side
+     * socket swapped for a loopback nobody ever answers, so the outer backstop is
+     * GUARANTEED to fire (not merely likely to win a race against real contention).
+     * This costs the same ~6s (1s callTimeoutSeconds + RUN_FORKED_DEADLINE_GRACE_
+     * SECONDS) as a real wedge, but never depends on CPU contention to reproduce --
+     * the "what would settle it" reflection technique #87 asks for, applied to
+     * runForked()'s side effect rather than only readExactly()'s message (already
+     * covered by testReadExactlyOuterBackstopMessageSharesPatternButNotFigureWith
+     * InnerKillSite above).
+     */
+    public function testRunForkedOuterBackstopKillsTheWholeWorkerNotOnlyTheGrandchild(): void
+    {
+        if (!\function_exists('posix_kill') || !\function_exists('pcntl_fork')) {
+            self::markTestSkipped('posix_kill/pcntl_fork unavailable in this environment');
+        }
+
+        $tmp = sys_get_temp_dir() . '/rector-runner-outer-backstop-test-' . bin2hex(random_bytes(8));
+        mkdir($tmp);
+        file_put_contents(
+            $tmp . '/rector.php',
+            "<?php\n\ndeclare(strict_types=1);\n\nuse Rector\\Config\\RectorConfig;\n\nreturn RectorConfig::configure();\n",
+        );
+        $previousCwd = getcwd();
+        $previousArgv = $_SERVER['argv'] ?? ['rector'];
+        $originalSocket = null;
+
+        try {
+            chdir($tmp);
+            $_SERVER['argv'] = ['rector'];
+
+            $runner = new RectorRunner(1);
+            // A real boot(): the zero-rule config above makes the analysis itself
+            // refuse ("registers no rules") one step later, in execute() --
+            // workerPid/workerSocket are already set by the time this throws, same
+            // as testWedgedBootIsKilledAtTheDeadline's fastConfig call.
+            try {
+                $runner->run(['rector', 'process']);
+                self::fail('expected the zero-rule config to refuse, same as any other call against it');
+            } catch (\RuntimeException $e) {
+                self::assertStringContainsString('registers no rules', $e->getMessage());
+            }
+            self::assertTrue($runner->isWarm(), 'a real worker must be booted before this test can swap its socket');
+
+            $workerSocketProperty = new \ReflectionProperty(RectorRunner::class, 'workerSocket');
+            $workerSocketProperty->setAccessible(true);
+            $originalSocket = $workerSocketProperty->getValue($runner);
+
+            // A loopback TCP socket nobody ever writes to (same technique as
+            // testReadExactlyOuterBackstopMessageSharesPatternButNotFigureWithInner
+            // KillSite above): stand-in for the worker<->daemon socket, so
+            // runForked()'s own read never gets a reply and its deadline is
+            // guaranteed to expire, instead of merely being likely to under real
+            // contention.
+            $server = stream_socket_server('tcp://127.0.0.1:0');
+            self::assertNotFalse($server, 'could not open a loopback TCP server for this test');
+
+            try {
+                $address = stream_socket_get_name($server, false);
+                $client = stream_socket_client("tcp://{$address}", $errno, $errstr, 1.0);
+                self::assertNotFalse($client, "could not connect to the loopback server: {$errstr}");
+
+                $workerSocketProperty->setValue($runner, $client);
+
+                $method = new \ReflectionMethod(RectorRunner::class, 'runForked');
+                $method->setAccessible(true);
+
+                $start = microtime(true);
+                try {
+                    $method->invoke($runner, ['rector', 'process'], true, true);
+                    self::fail('expected runForked() to throw once its own deadline expired');
+                } catch (\RuntimeException $e) {
+                    self::assertStringContainsString('rector call exceeded', $e->getMessage());
+                    self::assertStringContainsString('--call-timeout', $e->getMessage());
+                    self::assertStringNotContainsString(
+                        'exceeded 1s',
+                        $e->getMessage(),
+                        'this must be the outer/daemon-side backstop, not the inner (worker-side) kill site',
+                    );
+                }
+                $elapsed = microtime(true) - $start;
+                self::assertGreaterThanOrEqual(
+                    4.5,
+                    $elapsed,
+                    "the outer backstop must wait its own grace period, not trip early -- took only {$elapsed}s",
+                );
+                self::assertLessThan(15.0, $elapsed, "the outer backstop must still trip, not hang -- took {$elapsed}s");
+            } finally {
+                fclose($server);
+            }
+
+            // The point of this test: NOT merely a different message, but the WHOLE
+            // worker being killed and forgotten as a side effect -- exactly what
+            // #87's flake exposed the two wedge tests below getting wrong (an
+            // unconditional assertTrue()).
+            self::assertFalse(
+                $runner->isWarm(),
+                'the outer backstop kills and forgets the whole worker (killAndReap() + forgetDeadWorker()), '
+                . 'not only a forked grandchild -- #87',
+            );
+        } finally {
+            if (\is_resource($originalSocket)) {
+                @fclose($originalSocket);
+            }
+            chdir($previousCwd);
+            $_SERVER['argv'] = $previousArgv;
+            unlink($tmp . '/rector.php');
+            rmdir($tmp);
         }
     }
 
@@ -760,14 +902,27 @@ final class RectorRunnerTest extends TestCase
                 $elapsed,
                 "a dryRun:true call must still be killed at roughly its 1s deadline -- took {$elapsed}s",
             );
-            self::assertTrue($runner->isWarm(), 'only the wedged grandchild is killed; the worker itself survives');
+            // #87: same branching as the sibling wedge test above -- the outer
+            // backstop kills and forgets the WHOLE worker (isWarm() false), not
+            // only the grandchild the inner site kills. See
+            // testRunForkedOuterBackstopKillsTheWholeWorkerNotOnlyTheGrandchild for
+            // the deterministic pin.
+            if (str_contains($message, 'exceeded 1s')) {
+                self::assertTrue($runner->isWarm(), 'only the wedged grandchild is killed; the worker itself survives');
+            } else {
+                self::assertFalse(
+                    $runner->isWarm(),
+                    'the outer backstop kills and forgets the WHOLE worker, not only the grandchild -- #87',
+                );
+            }
 
             // (c): no zombie left behind under THIS process after the
             // dryRun:true kill above -- killAndReap()'s own reap must have
-            // run. A real call through the same (still-warm) worker
-            // succeeding proves it is not merely "isWarm() says true" but
-            // genuinely usable, and this process's own descendant list must
-            // show no zombie/defunct entry.
+            // run. A real call through the CURRENT worker succeeding proves it
+            // is not merely "isWarm() says true" but genuinely usable -- the
+            // SAME worker when the inner site fired, a freshly self-healed one
+            // when the outer backstop killed the old one -- and this process's
+            // own descendant list must show no zombie/defunct entry either way.
             $result = $runner->run(['rector', 'process']);
             self::assertSame(0, $result['exit_code']);
             // Rooted at the WORKER's own pid, not this test process's pid:
