@@ -60,7 +60,7 @@ final class ServerStdioTest extends TestCase
      * CI's `no-pcntl` job does not have this gap: shivammathur/setup-php's
      * `ini-values` rewrites the actual loaded php.ini, so every php invocation in
      * that job — including the subprocess — has pcntl disabled, and both tests pass
-     * there (confirmed: green as of 1b837e0, and reproduced locally with the two
+     * there (confirmed: green as of 1b837e0, and reproduced locally with the three
      * disable_functions entries applied via PHPRC to a real php.ini instead of `-d`,
      * which propagates to the subprocess exactly like CI's setup-php mechanism).
      * To actually exercise this path locally, disable the three functions in a real

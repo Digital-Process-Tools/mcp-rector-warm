@@ -8,7 +8,7 @@ description: >
   tests/Unit/RectorRunnerTest.php::testWedgedBootIsKilledAtTheDeadline, which never
   snapshots a real OS process tree. This scenario is what actually drives that
   boot-path kill through the harness's real ps-based zombie check (#48/#80).
-oracle: false  # the wedged call deliberately diverges from a cold 'rector process',
+oracle: false  # the wedged boot deliberately diverges from a cold 'rector process',
                # which has no such deadline and would simply finish it -- see the
                # 'call_timeout' key's own doc comment in test_scenarios.py.
 call_timeout: 5
