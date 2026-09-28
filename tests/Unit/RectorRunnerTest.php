@@ -165,30 +165,53 @@ final class RectorRunnerTest extends TestCase
     }
 
     /**
-     * Pins rmdirWithRetry()'s own concrete default budget: 12 attempts,
-     * starting at 150ms and multiplying by 1.5 up to a 1s cap. Computed
-     * directly from the same defaults documented on rmdirWithRetry()'s
-     * docblock, via the same $sleep-spy technique as
-     * testRetryUntilTrueBackoffGrowsThenCaps() above -- if either drifts
-     * out of sync with the other, this test (or that one) fails rather than
-     * both silently going stale together. Runs instantly (no real sleeping)
-     * despite the ~8s the real budget represents.
+     * Pins rmdirWithRetry()'s own concrete default budget by reading its
+     * actual default parameter values via reflection -- not by re-typing
+     * them as separate literals, which would silently stop pinning
+     * anything the moment rmdirWithRetry()'s own defaults changed without
+     * this test being touched (caught in self-review: an earlier version
+     * of this test hardcoded 12/150_000/1.5/1_000_000 itself, so it could
+     * never fail if those defaults drifted). Feeds the reflected defaults
+     * into retryUntilTrue() with the same $sleep-spy technique as
+     * testRetryUntilTrueBackoffGrowsThenCaps() above and asserts the
+     * resulting ~8s budget. Runs instantly (no real sleeping) despite the
+     * real-world duration it represents.
      */
     public function testRmdirWithRetryDefaultBudgetTotalsAroundEightSeconds(): void
     {
+        $defaults = [];
+        foreach ((new \ReflectionMethod(self::class, 'rmdirWithRetry'))->getParameters() as $parameter) {
+            if ($parameter->getName() !== 'dir') {
+                $defaults[$parameter->getName()] = $parameter->getDefaultValue();
+            }
+        }
+        self::assertSame(
+            ['attempts', 'initialDelayMicroseconds', 'backoffMultiplier', 'maxDelayMicroseconds'],
+            array_keys($defaults),
+            'rmdirWithRetry() must keep this exact parameter shape for the reflection below to read the right defaults',
+        );
+
         $delays = [];
         self::retryUntilTrue(
             static fn (bool $isFinalAttempt): bool => false,
-            12,
-            150_000,
-            1.5,
-            1_000_000,
+            $defaults['attempts'],
+            $defaults['initialDelayMicroseconds'],
+            $defaults['backoffMultiplier'],
+            $defaults['maxDelayMicroseconds'],
             static function (int $delayMicroseconds) use (&$delays): void {
                 $delays[] = $delayMicroseconds;
             },
         );
-        self::assertCount(11, $delays, 'must sleep once between each of the 12 attempts, never after the last');
-        self::assertSame(1_000_000, $delays[array_key_last($delays)], 'must have reached the cap well before the last attempt');
+        self::assertCount(
+            $defaults['attempts'] - 1,
+            $delays,
+            'must sleep once between each attempt, never after the last',
+        );
+        self::assertSame(
+            $defaults['maxDelayMicroseconds'],
+            $delays[array_key_last($delays)],
+            'must have reached the cap well before the last attempt',
+        );
         self::assertGreaterThan(7_000_000, array_sum($delays), 'total budget must give real headroom over the original ~900ms');
         self::assertLessThan(10_000_000, array_sum($delays), 'total budget must stay inside the requested 5-10s range');
     }
