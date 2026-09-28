@@ -267,18 +267,28 @@ final class LspServer
      */
     private static function rangesOverlap(array $a, array $b): bool
     {
-        if ($a['start']['line'] === $a['end']['line']) {
-            // $a is a zero-width (cursor) request range -- a real editor's
-            // "no selection, act on this line" codeAction request. Ordinary
-            // half-open interval overlap (s1 < e2 && s2 < e1) treats an empty
-            // interval as never overlapping anything, which silently drops
-            // the quick fix whenever the cursor sits exactly on the fix's
-            // FIRST line (the most common place to invoke it from). Test
-            // point-in-half-open-range instead: [b.start, b.end).
-            return $a['start']['line'] >= $b['start']['line'] && $a['start']['line'] < $b['end']['line'];
-        }
+        // Ordinary half-open interval overlap (s1 < e2 && s2 < e1) treats an
+        // empty (start === end) line span as covering nothing, which drops
+        // the quick fix whenever either side is zero-width: a cursor's "no
+        // selection, act on this line" codeAction request ($a), or a
+        // pure-insertion hunk's diagnostic range ($b, e.g. `66:0-66:0` for a
+        // rector that only adds a blank line -- #93). Treat a zero-width
+        // range as covering its own line by widening its exclusive end by
+        // one line before comparing.
+        $aEnd = self::exclusiveEndLine($a);
+        $bEnd = self::exclusiveEndLine($b);
 
-        return $a['start']['line'] < $b['end']['line'] && $b['start']['line'] < $a['end']['line'];
+        return $a['start']['line'] < $bEnd && $b['start']['line'] < $aEnd;
+    }
+
+    /**
+     * @param array{start: array{line:int,character:int}, end: array{line:int,character:int}} $range
+     */
+    private static function exclusiveEndLine(array $range): int
+    {
+        return $range['start']['line'] === $range['end']['line']
+            ? $range['start']['line'] + 1
+            : $range['end']['line'];
     }
 
     /**
