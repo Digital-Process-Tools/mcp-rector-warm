@@ -194,10 +194,22 @@ final class RectorDiffParser
         // rule fires on two separate hunks but `changes[]` reports only one
         // line for it. When exactly one hunk is unattributed and exactly
         // one applied rule is unaccounted for anywhere, that pairing is
-        // unambiguous. Two-or-more of either side stays generic: assigning
-        // a rule to a hunk it cannot be proven to have produced would break
+        // attributed. Two-or-more of either side stays generic: assigning a
+        // rule to a hunk it cannot be proven to have produced would break
         // the "never attribute a rule that did not produce the hunk"
         // invariant the E2E already checks.
+        //
+        // Self-review note (independent Explore review pass): "exactly one
+        // of each" narrows the ambiguity a lot but does not eliminate it in
+        // every theoretical case -- a rule that itself produced TWO hunks
+        // (with `changes[]` reporting only one of them) combined with a
+        // second, unrelated rule that produced ZERO hunks of its own is
+        // indistinguishable, from this function's own inputs alone, from
+        // the genuinely-unambiguous one-hunk/one-rule case this guard is
+        // for. Narrowing further (e.g. cross-checking against hunk COUNT
+        // per rule, which Rector's JSON report does not currently expose
+        // per-hunk) is a real follow-up, tracked as a trap.d fragment
+        // rather than attempted here.
         $attributed = [];
         foreach ($rectorsByHunk as $matched) {
             foreach ($matched as $rector) {

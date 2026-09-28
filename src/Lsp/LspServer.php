@@ -183,7 +183,13 @@ final class LspServer
         $path = self::uriToPath($uri);
         $basename = basename(str_replace('\\', '/', $path));
 
-        return $basename === 'rector.php' || $basename === 'composer.lock';
+        // oss:auditor self-review finding: a case-SENSITIVE compare here
+        // silently misses a differently-cased URI on a case-insensitive
+        // filesystem -- Windows, and macOS by default, the two platforms
+        // this whole issue is about -- returning [] identically to a
+        // genuinely unrelated file, an absence the caller cannot tell from
+        // "nothing to do".
+        return strcasecmp($basename, 'rector.php') === 0 || strcasecmp($basename, 'composer.lock') === 0;
     }
 
     /**
@@ -404,8 +410,21 @@ final class LspServer
             $path = substr($path, 1);
         }
 
-        if (is_string($host) && $host !== '' && strcasecmp($host, 'localhost') !== 0) {
-            return '\\\\' . $host . str_replace('/', '\\', $path);
+        if (is_string($host) && $host !== '') {
+            // Self-review finding (#99 independent review pass):
+            // `file://c:/foo/bar.php` -- a non-conformant but real
+            // two-slash Windows drive-letter shape (RFC 8089 Appendix E)
+            // -- puts the single-letter drive in parse_url()'s HOST, not
+            // PATH. A one-character host is a drive letter, never a real
+            // UNC server name, so it must be rebuilt as a drive path
+            // rather than folded into a `\\host\...` UNC prefix.
+            if (preg_match('#^[A-Za-z]$#', $host) === 1) {
+                return $host . ':' . $path;
+            }
+
+            if (strcasecmp($host, 'localhost') !== 0) {
+                return '\\\\' . $host . str_replace('/', '\\', $path);
+            }
         }
 
         return $path;

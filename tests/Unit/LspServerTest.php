@@ -197,6 +197,41 @@ final class LspServerTest extends TestCase
         self::assertSame('\\\\server\\share\\A.php', $seen);
     }
 
+    public function testDidOpenOnATwoSlashDriveLetterUriIsNotTreatedAsUnc(): void
+    {
+        // Self-review finding (independent Explore review pass): #99's UNC
+        // fix folded ANY non-empty, non-localhost host into a `\\host\...`
+        // UNC prefix -- but `file://c:/foo/bar.php` (a non-conformant but
+        // real two-slash Windows drive-letter shape, RFC 8089 Appendix E)
+        // puts the single-letter drive itself in parse_url()'s HOST, not
+        // PATH. Folding that in as a UNC host produced the bogus
+        // `\\c\foo\bar.php` instead of the intended `c:/foo/bar.php`. A
+        // single-character host is a drive letter, never a real UNC server
+        // name.
+        $seen = null;
+        $capturing = new class ($seen) implements DiagnosticsSource {
+            public function __construct(private mixed &$seen)
+            {
+            }
+
+            public function diagnose(string $absolutePath): array
+            {
+                $this->seen = $absolutePath;
+
+                return ['fixes' => []];
+            }
+        };
+
+        $server = new LspServer('1.0.0', $capturing);
+        $server->handle([
+            'jsonrpc' => '2.0',
+            'method' => 'textDocument/didOpen',
+            'params' => ['textDocument' => ['uri' => 'file://c:/foo/bar.php', 'version' => 1]],
+        ]);
+
+        self::assertSame('c:/foo/bar.php', $seen);
+    }
+
     public function testDidOpenOnALocalhostAuthorityIsNotTreatedAsUnc(): void
     {
         // Negative control for the case above: `file://localhost/...` is
@@ -297,6 +332,34 @@ final class LspServerTest extends TestCase
             'jsonrpc' => '2.0',
             'method' => 'workspace/didChangeWatchedFiles',
             'params' => ['changes' => [['uri' => 'file:///tmp/composer.lock', 'type' => 2]]],
+        ]);
+
+        self::assertCount(1, $responses);
+        self::assertSame('file:///tmp/A.php', $responses[0]['params']['uri']);
+    }
+
+    public function testWatchedRectorConfigChangeIsCaseInsensitiveInTheBasename(): void
+    {
+        // oss:auditor self-review finding: the basename comparison used
+        // `===`, which is case-sensitive -- on a case-insensitive
+        // filesystem (the default on Windows and on macOS, the two
+        // platforms this whole issue is about) a client could report
+        // `Rector.php`/`Composer.Lock`'s real on-disk casing and the guard
+        // would silently miss it, returning [] identically to the
+        // genuinely-unrelated-file case (testWatchedFileChangeTo...
+        // below) -- an absence the caller cannot tell from "nothing to do".
+        $fixes = [self::fix(0, 1, "x\n", 'AnyRector')];
+        $server = new LspServer('1.0.0', self::fakeSource($fixes));
+        $server->handle([
+            'jsonrpc' => '2.0',
+            'method' => 'textDocument/didOpen',
+            'params' => ['textDocument' => ['uri' => 'file:///tmp/A.php', 'version' => 1]],
+        ]);
+
+        $responses = $server->handle([
+            'jsonrpc' => '2.0',
+            'method' => 'workspace/didChangeWatchedFiles',
+            'params' => ['changes' => [['uri' => 'file:///tmp/Rector.PHP', 'type' => 2]]],
         ]);
 
         self::assertCount(1, $responses);
