@@ -545,8 +545,32 @@ final class RectorRunnerTest extends TestCase
                 // roughly on time -- checked below -- is).
                 self::assertStringContainsString('rector call exceeded', $e->getMessage());
                 self::assertStringContainsString('--call-timeout', $e->getMessage());
+                $message = $e->getMessage();
             }
             $elapsed = microtime(true) - $start;
+            // #81 review: tie the timing bound to WHICH kill site's message
+            // came back, rather than one bound loose enough to accept both --
+            // a 15s ceiling alone would also pass if forkAndExecute()'s inner
+            // deadline check silently stopped firing at all (every call then
+            // falling through to the ~6s outer backstop, which still reads as
+            // "killed, and message is one of the two valid ones, and under
+            // 15s"). The inner site fires at ~1s; the outer backstop only
+            // after the extra RUN_FORKED_DEADLINE_GRACE_SECONDS (5s) on top.
+            if (str_contains($message, 'exceeded 1s')) {
+                self::assertLessThan(
+                    3.0,
+                    $elapsed,
+                    "the inner kill site fired ('{$message}') but took {$elapsed}s -- it should be "
+                    . 'close to the 1s deadline, not near the outer backstop\'s ~6s',
+                );
+            } else {
+                self::assertGreaterThanOrEqual(
+                    4.5,
+                    $elapsed,
+                    "the outer backstop fired ('{$message}') after only {$elapsed}s -- it should not "
+                    . 'trip before the inner kill site has had its own chance to',
+                );
+            }
             self::assertLessThan(
                 15.0,
                 $elapsed,
@@ -596,29 +620,41 @@ final class RectorRunnerTest extends TestCase
         // not support), and its read reliably times out.
         $server = stream_socket_server('tcp://127.0.0.1:0');
         self::assertNotFalse($server, 'could not open a loopback TCP server for this test');
-        $address = stream_socket_get_name($server, false);
-        $client = stream_socket_client("tcp://{$address}", $errno, $errstr, 1.0);
-        self::assertNotFalse($client, "could not connect to the loopback server: {$errstr}");
-        stream_set_timeout($client, 0, 100_000);
 
-        $method = new \ReflectionMethod(RectorRunner::class, 'readExactly');
-        $method->setAccessible(true);
-
+        // $server is already a live resource once the line above passes, so
+        // everything from here on -- including a failed assertNotFalse($client,
+        // ...) -- must close it. A review of this test (#81) found the
+        // original version leaked $server's socket when $client failed to open
+        // (assertNotFalse() throws past a try/finally that starts after it).
         try {
-            // Deadline already in the past: the very first timed-out read hits it.
-            $method->invoke($runner, $client, 4, \hrtime(true) - 1_000_000_000);
-            self::fail('expected readExactly() to throw once its deadline had already passed');
-        } catch (RectorCallTimeoutException $e) {
-            self::assertStringContainsString('rector call exceeded', $e->getMessage());
-            self::assertStringContainsString('--call-timeout', $e->getMessage());
-            self::assertStringNotContainsString(
-                'exceeded 1s',
-                $e->getMessage(),
-                'this outer/backstop message never carries the inner kill site\'s numeric figure -- '
-                . 'that difference is exactly what #81 flaked on',
-            );
+            $address = stream_socket_get_name($server, false);
+            $client = stream_socket_client("tcp://{$address}", $errno, $errstr, 1.0);
+            self::assertNotFalse($client, "could not connect to the loopback server: {$errstr}");
+
+            try {
+                stream_set_timeout($client, 0, 100_000);
+
+                $method = new \ReflectionMethod(RectorRunner::class, 'readExactly');
+                $method->setAccessible(true);
+
+                // Deadline already in the past: the very first timed-out read hits it.
+                $method->invoke($runner, $client, 4, \hrtime(true) - 1_000_000_000);
+                self::fail('expected readExactly() to throw once its deadline had already passed');
+            } catch (RectorCallTimeoutException $e) {
+                self::assertStringContainsString('rector call exceeded', $e->getMessage());
+                self::assertStringContainsString('--call-timeout', $e->getMessage());
+                self::assertStringNotContainsString(
+                    'exceeded 1s',
+                    $e->getMessage(),
+                    'this outer/backstop message never carries the inner kill site\'s numeric figure -- '
+                    . 'that difference is exactly what #81 flaked on',
+                );
+            } finally {
+                if (isset($client) && $client !== false) {
+                    fclose($client);
+                }
+            }
         } finally {
-            fclose($client);
             fclose($server);
         }
     }
@@ -698,8 +734,27 @@ final class RectorRunnerTest extends TestCase
                 // above -- either kill site may have fired under contention.
                 self::assertStringContainsString('rector call exceeded', $e->getMessage());
                 self::assertStringContainsString('--call-timeout', $e->getMessage());
+                $message = $e->getMessage();
             }
             $elapsed = microtime(true) - $start;
+            // #81 review: same per-message timing bound as the sibling wedge
+            // test above, so a 15s-only ceiling cannot pass a permanently
+            // disabled inner kill site (see the comment there for why).
+            if (str_contains($message, 'exceeded 1s')) {
+                self::assertLessThan(
+                    3.0,
+                    $elapsed,
+                    "the inner kill site fired ('{$message}') but took {$elapsed}s -- it should be "
+                    . 'close to the 1s deadline, not near the outer backstop\'s ~6s',
+                );
+            } else {
+                self::assertGreaterThanOrEqual(
+                    4.5,
+                    $elapsed,
+                    "the outer backstop fired ('{$message}') after only {$elapsed}s -- it should not "
+                    . 'trip before the inner kill site has had its own chance to',
+                );
+            }
             self::assertLessThan(
                 15.0,
                 $elapsed,
