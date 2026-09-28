@@ -50,6 +50,10 @@ jobs:
           php-version: ${{ matrix.php }}
           coverage: none
           tools: composer:v2
+          # #97 CI fix: mcp/sdk requires ext-fileinfo. ubuntu-latest/
+          # macos-latest ship it enabled by default; windows-latest does
+          # not, so `composer install` failed there before any test ran.
+          extensions: fileinfo
 
       # #97 self-review finding: ~/.composer/cache is not composer's real
       # cache directory on Windows (typically under %LOCALAPPDATA%), so a
@@ -157,6 +161,9 @@ jobs:
           php-version: '8.3'
           coverage: none
           tools: composer:v2
+          # Same fix as the tests job above (#97): fileinfo is not enabled
+          # by default on windows-latest, unlike ubuntu-latest/macos-latest.
+          extensions: fileinfo
 
       - name: Setup Python
         uses: actions/setup-python@v7
