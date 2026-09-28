@@ -53,7 +53,10 @@ jobs:
           # #97 CI fix: mcp/sdk requires ext-fileinfo. ubuntu-latest/
           # macos-latest ship it enabled by default; windows-latest does
           # not, so `composer install` failed there before any test ran.
-          extensions: fileinfo
+          # intl/mbstring: the Rector cold path calls Normalizer (ext-intl);
+          # windows-latest ships intl disabled, which failed the
+          # cold-stdout-console-write-no-pcntl E2E scenario there.
+          extensions: fileinfo, intl, mbstring
 
       # #97 self-review finding: ~/.composer/cache is not composer's real
       # cache directory on Windows (typically under %LOCALAPPDATA%), so a
@@ -171,7 +174,8 @@ jobs:
           tools: composer:v2
           # Same fix as the tests job above (#97): fileinfo is not enabled
           # by default on windows-latest, unlike ubuntu-latest/macos-latest.
-          extensions: fileinfo
+          # intl/mbstring: same reason as the tests job above (Normalizer).
+          extensions: fileinfo, intl, mbstring
 
       - name: Setup Python
         uses: actions/setup-python@v7
