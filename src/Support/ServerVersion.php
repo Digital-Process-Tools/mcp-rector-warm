@@ -46,7 +46,7 @@ final class ServerVersion
 
     private static function fromInstalledVersions(): ?string
     {
-        if (!class_exists(\Composer\InstalledVersions::class, false)) {
+        if (!class_exists(\Composer\InstalledVersions::class)) {
             return null;
         }
 
