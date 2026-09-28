@@ -305,12 +305,26 @@ class RectorRunner implements RunnerInterface
     private function killAndReap(int $pid): void
     {
         $status = 0;
-        if (\function_exists('posix_kill')) {
+        if ($this->hasPosixKill()) {
             @\posix_kill($pid, \SIGKILL);
             \pcntl_waitpid($pid, $status);
         } else {
             \pcntl_waitpid($pid, $status, \WNOHANG);
         }
+    }
+
+    /**
+     * #71: extracted so tests can force killAndReap()'s WNOHANG branch (pcntl
+     * present, posix absent) independent of what this environment actually has
+     * installed -- the same reason canFork() below exists as its own overridable
+     * method rather than an inline function_exists() check. No CI leg exercises
+     * that specific combination (the no-pcntl job disables pcntl itself, which
+     * disables both branches' precondition), so a test is the only coverage
+     * this repo can have for it.
+     */
+    protected function hasPosixKill(): bool
+    {
+        return \function_exists('posix_kill');
     }
 
     /**
@@ -405,7 +419,7 @@ class RectorRunner implements RunnerInterface
         try {
             $this->bootInPlace();
         } catch (\Throwable $e) {
-            $this->writeFrame($socket, (string) \json_encode([
+            $this->writeFrame($socket, $this->encodeHandshakeFrame([
                 'ok' => false,
                 'error' => $e->getMessage(),
                 'error_class' => $e::class,
@@ -413,7 +427,7 @@ class RectorRunner implements RunnerInterface
             \fclose($socket);
             exit(1);
         }
-        $this->writeFrame($socket, (string) \json_encode([
+        $this->writeFrame($socket, $this->encodeHandshakeFrame([
             'ok' => true,
             'bootstrap_files' => $this->bootstrapFileHashes,
         ]));
@@ -462,7 +476,15 @@ class RectorRunner implements RunnerInterface
     protected function runForked(array $argv, bool $warmBoot, bool $dryRun): array
     {
         \assert($this->workerSocket !== null);
-        $payload = (string) \json_encode(['argv' => $argv, 'warm_boot' => $warmBoot, 'dry_run' => $dryRun]);
+        // #74 follow-up: same missing-flag pattern as the boot handshake frames
+        // this file's own encodeHandshakeFrame()/encodeForkResult() guard
+        // against -- an argv element that is not valid UTF-8 would otherwise
+        // make json_encode() return false here, silently sending an empty
+        // request frame to the worker instead of a real one.
+        $payload = (string) \json_encode(
+            ['argv' => $argv, 'warm_boot' => $warmBoot, 'dry_run' => $dryRun],
+            \JSON_INVALID_UTF8_SUBSTITUTE,
+        );
         // Same short-per-read-timeout rationale as forkAndExecute()'s wait loop
         // (#58): only touched when a deadline is actually in play, so the
         // unlimited case ($callTimeoutSeconds == 0) -- or a dryRun:false call,
@@ -735,12 +757,17 @@ class RectorRunner implements RunnerInterface
                 throw new \RuntimeException('Could not spawn a cold rector subprocess (no-pcntl fallback, #31).');
             }
 
-            $request = (string) \json_encode([
-                'daemon_argv' => $_SERVER['argv'] ?? [],
-                'call_argv' => $argv,
-                'cwd' => \getcwd(),
-                'result_file' => $resultFile,
-            ]);
+            // #74 follow-up: same missing-flag pattern as the boot handshake
+            // frames -- see encodeHandshakeFrame().
+            $request = (string) \json_encode(
+                [
+                    'daemon_argv' => $_SERVER['argv'] ?? [],
+                    'call_argv' => $argv,
+                    'cwd' => \getcwd(),
+                    'result_file' => $resultFile,
+                ],
+                \JSON_INVALID_UTF8_SUBSTITUTE,
+            );
             \fwrite($pipes[0], $request);
             \fclose($pipes[0]);
 
@@ -761,7 +788,18 @@ class RectorRunner implements RunnerInterface
                 while (true) {
                     $procStatus = \proc_get_status($process);
                     if ($procStatus === false || !$procStatus['running']) {
-                        $exitCode = \proc_close($process);
+                        // #73: proc_get_status()'s exitcode field is only valid the
+                        // FIRST time it is read after the child has exited -- exactly
+                        // this call, since the loop breaks right here -- and on POSIX
+                        // PHP < 8.3, proc_close() returns -1 once that exit status has
+                        // already been consumed by an earlier proc_get_status() call
+                        // (PHP's own long-standing proc_close()/proc_get_status()
+                        // interaction, fixed upstream in PHP 8.3). Prefer the real
+                        // code observed here; proc_close()'s own return value is only
+                        // a fallback for the $procStatus === false case, where no
+                        // exit code was ever observed at all.
+                        $closeExitCode = \proc_close($process);
+                        $exitCode = $procStatus !== false ? $procStatus['exitcode'] : $closeExitCode;
                         break;
                     }
                     if (\hrtime(true) >= $deadline) {
@@ -846,6 +884,34 @@ class RectorRunner implements RunnerInterface
         ]);
 
         return $fallback !== false ? $fallback : '{"error":"failed to encode the forked call result","error_class":"JsonException"}';
+    }
+
+    /**
+     * #74: boot()'s handshake frames (serveWorker()'s success AND failure frames)
+     * used plain json_encode() with no JSON_INVALID_UTF8_SUBSTITUTE flag, unlike
+     * encodeForkResult() above and the other json_encode() call sites in this
+     * file -- so a bootstrap file path (#33) that is not valid UTF-8 made
+     * json_encode() return false, cast to '', and boot() then
+     * reported a misleading "the warm worker failed to boot (exit status N)"
+     * instead of the real cause. The substitute flag makes the encode succeed
+     * (with the offending bytes replaced) instead of silently discarding the
+     * whole payload; the same fallback-to-a-real-error convention as
+     * encodeForkResult() covers the (now much narrower) case where encoding
+     * still fails outright.
+     */
+    private function encodeHandshakeFrame(array $payload): string
+    {
+        $encoded = \json_encode($payload, \JSON_INVALID_UTF8_SUBSTITUTE);
+        if ($encoded !== false) {
+            return $encoded;
+        }
+
+        $fallback = \json_encode([
+            'ok' => false,
+            'error' => 'failed to encode the warm-worker handshake frame: ' . \json_last_error_msg(),
+        ]);
+
+        return $fallback !== false ? $fallback : '{"ok":false,"error":"failed to encode the warm-worker handshake frame"}';
     }
 
     /**

@@ -382,6 +382,88 @@ final class RectorRunnerTest extends TestCase
     }
 
     /**
+     * #71: killAndReap()'s WNOHANG branch fires when pcntl is available but
+     * posix_kill is not -- nothing is signalled, so pcntl_waitpid() is called
+     * with WNOHANG (never blocks) instead of the normal blocking form. This
+     * combination has no CI leg (the no-pcntl job disables pcntl itself, which
+     * disables both branches' precondition, not just posix_kill) and no
+     * existing test isolates it -- every posix_kill-touching test above skips
+     * when posix_kill is UNAVAILABLE, the opposite combination. Forces the
+     * branch via hasPosixKill() (mirroring this file's own canFork() override
+     * pattern), independent of what this environment actually has installed.
+     *
+     * Positive control: with hasPosixKill() true first (the branch every other
+     * test already exercises), the child must actually be signalled dead --
+     * proving the posix_kill($pid, 0) liveness probe below is a real signal
+     * that can tell "alive" from "gone", not a broken check that would report
+     * the same thing regardless of what killAndReap() did.
+     */
+    public function testKillAndReapWnohangBranchWithoutPosixNeverSignalsOrBlocks(): void
+    {
+        if (!\function_exists('pcntl_fork') || !\function_exists('pcntl_waitpid') || !\function_exists('posix_kill')) {
+            self::markTestSkipped('pcntl_fork/pcntl_waitpid/posix_kill unavailable in this environment');
+        }
+
+        $runner = new class extends RectorRunner {
+            public bool $posixAvailable = true;
+
+            protected function hasPosixKill(): bool
+            {
+                return $this->posixAvailable;
+            }
+        };
+        $method = new \ReflectionMethod(RectorRunner::class, 'killAndReap');
+        $method->setAccessible(true);
+
+        // Positive control.
+        $killedPid = \pcntl_fork();
+        self::assertNotSame(-1, $killedPid, 'pcntl_fork() failed for the positive-control child');
+        if ($killedPid === 0) {
+            \sleep(30);
+            exit(0);
+        }
+        $runner->posixAvailable = true;
+        $method->invoke($runner, $killedPid);
+        self::assertFalse(
+            @\posix_kill($killedPid, 0),
+            'positive control: with posix_kill available, the child must be signalled dead and reaped',
+        );
+
+        // The branch under test: posix_kill reported unavailable, pcntl still
+        // is. Nothing must be signalled, and the WNOHANG wait must return
+        // immediately instead of blocking on a child nothing ever told to stop.
+        $wnohangPid = \pcntl_fork();
+        self::assertNotSame(-1, $wnohangPid, 'pcntl_fork() failed for the WNOHANG-branch child');
+        if ($wnohangPid === 0) {
+            \sleep(30);
+            exit(0);
+        }
+        $runner->posixAvailable = false;
+        $start = \microtime(true);
+        $method->invoke($runner, $wnohangPid);
+        $elapsed = \microtime(true) - $start;
+
+        try {
+            self::assertLessThan(
+                2.0,
+                $elapsed,
+                "WNOHANG must never block waiting for a process nothing signalled -- took {$elapsed}s",
+            );
+            self::assertTrue(
+                @\posix_kill($wnohangPid, 0),
+                'the WNOHANG branch must not signal the process: it must still be alive right after killAndReap() returns',
+            );
+        } finally {
+            // Clean up the still-alive child ourselves; killAndReap()'s own
+            // WNOHANG branch deliberately never signals it (that is the bug's
+            // own reasoned-correct behaviour, see killAndReap()'s doc comment).
+            @\posix_kill($wnohangPid, \SIGKILL);
+            $status = 0;
+            \pcntl_waitpid($wnohangPid, $status);
+        }
+    }
+
+    /**
      * #58: PR #57 fixed #32 (a socket-read timeout during a slow-but-successful
      * call must not be mistaken for the worker dying) by retrying forever on
      * stream_get_meta_data()['timed_out'], with no cap of its own -- so a
@@ -799,6 +881,99 @@ final class RectorRunnerTest extends TestCase
     }
 
     /**
+     * #73: on POSIX PHP < 8.3, proc_close() returns -1 for a process whose exit
+     * status was already consumed by an earlier proc_get_status() call -- exactly
+     * what runCold()'s deadline-poll loop does (#58) once it observes the child
+     * has stopped running. The real exit code was already sitting in
+     * $procStatus['exitcode'] at that point; discarding it in favour of
+     * proc_close()'s return value turns a real, specific exit code into an
+     * always-"-1" diagnostic. Forces canFork() false (same fixture convention as
+     * testColdCallIsKilledAtItsDeadlineWithoutPcntl above) and a rule that calls
+     * exit(7) directly -- bypassing bin/rector-cold-call.php's own try/catch
+     * entirely, so no result file is ever written and the deadline-poll branch is
+     * the one that must report the exit code -- with a deadline generous enough
+     * that the call finishes well before it fires, so this is the "child exited
+     * on its own" path, not the "child was killed at its deadline" path above.
+     */
+    public function testColdCallReportsRealExitCodeWithoutPcntl(): void
+    {
+        $tmp = sys_get_temp_dir() . '/rector-runner-cold-exitcode-test-' . bin2hex(random_bytes(8));
+        mkdir($tmp);
+        mkdir($tmp . '/src');
+        file_put_contents(
+            $tmp . '/src/Foo.php',
+            "<?php\n\ndeclare(strict_types=1);\n\nfinal class Foo\n{\n}\n",
+        );
+        file_put_contents(
+            $tmp . '/rector.php',
+            "<?php\n\n"
+            . "declare(strict_types=1);\n\n"
+            . "use PhpParser\Node;\n"
+            . "use PhpParser\Node\Stmt\Class_;\n"
+            . "use Rector\Config\RectorConfig;\n"
+            . "use Rector\Rector\AbstractRector;\n\n"
+            . "final class ExitingColdRector extends AbstractRector\n"
+            . "{\n"
+            . "    public function getNodeTypes(): array\n"
+            . "    {\n"
+            . "        return [Class_::class];\n"
+            . "    }\n\n"
+            . "    public function refactor(Node \$node): ?Node\n"
+            . "    {\n"
+            . "        exit(7);\n"
+            . "    }\n"
+            . "}\n\n"
+            . "return RectorConfig::configure()->withRules([ExitingColdRector::class]);\n",
+        );
+        $previousCwd = getcwd();
+        $previousArgv = $_SERVER['argv'] ?? ['rector'];
+
+        try {
+            chdir($tmp);
+            $_SERVER['argv'] = ['rector'];
+
+            // 30s deadline: far above what this call takes, so the deadline-poll
+            // loop's "child stopped running on its own" branch fires, never its
+            // "child hit the deadline" branch -- the branch this test is not about.
+            $runner = new class(30) extends RectorRunner {
+                protected function canFork(): bool
+                {
+                    return false;
+                }
+            };
+
+            // Not self::fail() inside this try: PHPUnit's AssertionFailedError
+            // extends RuntimeException, so a self::fail() call here would itself
+            // be swallowed by the catch below instead of failing the test.
+            $exceptionMessage = null;
+            try {
+                // --max-changes forces Rector's own non-parallel run (its
+                // default worker-process pool would otherwise catch the
+                // exit(7) as a generic "Child process error" and exit 1
+                // itself, losing the real code before it ever reaches
+                // runCold()).
+                $runner->run(['rector', 'process', '--max-changes=1', '--', $tmp . '/src/Foo.php']);
+            } catch (\RuntimeException $e) {
+                $exceptionMessage = $e->getMessage();
+            }
+            self::assertNotNull($exceptionMessage, 'expected the exit(7) rule to make the cold call report a failure');
+            self::assertStringContainsString(
+                'exit 7',
+                $exceptionMessage,
+                'the real exit code observed by proc_get_status() must be reported, '
+                . 'not proc_close()\'s own return value -- got: ' . $exceptionMessage,
+            );
+        } finally {
+            chdir($previousCwd);
+            $_SERVER['argv'] = $previousArgv;
+            unlink($tmp . '/rector.php');
+            unlink($tmp . '/src/Foo.php');
+            rmdir($tmp . '/src');
+            rmdir($tmp);
+        }
+    }
+
+    /**
      * #63: resolveBootstrapFileHashes() fails open (returns []) when
      * SimpleParameterProvider::provideArrayParameter() throws, so a boot with a
      * genuinely broken bootstrap-file resolution looks identical -- from the
@@ -851,6 +1026,44 @@ final class RectorRunnerTest extends TestCase
             '#63',
             RectorRunnerTest63CaptureFilter::$captured,
             'the catch branch must write a diagnostic line to stderr instead of failing silently: got ' . var_export(RectorRunnerTest63CaptureFilter::$captured, true),
+        );
+    }
+
+    /**
+     * #74: a non-UTF-8 bootstrap file path (#33) as a $this->bootstrapFileHashes
+     * key made the boot handshake's plain json_encode() return false -- cast to
+     * '' -- so boot() saw an empty/undecodable handshake and reported a
+     * misleading "the warm worker failed to boot (exit status N)" instead of
+     * the real cause. Exercised directly against the private
+     * encodeHandshakeFrame() helper via Reflection: a real end-to-end repro
+     * would need an actual file whose PATH is invalid UTF-8, which POSIX
+     * filesystems that reject non-UTF-8 names (APFS, this dev machine) cannot
+     * hold at all -- ext4 (this repo's ubuntu-latest CI) permits it, but this
+     * unit test pins the exact mechanism without depending on filesystem
+     * encoding enforcement either way. The invalid byte sits in an array KEY
+     * here, matching bootInPlace()'s own
+     * $this->bootstrapFileHashes[$bootstrapFile] shape (the path is the key,
+     * not the value).
+     */
+    public function testHandshakeFrameSubstitutesInvalidUtf8InsteadOfDroppingThePayload(): void
+    {
+        $runner = new RectorRunner();
+        $method = new \ReflectionMethod(RectorRunner::class, 'encodeHandshakeFrame');
+        $method->setAccessible(true);
+
+        $invalidUtf8Path = "/tmp/bad_\xE9_bootstrap.php";
+        $encoded = $method->invoke($runner, [
+            'ok' => true,
+            'bootstrap_files' => [$invalidUtf8Path => null],
+        ]);
+
+        self::assertIsString($encoded);
+        self::assertNotSame('', $encoded, 'the whole handshake payload must never be silently dropped');
+        $decoded = json_decode($encoded, true);
+        self::assertIsArray($decoded, 'the encoded frame must always be valid, decodable JSON: got ' . var_export($encoded, true));
+        self::assertTrue(
+            $decoded['ok'] ?? false,
+            'a non-UTF-8 bootstrap path must not turn a successful boot into a reported failure: got ' . var_export($encoded, true),
         );
     }
 }
