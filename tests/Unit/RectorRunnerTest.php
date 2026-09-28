@@ -10,6 +10,38 @@ use PHPUnit\Framework\TestCase;
 
 final class RectorRunnerTest extends TestCase
 {
+    /**
+     * rmdir() with a short retry-with-backoff, for cleaning up a temp
+     * directory that was the cwd of a subprocess this test just killed.
+     * TerminateProcess() on Windows can leave the OS holding the killed
+     * process's handle on its own working directory for a short window
+     * after proc_terminate()/proc_close() return (see
+     * RectorRunner::runCold(), which does not itself wait for handle
+     * release), so rmdir() can transiently fail there with "Resource
+     * temporarily unavailable". POSIX releases the handle synchronously
+     * with the kill, so on POSIX this always succeeds on the first
+     * attempt -- the retry is unconditional rather than
+     * PHP_OS_FAMILY-gated because it costs nothing there. 10 attempts *
+     * 100ms mirrors runCold()'s own poll interval. If the directory is
+     * still locked after that, the final attempt's real error is left to
+     * surface (not swallowed) -- retrying forever would hide a genuine
+     * leak behind what looks like a transient race.
+     */
+    private static function rmdirWithRetry(string $dir, int $attempts = 10, int $delayMicroseconds = 100_000): void
+    {
+        for ($attempt = 1; $attempt <= $attempts; $attempt++) {
+            if (@rmdir($dir)) {
+                return;
+            }
+            if ($attempt === $attempts) {
+                rmdir($dir);
+
+                return;
+            }
+            usleep($delayMicroseconds);
+        }
+    }
+
     public function testIsWarmFalseBeforeBoot(): void
     {
         $runner = new RectorRunner();
@@ -1150,8 +1182,18 @@ final class RectorRunnerTest extends TestCase
             $_SERVER['argv'] = $previousArgv;
             unlink($tmp . '/rector.php');
             unlink($tmp . '/src/Foo.php');
-            rmdir($tmp . '/src');
-            rmdir($tmp);
+            // Windows can briefly hold the just-killed cold subprocess's handle
+            // on $tmp (its working directory at the moment TerminateProcess()
+            // hit it -- runCold()'s deadline-poll branch does not wait for the
+            // OS to release file handles after proc_terminate()/proc_close(),
+            // see RectorRunner::runCold()), so rmdir($tmp) can fail with
+            // "Resource temporarily unavailable" for a short window after the
+            // kill. POSIX releases the handle synchronously with the kill, so
+            // this retries there too for symmetry but always succeeds first
+            // try. See #96/#97/#104 (--display-warnings) for how this was
+            // first made visible in CI.
+            self::rmdirWithRetry($tmp . '/src');
+            self::rmdirWithRetry($tmp);
         }
     }
 
