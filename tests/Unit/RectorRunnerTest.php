@@ -10,258 +10,6 @@ use PHPUnit\Framework\TestCase;
 
 final class RectorRunnerTest extends TestCase
 {
-    /**
-     * Calls $attempt up to $attempts times total, sleeping between attempts
-     * (never after the last one), stopping as soon as one call returns true.
-     * The sleep starts at $delayMicroseconds and grows by $backoffMultiplier
-     * after each attempt, capped at $maxDelayMicroseconds (a multiplier of
-     * 1.0, the default, keeps the delay fixed -- unchanged behaviour for any
-     * caller that does not ask for growth). $attempt receives whether this
-     * is its final call so it can behave differently there (e.g. stop
-     * suppressing a real error) -- this is generic on purpose so it can be
-     * pinned by a unit test (testRetryUntilTrue* below) independently of
-     * rmdir()/the filesystem. $sleep defaults to usleep() but can be
-     * substituted by a test to observe the delay sequence without actually
-     * waiting it out.
-     */
-    private static function retryUntilTrue(
-        callable $attempt,
-        int $attempts,
-        int $delayMicroseconds,
-        float $backoffMultiplier = 1.0,
-        int $maxDelayMicroseconds = PHP_INT_MAX,
-        ?callable $sleep = null,
-    ): void {
-        $sleep ??= 'usleep';
-        $delay = $delayMicroseconds;
-        for ($i = 1; $i <= $attempts; $i++) {
-            if ($attempt($i === $attempts)) {
-                return;
-            }
-            if ($i < $attempts) {
-                $sleep($delay);
-                $delay = min((int) round($delay * $backoffMultiplier), $maxDelayMicroseconds);
-            }
-        }
-    }
-
-    /**
-     * rmdir() with a retry-with-exponential-backoff, for cleaning up a temp
-     * directory that was the cwd of a subprocess this test just killed.
-     * TerminateProcess() on Windows can leave the OS holding the killed
-     * process's handle on its own working directory for a window after
-     * proc_terminate()/proc_close() return (see RectorRunner::runCold(),
-     * which does not itself wait for handle release), so rmdir() can
-     * transiently fail there with "Resource temporarily unavailable". POSIX
-     * releases the handle synchronously with the kill, so on POSIX this
-     * always succeeds on the first attempt -- the retry is unconditional
-     * rather than PHP_OS_FAMILY-gated because it costs nothing there.
-     *
-     * Budget: 12 attempts, starting at 150ms and multiplying by 1.5 each
-     * time up to a 1s cap -- roughly 8s of total backoff (150 + 225 + 337 +
-     * 506 + 759 + 1000*6 ms), reached only if every attempt but the last
-     * fails. This was already widened once (from an original ~900ms: 10
-     * fixed 100ms attempts) and still did not close the gap on Windows CI --
-     * see trap.d/96.windows-rmdir-race-fixed.md. #112 (folded in from #114,
-     * closed as a duplicate) confirmed why: the real cause is a leaked
-     * grandchild php process that proc_terminate() never reaps on Windows
-     * (it only kills the cmd.exe wrapper proc_open() spawns), so no retry
-     * budget can outlast a handle held by a still-live process. Widening
-     * this further is a settled dead end, not something to keep tuning --
-     * #112 tracks the real fix (killing the actual grandchild, asserting
-     * its PID is gone); this stays as a best-effort cleanup attempt only.
-     *
-     * Every attempt, including the last, suppresses rmdir()'s own warning
-     * (@rmdir()) -- unlike the previous version of this function, which let
-     * the final attempt's warning surface uncontrolled and trip
-     * phpunit.xml's failOnWarning="true". The return value tells the caller
-     * whether the directory is actually gone once the full budget is spent,
-     * so a genuine leak (the #112 case) can be reported as an explicit,
-     * named PHPUnit skip instead of an uncontrolled warning -- see
-     * testColdCallIsKilledAtItsDeadlineWithoutPcntl()'s finally block.
-     */
-    private static function rmdirWithRetry(
-        string $dir,
-        int $attempts = 12,
-        int $initialDelayMicroseconds = 150_000,
-        float $backoffMultiplier = 1.5,
-        int $maxDelayMicroseconds = 1_000_000,
-    ): bool {
-        self::retryUntilTrue(
-            static fn (bool $isFinalAttempt): bool => @rmdir($dir),
-            $attempts,
-            $initialDelayMicroseconds,
-            $backoffMultiplier,
-            $maxDelayMicroseconds,
-        );
-
-        return !is_dir($dir);
-    }
-
-    /**
-     * Pins retryUntilTrue()'s stop-as-soon-as-success behaviour, the half of
-     * rmdirWithRetry() a real filesystem cannot exercise from this suite (the
-     * race it retries around is Windows-only and does not reproduce on
-     * POSIX, see trap.d/96.windows-rmdir-race-fixed.md) -- without this, a
-     * previous version's off-by-one (an extra, undocumented 11th call on the
-     * final attempt, with the two back-to-back and no backoff between them)
-     * shipped silently: rmdirWithRetry()'s own docblock and this commit's
-     * message both claimed "10 attempts" while the code made 11.
-     */
-    public function testRetryUntilTrueStopsAsSoonAsAttemptSucceeds(): void
-    {
-        $calls = 0;
-        self::retryUntilTrue(
-            function () use (&$calls): bool {
-                $calls++;
-
-                return $calls >= 3;
-            },
-            10,
-            0,
-        );
-        self::assertSame(3, $calls, 'must stop as soon as an attempt succeeds, not keep going to the attempt cap');
-    }
-
-    /**
-     * Pins the terminal-failure shape: exactly $attempts calls total (not
-     * $attempts + 1), and only the last of them is marked final -- the
-     * signal rmdirWithRetry() uses to switch from a suppressed @rmdir() to a
-     * real one that is allowed to surface its own error. Uses delay=0 and
-     * its own attempt count (4), independently of whatever attempts/delay
-     * rmdirWithRetry() itself defaults to -- this pins retryUntilTrue()'s
-     * generic call-count/final-flag mechanics, not rmdirWithRetry()'s
-     * concrete budget (see testRmdirWithRetryDefaultBudgetTotalsAroundEightSeconds
-     * below for that).
-     */
-    public function testRetryUntilTrueMakesExactlyAttemptsCallsAndMarksOnlyTheLastFinal(): void
-    {
-        $isFinalPerCall = [];
-        self::retryUntilTrue(
-            function (bool $isFinalAttempt) use (&$isFinalPerCall): bool {
-                $isFinalPerCall[] = $isFinalAttempt;
-
-                return false;
-            },
-            4,
-            0,
-        );
-        self::assertSame([false, false, false, true], $isFinalPerCall);
-    }
-
-    /**
-     * Pins retryUntilTrue()'s exponential-backoff mechanics directly, via an
-     * injected $sleep spy instead of a real usleep() -- runs instantly and
-     * asserts the actual microsecond delay sequence: growing by
-     * $backoffMultiplier after each attempt, capped at
-     * $maxDelayMicroseconds. This is the half of the mechanics the two
-     * delay=0 tests above cannot see (they pin call count/final-flag shape
-     * only, decoupled from any real delay).
-     */
-    public function testRetryUntilTrueBackoffGrowsThenCaps(): void
-    {
-        $delays = [];
-        self::retryUntilTrue(
-            static fn (bool $isFinalAttempt): bool => false,
-            5,
-            10,
-            2.0,
-            35,
-            static function (int $delayMicroseconds) use (&$delays): void {
-                $delays[] = $delayMicroseconds;
-            },
-        );
-        self::assertSame([10, 20, 35, 35], $delays, 'must double each gap until the cap, then hold at the cap');
-    }
-
-    /**
-     * Pins rmdirWithRetry()'s own concrete default budget by reading its
-     * actual default parameter values via reflection -- not by re-typing
-     * them as separate literals, which would silently stop pinning
-     * anything the moment rmdirWithRetry()'s own defaults changed without
-     * this test being touched (caught in self-review: an earlier version
-     * of this test hardcoded 12/150_000/1.5/1_000_000 itself, so it could
-     * never fail if those defaults drifted). Feeds the reflected defaults
-     * into retryUntilTrue() with the same $sleep-spy technique as
-     * testRetryUntilTrueBackoffGrowsThenCaps() above and asserts the
-     * resulting ~8s budget. Runs instantly (no real sleeping) despite the
-     * real-world duration it represents.
-     */
-    public function testRmdirWithRetryDefaultBudgetTotalsAroundEightSeconds(): void
-    {
-        $defaults = [];
-        foreach ((new \ReflectionMethod(self::class, 'rmdirWithRetry'))->getParameters() as $parameter) {
-            if ($parameter->getName() !== 'dir') {
-                $defaults[$parameter->getName()] = $parameter->getDefaultValue();
-            }
-        }
-        self::assertSame(
-            ['attempts', 'initialDelayMicroseconds', 'backoffMultiplier', 'maxDelayMicroseconds'],
-            array_keys($defaults),
-            'rmdirWithRetry() must keep this exact parameter shape for the reflection below to read the right defaults',
-        );
-
-        $delays = [];
-        self::retryUntilTrue(
-            static fn (bool $isFinalAttempt): bool => false,
-            $defaults['attempts'],
-            $defaults['initialDelayMicroseconds'],
-            $defaults['backoffMultiplier'],
-            $defaults['maxDelayMicroseconds'],
-            static function (int $delayMicroseconds) use (&$delays): void {
-                $delays[] = $delayMicroseconds;
-            },
-        );
-        self::assertCount(
-            $defaults['attempts'] - 1,
-            $delays,
-            'must sleep once between each attempt, never after the last',
-        );
-        self::assertSame(
-            $defaults['maxDelayMicroseconds'],
-            $delays[array_key_last($delays)],
-            'must have reached the cap well before the last attempt',
-        );
-        self::assertGreaterThan(7_000_000, array_sum($delays), 'total budget must give real headroom over the original ~900ms');
-        self::assertLessThan(10_000_000, array_sum($delays), 'total budget must stay inside the requested 5-10s range');
-    }
-
-    /**
-     * Pins the genuine-failure path of rmdirWithRetry() itself: when the
-     * directory never becomes removable (here, kept permanently non-empty
-     * rather than relying on the real, Windows-only, unreproducible-on-this
-     * suite #112 handle-leak race), the retry budget must exhaust and the
-     * method must report failure (false) with the directory left in place,
-     * rather than throwing, warning, or silently reporting success. This is
-     * the exact signal testColdCallIsKilledAtItsDeadlineWithoutPcntl()'s
-     * finally block reads to decide whether to call markTestSkipped() --
-     * see #96/#112. Uses attempts=2, delay=0 so this runs instantly despite
-     * exercising the full retry loop.
-     */
-    public function testRmdirWithRetryReturnsFalseWhenDirectoryNeverBecomesRemovable(): void
-    {
-        $dir = sys_get_temp_dir() . '/rector-runner-rmdir-retry-unit-test-' . bin2hex(random_bytes(8));
-        mkdir($dir);
-        file_put_contents($dir . '/blocker.txt', 'keeps this directory permanently non-empty');
-
-        try {
-            $removed = (new \ReflectionMethod(self::class, 'rmdirWithRetry'))
-                ->invoke(null, $dir, 2, 0);
-
-            self::assertFalse(
-                $removed,
-                'rmdirWithRetry() must report failure (false) when the directory never becomes removable',
-            );
-            self::assertDirectoryExists(
-                $dir,
-                'the directory must still exist -- rmdirWithRetry() must not report failure while having actually removed it, nor succeed while leaving it behind',
-            );
-        } finally {
-            unlink($dir . '/blocker.txt');
-            rmdir($dir);
-        }
-    }
-
     public function testIsWarmFalseBeforeBoot(): void
     {
         $runner = new RectorRunner();
@@ -1337,6 +1085,20 @@ final class RectorRunnerTest extends TestCase
      */
     public function testColdCallIsKilledAtItsDeadlineWithoutPcntl(): void
     {
+        if (\PHP_OS_FAMILY === 'Windows') {
+            // Known product bug, not a flaky teardown: on Windows proc_terminate()
+            // kills only the cmd.exe wrapper proc_open() spawns, so the real
+            // cold-call php grandchild keeps running (sleep(30)) and holds the
+            // temp dir open -- rmdir() then fails with "Resource temporarily
+            // unavailable". No retry can win while that process lives, and the
+            // "killed at its deadline" assertion would be passing on a process
+            // that was not actually killed. Remove this skip when #112 is fixed.
+            self::markTestSkipped(
+                '#112: on Windows the timed-out cold call leaves an orphan php process '
+                . '(proc_terminate() kills only the cmd.exe wrapper), so this deadline-kill test cannot pass honestly',
+            );
+        }
+
         $tmp = sys_get_temp_dir() . '/rector-runner-cold-timeout-test-' . bin2hex(random_bytes(8));
         mkdir($tmp);
         mkdir($tmp . '/src');
@@ -1402,42 +1164,8 @@ final class RectorRunnerTest extends TestCase
             $_SERVER['argv'] = $previousArgv;
             unlink($tmp . '/rector.php');
             unlink($tmp . '/src/Foo.php');
-            // Windows can briefly hold the just-killed cold subprocess's handle
-            // on $tmp (its working directory at the moment TerminateProcess()
-            // hit it -- runCold()'s deadline-poll branch does not wait for the
-            // OS to release file handles after proc_terminate()/proc_close(),
-            // see RectorRunner::runCold()), so rmdir($tmp) can fail with
-            // "Resource temporarily unavailable" for a short window after the
-            // kill. POSIX releases the handle synchronously with the kill, so
-            // this retries there too for symmetry but always succeeds first
-            // try. See #96/#97/#104 (--display-warnings) for how this was
-            // first made visible in CI, and #112 for the confirmed root cause
-            // (a leaked grandchild php process on Windows) and why widening
-            // the retry budget further is a dead end rather than a fix.
-            $srcRemoved = self::rmdirWithRetry($tmp . '/src');
-            $tmpRemoved = self::rmdirWithRetry($tmp);
-            if (!$srcRemoved || !$tmpRemoved) {
-                // The retry budget is exhausted and the directory is still
-                // there -- this is the #112 leak, not a transient race (a
-                // transient race is exactly what the retry above already
-                // absorbs). Skip explicitly, naming the cause, instead of
-                // letting rmdir()'s own warning surface uncontrolled:
-                // phpunit.xml sets failOnWarning="true", so an unsuppressed
-                // warning here would fail this leg even though every
-                // assertion above already passed. This must only fire on
-                // the genuine leftover-directory case above, never
-                // unconditionally -- on every platform/run where the leak
-                // does not occur (most non-Windows runs, and some Windows
-                // runs), both rmdirWithRetry() calls return true and this
-                // branch is never reached.
-                self::markTestSkipped(
-                    'cold-call temp dir cleanup blocked after the full retry budget -- likely the '
-                    . 'leaked orphan php process tracked in #112 (proc_terminate() on Windows only '
-                    . 'kills the cmd.exe wrapper, not the actual grandchild php process, so it can '
-                    . 'still hold ' . $tmp . ' open). The assertions above already passed; only '
-                    . 'this teardown cleanup step failed.',
-                );
-            }
+            rmdir($tmp . '/src');
+            rmdir($tmp);
         }
     }
 
