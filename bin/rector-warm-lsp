@@ -21,12 +21,16 @@ foreach ([
 }
 
 use Dpt\McpRectorWarm\Lsp\LspServer;
+use Dpt\McpRectorWarm\Lsp\RectorDiagnosticsSource;
 use Dpt\McpRectorWarm\Lsp\StdioLspTransport;
+use Dpt\McpRectorWarm\RectorTool;
+use Dpt\McpRectorWarm\Support\ServerVersion;
 
-// v1 prototype (#52/#53): the handshake only. --working-dir is parsed here,
-// same flag/behaviour as bin/mcp-rector-warm, since a real client sets it
-// before any didOpen/didSave call lands -- --config is deliberately NOT
-// wired yet: nothing here runs Rector, so there is nothing for it to reach.
+// v1 (#52/#53): --working-dir is parsed here, same flag/behaviour as
+// bin/mcp-rector-warm. --config is deliberately NOT parsed out here either,
+// for the same reason bin/mcp-rector-warm leaves it alone: it stays in
+// $_SERVER['argv'] untouched, and RectorConfigsResolver reads it from there
+// directly when Rector boots inside RectorTool::process() below.
 $workingDir = null;
 foreach (array_slice($argv, 1) as $arg) {
     if (str_starts_with($arg, '--working-dir=')) {
@@ -44,7 +48,8 @@ if ($workingDir !== null) {
 }
 
 $transport = new StdioLspTransport(STDIN, STDOUT);
-$server = new LspServer('0.1.0-prototype');
+$diagnostics = new RectorDiagnosticsSource(new RectorTool());
+$server = new LspServer(ServerVersion::resolve(), $diagnostics);
 
 while (true) {
     try {
@@ -55,9 +60,6 @@ while (true) {
     }
 
     if ($message === null) {
-        // Clean EOF with no `exit` notification: treat as an abrupt
-        // disconnect, same as `exit` without a prior `shutdown` (spec: exit
-        // code should be non-zero in that case).
         exit($server->isShuttingDown() ? 0 : 1);
     }
 
@@ -65,8 +67,7 @@ while (true) {
         exit($server->isShuttingDown() ? 0 : 1);
     }
 
-    $response = $server->handle($message);
-    if ($response !== null) {
+    foreach ($server->handle($message) as $response) {
         $transport->write($response);
     }
 }

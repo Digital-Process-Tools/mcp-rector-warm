@@ -186,6 +186,31 @@ The tool also declares its behavior via MCP tool annotations: `readOnlyHint:
 false` (a non-dry-run call writes files), `destructiveHint: true`,
 `idempotentHint: false`, `openWorldHint: false`.
 
+## Language server
+
+`bin/rector-warm-lsp` (#53) is a second entry point on the same warm core as
+the MCP server, speaking [LSP](https://microsoft.github.io/language-server-protocol/)
+over stdio instead of MCP -- for editors that want Rector diagnostics on save
+rather than an agent calling a tool. Same `--working-dir` flag as
+`bin/mcp-rector-warm`; `--config` works the same passive way (left in
+`$_SERVER['argv']` for `RectorConfigsResolver` to pick up).
+
+On `didOpen`/`didSave` it runs `rector_process` with `dryRun: true` on that
+file and publishes one diagnostic per changed hunk (severity Information,
+`source: "rector"`, message = the rule name(s) that hunk came from).
+`textDocument/codeAction` over a diagnostic offers `Apply Rector: <rule>` --
+a `WorkspaceEdit` built straight from Rector's own unified diff, no full-file
+read needed -- plus a whole-file "Apply all Rector fixes" action. `didClose`
+clears a file's diagnostics. Results are pinned to the document version that
+requested them, so a stale one is discarded if a newer `didSave` for the same
+document finishes first -- inert in the current strictly-synchronous stdio
+loop (nothing can race it there today), kept as defense-in-depth for a future
+async/pipelined transport.
+
+Out of v1 scope: unsaved buffers (Rector reads from disk), workspace-wide
+scans, and `workspace/configuration`. Editor-specific setup snippets are
+tracked in a follow-up issue ([#55](https://github.com/Digital-Process-Tools/mcp-rector-warm/issues/55)).
+
 ## How it works
 
 Three decisions worth knowing:

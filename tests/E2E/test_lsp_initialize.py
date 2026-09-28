@@ -81,7 +81,9 @@ def test_initialize_returns_server_info_and_capabilities(server):
 
     assert response["id"] == 1
     assert response["result"]["serverInfo"]["name"] == "rector-warm-lsp"
-    assert response["result"]["capabilities"] == {}
+    # v1 (#53): no longer empty -- diagnostics + codeAction are real now.
+    assert response["result"]["capabilities"]["codeActionProvider"] is True
+    assert response["result"]["capabilities"]["textDocumentSync"]["openClose"] is True
 
 
 def test_shutdown_then_exit_gives_a_clean_exit_code(server):
