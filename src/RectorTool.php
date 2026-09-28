@@ -69,32 +69,23 @@ final class RectorTool
             ]);
         }
 
-        // #72: every --call-timeout kill site (RectorRunner::killAndReap(),
-        // the worker backstop, the no-pcntl proc_terminate() path) sends an
-        // unconditional SIGKILL/signal 9 with no grace for an in-flight file
-        // write. Rector writes each changed file by truncating it and then
-        // writing the new content (vendor rector's FileProcessor ->
-        // Nette\Utils\FileSystem::write() -> file_put_contents()); a kill
-        // landing mid-write leaves that file truncated with no copy of its
-        // original content anywhere -- Rector's in-memory copy dies with the
-        // killed process. A dry-run call never writes, so it is always safe
-        // to kill regardless of the deadline. Refuse instead, before the run
-        // ever starts, rather than risk data loss no caller was warned about:
-        // the caller must either keep dryRun:true, or restart the server with
-        // --call-timeout=0 (unlimited, the pre-#58 behaviour) to apply changes.
-        if (!$dryRun && $this->runner->getCallTimeoutSeconds() > 0) {
-            return self::errorResult([
-                'exit_code'   => -1,
-                'output'      => '',
-                'warm_boot'   => $this->runner->isWarm(),
-                'error'       => 'rector_process: refusing dryRun:false while a --call-timeout deadline is '
-                    . 'active. A killed rector call can leave a file truncated mid-write with no backup. '
-                    . 'Restart the server with --call-timeout=0 to apply changes, or keep dryRun:true.',
-                'error_class' => 'UnsafeCallTimeoutError',
-                'trace'       => '',
-            ]);
-        }
-
+        // #72 correction: every --call-timeout kill site (RectorRunner::
+        // killAndReap(), the worker backstop, the no-pcntl proc_terminate()
+        // path) used to send an unconditional SIGKILL/signal 9 with no grace
+        // for an in-flight file write -- Rector writes each changed file by
+        // truncating it and then writing the new content (vendor rector's
+        // FileProcessor -> Nette\Utils\FileSystem::write() ->
+        // file_put_contents()), so a kill landing mid-write left that file
+        // truncated with no copy of its original content anywhere. An
+        // earlier version of this fix refused every dryRun:false call
+        // outright whenever a deadline was active -- a breaking change for
+        // every caller running under the (now-default) 600s --call-timeout.
+        // The correct fix instead: never kill a call that can write.
+        // $dryRun is passed straight through to the runner below, which
+        // gates the deadline on it at every one of the three kill sites --
+        // a dryRun:false call simply is never bound by --call-timeout, and
+        // can hang indefinitely if genuinely wedged (the pre-#58 status quo
+        // for a write call), rather than being refused or risking data loss.
         // --debug disables parallel mode + suppresses file_diffs in JSON output.
         // We keep it for speed: parallel mode on 1 file is 14s overhead because rector
         // still scans all configured paths at boot. Single-thread bypasses the worker
@@ -109,7 +100,7 @@ final class RectorTool
         $argv[] = $path;
 
         try {
-            return $this->runner->run($argv);
+            return $this->runner->run($argv, $dryRun);
         } catch (\Throwable $e) {
             // A warm container can corrupt across edits: PHPStan's scope/reflection
             // caches are not ResettableInterface, so a class whose shape changed on
@@ -120,7 +111,7 @@ final class RectorTool
             if ($this->runner->isWarm() && self::isRecoverableWarmCorruption($e)) {
                 $this->runner->reboot();
                 try {
-                    return $this->runner->run($argv);
+                    return $this->runner->run($argv, $dryRun);
                 } catch (\Throwable $retryError) {
                     $e = $retryError;
                 }

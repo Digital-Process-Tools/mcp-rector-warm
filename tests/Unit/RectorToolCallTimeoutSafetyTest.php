@@ -6,18 +6,19 @@ namespace Dpt\McpRectorWarm\Tests\Unit;
 
 use Dpt\McpRectorWarm\RectorTool;
 use Dpt\McpRectorWarm\RunnerInterface;
-use Mcp\Schema\Result\CallToolResult;
 use PHPUnit\Framework\TestCase;
 
 /**
- * #72: a `--call-timeout` deadline kills the analysis process unconditionally
- * (SIGKILL / signal 9), which can land mid-write on a file Rector is
- * currently rewriting (truncate-then-write), leaving it truncated with no
- * copy of the original anywhere. RectorTool::process must refuse a
- * `dryRun: false` call while a call-timeout deadline is active, BEFORE ever
- * invoking the runner -- a dry-run call never writes, so it stays safe to
- * kill regardless of the timeout, and a call made with the timeout disabled
- * (0 = unlimited) is unaffected either way.
+ * #72 correction: an earlier version of this fix refused every `dryRun: false`
+ * `rector_process` call outright whenever a `--call-timeout` deadline was
+ * active -- a breaking change for every caller running under the (now
+ * default) 600s timeout. The corrected contract instead: RectorTool::process
+ * must NEVER refuse a dryRun:false call, and must pass the real $dryRun flag
+ * straight through to the runner (never inferred from $argv) so the runner
+ * can gate its own deadline enforcement on it -- proven at the RectorRunner
+ * level (never killed while writing) by RectorRunnerTest, and end-to-end by
+ * the E2E scenarios this bug broke (apply-then-recheck, apply-twice-
+ * idempotent, bom-crlf-spaces).
  */
 final class RectorToolCallTimeoutSafetyTest extends TestCase
 {
@@ -51,14 +52,17 @@ final class RectorToolCallTimeoutSafetyTest extends TestCase
     {
         return new class ($callTimeoutSeconds) implements RunnerInterface {
             public int $runs = 0;
+            /** @var list<bool> */
+            public array $lastDryRunSeen = [];
 
             public function __construct(private int $callTimeoutSeconds)
             {
             }
 
-            public function run(array $argv): array
+            public function run(array $argv, bool $dryRun = true): array
             {
                 ++$this->runs;
+                $this->lastDryRunSeen[] = $dryRun;
 
                 return ['exit_code' => 0, 'output' => '{"totals":{"errors":0}}', 'warm_boot' => false];
             }
@@ -80,29 +84,41 @@ final class RectorToolCallTimeoutSafetyTest extends TestCase
     }
 
     /**
-     * The bar this test must clear: it must actually exercise the refusal
-     * path (positive control lives in testAllowsNonDryRunCallWhenTimeoutIsDisabled
-     * below), not merely fail to see a run because nothing was ever attempted.
+     * The bug this pins: a dryRun:false call must run to completion while a
+     * --call-timeout deadline is active, exactly as it did before #58 -- it
+     * must never be refused outright (the earlier, now-removed #72 fix) and
+     * must never be killed (RectorRunnerTest pins the "never killed" half at
+     * the RectorRunner level, and the E2E suite pins it end-to-end).
      */
-    public function testRefusesNonDryRunCallWhileTimeoutIsActive(): void
+    public function testAllowsNonDryRunCallWhileTimeoutIsActive(): void
     {
         $fake = $this->fakeRunner(600);
 
         $tool = RectorTool::withRunner($fake);
         $result = $tool->process($this->insideFile(), false);
 
-        self::assertSame(0, $fake->runs, 'the runner must never be invoked when the call is refused');
-        self::assertInstanceOf(CallToolResult::class, $result, 'a refusal must surface as an MCP tool error');
-        self::assertTrue($result->isError);
-        $details = $result->structuredContent ?? [];
-        self::assertSame(-1, $details['exit_code'] ?? null);
-        self::assertStringContainsString('--call-timeout', $details['error'] ?? '');
-        self::assertStringContainsString('dryRun', $details['error'] ?? '');
+        self::assertSame(1, $fake->runs, 'the runner must be invoked -- a write call is never refused (#72 correction)');
+        self::assertSame(0, $result['exit_code'] ?? null);
     }
 
-    /** Positive control: the same non-dry-run call must actually run when the
-     *  deadline is disabled (0 = unlimited, --call-timeout=0) -- proving the
-     *  refusal above is keyed to the active timeout, not to dryRun:false alone. */
+    /**
+     * The flag must be threaded through explicitly, not inferred indirectly
+     * (e.g. by grepping $argv for '--dry-run') -- the runner sees the SAME
+     * boolean the caller passed, for both a write and a dry-run call.
+     */
+    public function testPassesTheRealDryRunFlagThroughToTheRunner(): void
+    {
+        $fake = $this->fakeRunner(600);
+        $tool = RectorTool::withRunner($fake);
+
+        $tool->process($this->insideFile(), false);
+        $tool->process($this->insideFile(), true);
+
+        self::assertSame([false, true], $fake->lastDryRunSeen);
+    }
+
+    /** A non-dry-run call must also work when the deadline is disabled
+     *  (0 = unlimited, --call-timeout=0) -- unaffected either way. */
     public function testAllowsNonDryRunCallWhenTimeoutIsDisabled(): void
     {
         $fake = $this->fakeRunner(0);
@@ -114,8 +130,9 @@ final class RectorToolCallTimeoutSafetyTest extends TestCase
         self::assertSame(0, $result['exit_code'] ?? null);
     }
 
-    /** A dry-run call never writes, so it must stay unaffected by the guard
-     *  even while a call-timeout deadline is active. */
+    /** A dry-run call must stay allowed while a call-timeout deadline is
+     *  active -- the existing --call-timeout enforcement for analysis-only
+     *  calls is unchanged by this correction. */
     public function testAllowsDryRunCallWhileTimeoutIsActive(): void
     {
         $fake = $this->fakeRunner(600);

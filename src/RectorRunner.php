@@ -202,16 +202,19 @@ class RectorRunner implements RunnerInterface
      *
      * @param list<string> $argv Rector CLI args including the binary name as $argv[0].
      *   E.g. ['rector', 'process', '/path/file.php', '--dry-run', '--output-format=json']
+     * @param bool $dryRun Whether THIS call is analysis-only. Gates whether the
+     *   --call-timeout deadline applies at all (#72 correction): a dryRun:false
+     *   call is never killed by it, at any of the kill sites below.
      * @return array{exit_code: int, output: string, warm_boot: bool}
      */
-    public function run(array $argv): array
+    public function run(array $argv, bool $dryRun = true): array
     {
         if (!$this->canFork()) {
             // No pcntl at all: there is no OS-process boundary available to isolate a
             // boot/reboot in (#31), so warming is never attempted -- every call is a
             // fresh, correct-by-construction cold run. warm_boot is always false: this
             // call never benefits from reuse.
-            return $this->runCold($argv);
+            return $this->runCold($argv, $dryRun);
         }
 
         $warmBoot = $this->isWarm();
@@ -246,7 +249,7 @@ class RectorRunner implements RunnerInterface
         // process: the grandchild's copy-on-write memory absorbs every cache the
         // analysis fills in and dies with the grandchild, so the worker's container
         // stays exactly as pristine as right after boot() for every call.
-        return $this->runForked($argv, $warmBoot);
+        return $this->runForked($argv, $warmBoot, $dryRun);
     }
 
     protected function canFork(): bool
@@ -423,8 +426,13 @@ class RectorRunner implements RunnerInterface
             $request = \json_decode($frame, true);
             $argv = \is_array($request) && \is_array($request['argv'] ?? null) ? $request['argv'] : [];
             $warmBoot = \is_array($request) && ($request['warm_boot'] ?? false) === true;
+            // Default true (analysis, deadline applies) when the field is
+            // somehow missing -- the safer of the two readings for an
+            // unrecognised/older frame: it fails toward "may still be
+            // killed", never toward "silently unkillable" (#72).
+            $dryRun = !\is_array($request) || ($request['dry_run'] ?? true) === true;
             try {
-                $result = $this->forkAndExecute($argv, $warmBoot);
+                $result = $this->forkAndExecute($argv, $warmBoot, $dryRun);
             } catch (\Throwable $e) {
                 $result = ['error' => $e->getMessage(), 'error_class' => $e::class];
             }
@@ -444,20 +452,26 @@ class RectorRunner implements RunnerInterface
      * every call -- not only reused ones -- is isolated from the worker's own container.
      *
      * @param list<string> $argv
+     * @param bool $dryRun #72 correction: the deadline below (and its grace
+     *   period) applies ONLY when $dryRun is true. A dryRun:false call must
+     *   never be killed by --call-timeout, so no deadline is computed for it
+     *   at all -- it falls back to the pre-#58 behaviour of relying on
+     *   whatever default_socket_timeout already governs, unbounded.
      * @return array{exit_code: int, output: string, warm_boot: bool}
      */
-    protected function runForked(array $argv, bool $warmBoot): array
+    protected function runForked(array $argv, bool $warmBoot, bool $dryRun): array
     {
         \assert($this->workerSocket !== null);
-        $payload = (string) \json_encode(['argv' => $argv, 'warm_boot' => $warmBoot]);
+        $payload = (string) \json_encode(['argv' => $argv, 'warm_boot' => $warmBoot, 'dry_run' => $dryRun]);
         // Same short-per-read-timeout rationale as forkAndExecute()'s wait loop
         // (#58): only touched when a deadline is actually in play, so the
-        // unlimited case ($callTimeoutSeconds == 0) keeps relying on whatever
-        // default_socket_timeout already governs, unchanged from before #58.
+        // unlimited case ($callTimeoutSeconds == 0) -- or a dryRun:false call,
+        // #72 correction -- keeps relying on whatever default_socket_timeout
+        // already governs, unchanged from before #58.
         // The grace period (see RUN_FORKED_DEADLINE_GRACE_SECONDS) is what makes
         // this a genuine backstop rather than a coin flip against
         // forkAndExecute()'s own, identically-timed deadline.
-        $deadline = $this->callDeadlineNs(self::RUN_FORKED_DEADLINE_GRACE_SECONDS);
+        $deadline = $dryRun ? $this->callDeadlineNs(self::RUN_FORKED_DEADLINE_GRACE_SECONDS) : null;
         if ($deadline !== null) {
             \stream_set_timeout($this->workerSocket, 1);
         }
@@ -519,9 +533,12 @@ class RectorRunner implements RunnerInterface
      * under the name runForked(); the mechanics are unchanged, only where it runs moved.
      *
      * @param list<string> $argv
+     * @param bool $dryRun #72 correction: the wait-loop deadline below applies
+     *   ONLY when $dryRun is true -- a dryRun:false call must never have its
+     *   grandchild killed by --call-timeout, so no deadline is computed for it.
      * @return array{exit_code: int, output: string, warm_boot: bool}
      */
-    private function forkAndExecute(array $argv, bool $warmBoot): array
+    private function forkAndExecute(array $argv, bool $warmBoot, bool $dryRun): array
     {
         $sockets = \stream_socket_pair(\STREAM_PF_UNIX, \STREAM_SOCK_STREAM, \STREAM_IPPROTO_IP);
         if ($sockets === false) {
@@ -597,10 +614,11 @@ class RectorRunner implements RunnerInterface
         // so the deadline check below runs promptly -- default_socket_timeout can
         // be minutes; this loop must not wait a whole one of those just to notice
         // the deadline already passed. Only set when a deadline is actually in
-        // play: with $callTimeoutSeconds == 0 (unlimited), leave the socket on
+        // play: with $callTimeoutSeconds == 0 (unlimited), OR $dryRun false
+        // (#72 correction: a write call is never killed), leave the socket on
         // whatever default_socket_timeout already governs, unchanged from before
         // #58.
-        $deadline = $this->callDeadlineNs();
+        $deadline = $dryRun ? $this->callDeadlineNs() : null;
         if ($deadline !== null) {
             \stream_set_timeout($parentSocket, 1);
         }
@@ -671,9 +689,14 @@ class RectorRunner implements RunnerInterface
      * available way to isolate a boot from another when pcntl is unavailable.
      *
      * @param list<string> $argv
+     * @param bool $dryRun #72 correction: the poll-and-kill deadline below
+     *   applies ONLY when $dryRun is true -- a dryRun:false call must never
+     *   have this subprocess proc_terminate()d by --call-timeout, so no
+     *   deadline is computed for it (falls back to plain proc_close(), the
+     *   pre-#58 behaviour).
      * @return array{exit_code: int, output: string, warm_boot: bool}
      */
-    protected function runCold(array $argv): array
+    protected function runCold(array $argv, bool $dryRun = true): array
     {
         // Both the result (#46) and the child's stdout/stderr (#45) travel through
         // temp files, never through OS pipes. A pipe has a small, fixed OS buffer:
@@ -728,8 +751,9 @@ class RectorRunner implements RunnerInterface
             // just with no retry-on-timeout to even add a check to: a single
             // blocking call. Poll proc_get_status() against the same deadline
             // instead when one is configured; proc_close() alone (today's
-            // pre-#58 behaviour) when $callTimeoutSeconds == 0.
-            $deadline = $this->callDeadlineNs();
+            // pre-#58 behaviour) when $callTimeoutSeconds == 0, or when
+            // $dryRun is false (#72 correction: a write call is never killed).
+            $deadline = $dryRun ? $this->callDeadlineNs() : null;
             if ($deadline === null) {
                 $exitCode = \proc_close($process);
             } else {
