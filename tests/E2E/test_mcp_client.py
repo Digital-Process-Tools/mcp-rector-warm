@@ -128,6 +128,9 @@ def test_dry_run_returns_a_diff_and_leaves_the_file_alone(project: Path, record:
 
 
 def test_second_call_in_the_same_session_is_warm_and_agrees_with_the_first(project: Path, record: Path) -> None:
+    """On a no-pcntl platform (Windows, #97) the second call is cold instead, since
+    RectorRunner never forks a warm worker there at all -- this function's own name
+    describes the pcntl-available platforms the fixture normally runs on."""
     target = project / "src" / "Money.php"
 
     async def scenario():
@@ -148,6 +151,9 @@ def test_second_call_in_the_same_session_is_warm_and_agrees_with_the_first(proje
 
 
 def test_a_different_second_file_in_a_warm_session_is_refactored(project: Path, record: Path) -> None:
+    """On a no-pcntl platform (Windows, #97) the second call is cold instead, since
+    RectorRunner never forks a warm worker there at all -- this function's own name
+    describes the pcntl-available platforms the fixture normally runs on."""
     async def scenario():
         async with open_server(project, record, project / "rector.php") as server:
             first = await server.process(project / "src" / "Sample.php")

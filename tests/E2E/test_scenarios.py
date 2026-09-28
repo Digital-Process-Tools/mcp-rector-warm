@@ -70,8 +70,11 @@ reports warm_boot = true (so the oracle compares a warm container, not a reboot)
 UNLESS a write/edit/delete/rename on rector.php/rector.dist.php, or on a path listed
 in the scenario's own 'bootstrap_files' (#33), happened since the previous call, in
 which case that one call must report warm_boot = false (a forced reboot, #20/#33) and
-warm_boot returns to true from the call after. stdout carries nothing but JSON-RPC,
-and the server exits 0 when the client closes.
+warm_boot returns to true from the call after. On a platform with no pcntl (Windows,
+#97) none of the above applies: RectorRunner never forks a warm worker there at all,
+so warm_boot is false for every call regardless of expect_reboot or config edits --
+see mcp_harness.NO_PCNTL_PLATFORM and call_step()'s own branch on it below. stdout
+carries nothing but JSON-RPC, and the server exits 0 when the client closes.
 """
 
 from __future__ import annotations
