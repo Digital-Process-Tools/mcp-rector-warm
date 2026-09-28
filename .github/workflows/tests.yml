@@ -79,9 +79,17 @@ jobs:
       # .bat/.ps1 suffix) is a known PHP-on-Windows-CI trap under pwsh's own
       # command resolution. `shell: bash` routes through Git Bash instead,
       # same choice the e2e job below already makes for its own script.
+      # #97 follow-up: the windows-latest leg failed with "OK, but there were
+      # issues!" (1 warning trips phpunit.xml's failOnWarning="true") but the
+      # captured GH Actions log did not include PHPUnit's own "There was 1
+      # warning: ..." detail block -- only the summary counted it. --no-progress
+      # and --colors=never stop the \r-driven progress bar and ANSI codes from
+      # being mangled by the log capture, and --display-warnings makes PHPUnit
+      # print the warning detail unconditionally (it can be display-suppressed
+      # otherwise). No behavior change to which tests run or pass/fail.
       - name: Run tests
         shell: bash
-        run: ./vendor/bin/phpunit --no-coverage
+        run: ./vendor/bin/phpunit --no-coverage --colors=never --no-progress --display-warnings
 
   # No-pcntl fallback: the ubuntu-latest matrix above always has pcntl, so
   # RectorRunner::canFork() is always true there and the reboot-before-each-call
