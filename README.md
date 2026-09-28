@@ -250,10 +250,10 @@ Limits of the buffer mode:
 - The debounce reads stdin with a timeout. On Linux and macOS that is
   `stream_select`. `select()` on Windows works only on sockets, so there the
   server polls instead: every 5 ms it checks PHP's read buffer and the bytes
-  waiting in the pipe. If the pipe cannot report waiting bytes, the debounce
-  still fires on time. The only loss is that a change sent while Rector runs
-  no longer supersedes that run: its result is published, then replaced by
-  the next one.
+  waiting in the pipe. The windows-latest CI leg runs the E2E test in which a
+  change sent while Rector runs supersedes that run, and it passes there. If
+  a pipe could not report waiting bytes, the debounce would still fire on
+  time, and the only loss would be that superseding.
 - Editors, watchers and `git status` can see the temp directory for the
   length of one run.
 

@@ -85,7 +85,8 @@ final class StdioLspTransport
      * frame that arrived in the same write as the first is not missed. EOF
      * counts as readable: the following read() returns null.
      *
-     * Windows: select() there only works on sockets, and for a pipe PHP
+     * Windows: select() there only works on sockets (used as-is for a
+     * socket), and for a pipe PHP
      * either fails or reports the handle as always ready -- the second would
      * make the loop block in read() and never fire the debounce. So on
      * Windows this polls instead: PHP's own read buffer
@@ -103,7 +104,7 @@ final class StdioLspTransport
             return true;
         }
 
-        if (PHP_OS_FAMILY === 'Windows') {
+        if (PHP_OS_FAMILY === 'Windows' && !$this->isSocket()) {
             return $this->pollForInput($timeoutSeconds);
         }
 
@@ -120,6 +121,12 @@ final class StdioLspTransport
         }
 
         return $ready > 0;
+    }
+
+    /** Windows' select() does handle sockets; only pipes and files need polling. */
+    private function isSocket(): bool
+    {
+        return str_contains(strtolower((string) (stream_get_meta_data($this->in)['stream_type'] ?? '')), 'socket');
     }
 
     private function hasBufferedInput(): bool

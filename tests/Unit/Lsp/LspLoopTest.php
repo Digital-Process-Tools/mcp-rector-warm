@@ -42,10 +42,11 @@ final class LspLoopTest extends TestCase
     private static function pair(): array
     {
         // CI's no-pcntl leg disables stream_socket_pair() through
-        // disable_functions; a loopback TCP connection gives the loop the
-        // same selectable stream there, so these tests still run.
+        // disable_functions, and on Windows it fails (no AF_UNIX pair); a
+        // loopback TCP connection gives the loop the same selectable stream
+        // there, so these tests still run.
         if (function_exists('stream_socket_pair')) {
-            $pair = stream_socket_pair(STREAM_PF_UNIX, STREAM_SOCK_STREAM, STREAM_IPPROTO_IP);
+            $pair = @stream_socket_pair(STREAM_PF_UNIX, STREAM_SOCK_STREAM, STREAM_IPPROTO_IP);
             if ($pair !== false) {
                 return $pair;
             }
