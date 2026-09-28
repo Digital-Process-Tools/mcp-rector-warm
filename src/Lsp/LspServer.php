@@ -145,7 +145,7 @@ final class LspServer
                 'range' => $fix['range'],
                 'severity' => 3,
                 'source' => 'rector',
-                'message' => implode(', ', $fix['rectors']),
+                'message' => self::fixLabel($fix['rectors']),
                 'data' => ['hunkIndex' => $i],
             ];
         }
@@ -212,7 +212,7 @@ final class LspServer
             }
 
             $actions[] = [
-                'title' => 'Apply Rector: ' . implode(', ', $fix['rectors']),
+                'title' => 'Apply Rector: ' . self::fixLabel($fix['rectors']),
                 'kind' => 'quickfix',
                 'edit' => ['changes' => [$uri => [['range' => $fix['range'], 'newText' => $fix['newText']]]]],
             ];
@@ -241,6 +241,24 @@ final class LspServer
             'method' => 'textDocument/publishDiagnostics',
             'params' => ['uri' => $uri, 'diagnostics' => $diagnostics],
         ];
+    }
+
+    /**
+     * #91 self-review finding: closest-hunk rule attribution (RectorDiffParser)
+     * can legitimately leave a hunk with real content but an empty `rectors`
+     * list (every applied rule was closer to a different hunk). `implode(',
+     * ', [])` there used to produce an EMPTY diagnostic message and a
+     * quickfix titled `'Apply Rector: '` with nothing after the colon --
+     * worse than the old (wrong, but non-empty) broadcast-to-every-hunk
+     * behaviour it replaced. This is the presentation-layer fallback: never
+     * show a blank label, even when the parser genuinely has no rule name
+     * for this hunk.
+     *
+     * @param list<string> $rectors
+     */
+    private static function fixLabel(array $rectors): string
+    {
+        return $rectors !== [] ? implode(', ', $rectors) : 'Rector fix';
     }
 
     /**

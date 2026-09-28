@@ -158,12 +158,18 @@ final class RectorDiagnosticsSourceTest extends TestCase
         self::assertCount(1, $result['fixes']);
     }
 
-    public function testNoParsableJsonAtAllProducesNoFixesRatherThanAnError(): void
+    public function testNoParsableJsonAtAllBecomesAnErrorRatherThanSilentlyClean(): void
     {
-        // Negative control: genuinely unparsable output must degrade to "no
-        // diagnostics", not throw and take the whole LSP loop down with it.
+        // Self-review finding on #90 (independent auditor pass): genuinely
+        // unparsable output -- truncated, corrupted, no `{"totals":...}`
+        // anywhere -- used to degrade all the way to "no diagnostics",
+        // identical to a genuinely clean file. It must never throw (the
+        // negative control this test used to be named for still holds --
+        // no exception takes the LSP loop down), but it must surface as an
+        // error rather than silence.
         $result = $this->fakeSource('not json at all')->diagnose($this->workDir . '/Sample.php');
 
         self::assertSame([], $result['fixes']);
+        self::assertNotSame([], $result['errors']);
     }
 }

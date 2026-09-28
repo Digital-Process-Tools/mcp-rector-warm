@@ -212,6 +212,38 @@ final class LspServerTest extends TestCase
         self::assertSame([], $codeActionResponses[0]['result']);
     }
 
+    public function testAFixWithNoAttributedRectorsGetsAGenericLabelNotABlankOne(): void
+    {
+        // #91 self-review finding: RectorDiffParser's closest-hunk
+        // attribution can legitimately leave a hunk's `rectors` list empty.
+        // The diagnostic message and the quickfix title must never go blank
+        // as a result.
+        $fixes = [self::fix(3, 12, "fixed\n", '')];
+        $fixes[0]['rectors'] = [];
+        $server = new LspServer('1.0.0', self::fakeSource($fixes));
+
+        $responses = $server->handle([
+            'jsonrpc' => '2.0',
+            'method' => 'textDocument/didOpen',
+            'params' => ['textDocument' => ['uri' => 'file:///tmp/Sample.php', 'version' => 1]],
+        ]);
+
+        self::assertSame('Rector fix', $responses[0]['params']['diagnostics'][0]['message']);
+
+        $codeActionResponses = $server->handle([
+            'jsonrpc' => '2.0',
+            'id' => 3,
+            'method' => 'textDocument/codeAction',
+            'params' => [
+                'textDocument' => ['uri' => 'file:///tmp/Sample.php'],
+                'range' => ['start' => ['line' => 3, 'character' => 0], 'end' => ['line' => 12, 'character' => 0]],
+                'context' => ['diagnostics' => []],
+            ],
+        ]);
+
+        self::assertSame('Apply Rector: Rector fix', $codeActionResponses[0]['result'][0]['title']);
+    }
+
     public function testDidSaveOnAnUnchangedFilePublishesEmptyDiagnostics(): void
     {
         // Positive control for the case above, and the negative control the

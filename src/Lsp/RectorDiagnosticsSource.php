@@ -39,6 +39,20 @@ final class RectorDiagnosticsSource implements DiagnosticsSource
         }
 
         $report = self::extractReport($result['output'] ?? '');
+        if ($report === null) {
+            // Self-review finding on #90 (independent auditor pass): a
+            // successful call (no CallToolResult refusal) whose output never
+            // contains a parseable `{"totals":...}` report -- truncated
+            // output, a decode failure, a lost boot-handshake byte (see #73,
+            // #74) -- used to null-coalesce straight through to `[]` for
+            // BOTH `errors` and `file_diffs`, the exact same "looks clean"
+            // shape #90 exists to close, just for a third channel.
+            return ['fixes' => [], 'errors' => [[
+                'message' => 'rector_process succeeded but produced no parseable report.',
+                'line' => 0,
+            ]]];
+        }
+
         $errors = self::buildErrors($report['errors'] ?? []);
         $fileDiffs = $report['file_diffs'] ?? [];
         if ($fileDiffs === []) {
