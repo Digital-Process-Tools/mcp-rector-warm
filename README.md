@@ -228,8 +228,16 @@ it was tested against.
 
 ```lua
 -- ~/.config/nvim/lsp/rector.lua
+-- `cmd` is a function, not a static list: `--working-dir` has to be the
+-- resolved project root (matched against root_markers below), not whatever
+-- directory Neovim happened to start in -- `vim.fn.getcwd()` would silently
+-- point rector-warm-lsp at the wrong project whenever Neovim isn't launched
+-- from the exact project root, or in a multi-root session.
 return {
-  cmd = { 'rector-warm-lsp', '--working-dir=' .. vim.fn.getcwd() },
+  cmd = function(dispatchers, config)
+    local root = config.root_dir or vim.fn.getcwd()
+    return vim.lsp.rpc.start('rector-warm-lsp', { '--working-dir=' .. root }, dispatchers)
+  end,
   filetypes = { 'php' },
   root_markers = { 'composer.json', 'rector.php' },
 }
@@ -240,7 +248,7 @@ return {
 vim.lsp.enable('rector')
 ```
 
-On older Neovim via [nvim-lspconfig](https://github.com/neovim/nvim-lspconfig), register a custom server before calling `setup`:
+On older Neovim via [nvim-lspconfig](https://github.com/neovim/nvim-lspconfig), register a custom server before calling `setup`, using `on_new_config` so `cmd` picks up each resolved root rather than a fixed `vim.fn.getcwd()`:
 
 ```lua
 local lspconfig = require('lspconfig')
@@ -248,10 +256,13 @@ local configs = require('lspconfig.configs')
 if not configs.rector_warm then
   configs.rector_warm = {
     default_config = {
-      cmd = { 'rector-warm-lsp', '--working-dir=' .. vim.fn.getcwd() },
+      cmd = { 'rector-warm-lsp' },
       filetypes = { 'php' },
       root_dir = lspconfig.util.root_pattern('composer.json', 'rector.php'),
     },
+    on_new_config = function(new_config, new_root_dir)
+      new_config.cmd = { 'rector-warm-lsp', '--working-dir=' .. new_root_dir }
+    end,
   }
 end
 lspconfig.rector_warm.setup({})
