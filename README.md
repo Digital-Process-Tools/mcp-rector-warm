@@ -208,8 +208,100 @@ loop (nothing can race it there today), kept as defense-in-depth for a future
 async/pipelined transport.
 
 Out of v1 scope: unsaved buffers (Rector reads from disk), workspace-wide
-scans, and `workspace/configuration`. Editor-specific setup snippets are
-tracked in a follow-up issue ([#55](https://github.com/Digital-Process-Tools/mcp-rector-warm/issues/55)).
+scans, and `workspace/configuration`.
+
+### Editor setup
+
+Every editor below spawns the same command:
+`rector-warm-lsp --working-dir=/path/to/project` (composer-global install) or
+`vendor/bin/rector-warm-lsp --working-dir=/path/to/project` (local clone),
+filetype `php`, root markers `composer.json` / `rector.php`.
+
+**These snippets are written against each editor's own published LSP-client
+documentation. None of them has been run against a live install of Neovim,
+Zed, Helix, Sublime Text or PhpStorm/LSP4IJ in the environment that produced
+this change** -- treat each as a documented starting point, not a verified
+recipe, until someone runs it against a real editor and records the version
+it was tested against.
+
+#### Neovim (0.11+, native `vim.lsp.config`)
+
+```lua
+-- ~/.config/nvim/lsp/rector.lua
+return {
+  cmd = { 'rector-warm-lsp', '--working-dir=' .. vim.fn.getcwd() },
+  filetypes = { 'php' },
+  root_markers = { 'composer.json', 'rector.php' },
+}
+```
+
+```lua
+-- init.lua
+vim.lsp.enable('rector')
+```
+
+On older Neovim via [nvim-lspconfig](https://github.com/neovim/nvim-lspconfig), register a custom server before calling `setup`:
+
+```lua
+local lspconfig = require('lspconfig')
+local configs = require('lspconfig.configs')
+if not configs.rector_warm then
+  configs.rector_warm = {
+    default_config = {
+      cmd = { 'rector-warm-lsp', '--working-dir=' .. vim.fn.getcwd() },
+      filetypes = { 'php' },
+      root_dir = lspconfig.util.root_pattern('composer.json', 'rector.php'),
+    },
+  }
+end
+lspconfig.rector_warm.setup({})
+```
+
+#### Zed
+
+Zed's stable path for an arbitrary, non-bundled LSP is a small
+[language server extension](https://zed.dev/docs/extensions/languages#language-servers)
+rather than a plain `settings.json` entry -- unlike Neovim/Helix/Sublime, there
+is no documented `settings.json` shape here yet to snippet honestly. Filed as
+a gap for a follow-up rather than guessed at.
+
+#### Helix
+
+```toml
+# ~/.config/helix/languages.toml
+[language-server.rector-warm-lsp]
+command = "rector-warm-lsp"
+args = ["--working-dir=."]
+
+[[language]]
+name = "php"
+language-servers = ["rector-warm-lsp"]
+```
+
+Helix spawns language servers with the workspace root as the working
+directory already, so `--working-dir=.` resolves correctly.
+
+#### Sublime Text ([LSP package](https://github.com/sublimelsp/LSP))
+
+```json
+// LSP.sublime-settings
+{
+  "clients": {
+    "rector-warm-lsp": {
+      "enabled": true,
+      "command": ["rector-warm-lsp", "--working-dir=${folder}"],
+      "selector": "source.php"
+    }
+  }
+}
+```
+
+#### PhpStorm / IntelliJ ([LSP4IJ](https://github.com/redhat-developer/lsp4ij) plugin)
+
+LSP4IJ has no project-file snippet for an ad hoc server; it is wired through
+its UI: **Settings > Languages & Frameworks > Language Servers > +**, define
+a server with command `rector-warm-lsp --working-dir=$ProjectFileDir$` and
+file name pattern `*.php`.
 
 ## How it works
 
