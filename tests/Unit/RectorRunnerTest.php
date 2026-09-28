@@ -11,6 +11,26 @@ use PHPUnit\Framework\TestCase;
 final class RectorRunnerTest extends TestCase
 {
     /**
+     * Calls $attempt up to $attempts times total, sleeping $delayMicroseconds
+     * between attempts (never after the last one), stopping as soon as one
+     * call returns true. $attempt receives whether this is its final call so
+     * it can behave differently there (e.g. stop suppressing a real error) --
+     * this is generic on purpose so it can be pinned by a unit test
+     * (testRetryUntilTrue* below) independently of rmdir()/the filesystem.
+     */
+    private static function retryUntilTrue(callable $attempt, int $attempts, int $delayMicroseconds): void
+    {
+        for ($i = 1; $i <= $attempts; $i++) {
+            if ($attempt($i === $attempts)) {
+                return;
+            }
+            if ($i < $attempts) {
+                usleep($delayMicroseconds);
+            }
+        }
+    }
+
+    /**
      * rmdir() with a short retry-with-backoff, for cleaning up a temp
      * directory that was the cwd of a subprocess this test just killed.
      * TerminateProcess() on Windows can leave the OS holding the killed
@@ -21,25 +41,66 @@ final class RectorRunnerTest extends TestCase
      * temporarily unavailable". POSIX releases the handle synchronously
      * with the kill, so on POSIX this always succeeds on the first
      * attempt -- the retry is unconditional rather than
-     * PHP_OS_FAMILY-gated because it costs nothing there. 10 attempts *
-     * 100ms mirrors runCold()'s own poll interval. If the directory is
-     * still locked after that, the final attempt's real error is left to
-     * surface (not swallowed) -- retrying forever would hide a genuine
-     * leak behind what looks like a transient race.
+     * PHP_OS_FAMILY-gated because it costs nothing there. 10 attempts, 9
+     * 100ms gaps between them (mirroring runCold()'s own poll interval) --
+     * ~900ms of total backoff. If the directory is still locked after the
+     * 10th attempt, that attempt's own real (unsuppressed) error is left to
+     * surface -- retrying forever would hide a genuine leak behind what
+     * looks like a transient race.
      */
     private static function rmdirWithRetry(string $dir, int $attempts = 10, int $delayMicroseconds = 100_000): void
     {
-        for ($attempt = 1; $attempt <= $attempts; $attempt++) {
-            if (@rmdir($dir)) {
-                return;
-            }
-            if ($attempt === $attempts) {
-                rmdir($dir);
+        self::retryUntilTrue(
+            static fn (bool $isFinalAttempt): bool => $isFinalAttempt ? rmdir($dir) : @rmdir($dir),
+            $attempts,
+            $delayMicroseconds,
+        );
+    }
 
-                return;
-            }
-            usleep($delayMicroseconds);
-        }
+    /**
+     * Pins retryUntilTrue()'s stop-as-soon-as-success behaviour, the half of
+     * rmdirWithRetry() a real filesystem cannot exercise from this suite (the
+     * race it retries around is Windows-only and does not reproduce on
+     * POSIX, see trap.d/96.windows-rmdir-race-fixed.md) -- without this, a
+     * previous version's off-by-one (an extra, undocumented 11th call on the
+     * final attempt, with the two back-to-back and no backoff between them)
+     * shipped silently: rmdirWithRetry()'s own docblock and this commit's
+     * message both claimed "10 attempts" while the code made 11.
+     */
+    public function testRetryUntilTrueStopsAsSoonAsAttemptSucceeds(): void
+    {
+        $calls = 0;
+        self::retryUntilTrue(
+            function () use (&$calls): bool {
+                $calls++;
+
+                return $calls >= 3;
+            },
+            10,
+            0,
+        );
+        self::assertSame(3, $calls, 'must stop as soon as an attempt succeeds, not keep going to the attempt cap');
+    }
+
+    /**
+     * Pins the terminal-failure shape: exactly $attempts calls total (not
+     * $attempts + 1), and only the last of them is marked final -- the
+     * signal rmdirWithRetry() uses to switch from a suppressed @rmdir() to a
+     * real one that is allowed to surface its own error.
+     */
+    public function testRetryUntilTrueMakesExactlyAttemptsCallsAndMarksOnlyTheLastFinal(): void
+    {
+        $isFinalPerCall = [];
+        self::retryUntilTrue(
+            function (bool $isFinalAttempt) use (&$isFinalPerCall): bool {
+                $isFinalPerCall[] = $isFinalAttempt;
+
+                return false;
+            },
+            4,
+            0,
+        );
+        self::assertSame([false, false, false, true], $isFinalPerCall);
     }
 
     public function testIsWarmFalseBeforeBoot(): void
