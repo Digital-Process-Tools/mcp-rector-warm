@@ -35,5 +35,17 @@ bound, and the paragraph above still applies in full to anyone touching either d
 
 **Before touching either deadline in this file:** any change to `$callTimeoutSeconds`,
 `RUN_FORKED_DEADLINE_GRACE_SECONDS`, or either loop's timing needs the grace gap re-examined
-against the cleanup step's real worst case, not just the happy path -- and this file has no test
-exercising the boundary itself, only cases where 5s is obviously enough or obviously not.
+against the cleanup step's real worst case, not just the happy path.
+
+**#87 found the flake #81/#86 closed was only the message half of it.** The outer/daemon-side
+backstop firing doesn't just report a different message -- `runForked()`'s own catch block
+(`RectorRunner.php`) also `killAndReap($this->workerPid)`s and `forgetDeadWorker()`s the WHOLE
+worker, not only the wedged grandchild the inner site kills, so `isWarm()` goes false. The two
+wedge tests used to assert `isWarm()` true unconditionally after a kill regardless of which site
+fired, and one real run under CPU contention hit the outer site and flaked on exactly that.
+`RectorRunnerTest::testRunForkedOuterBackstopKillsTheWholeWorkerNotOnlyTheGrandchild` now pins
+this deterministically (a real booted worker, daemon-side socket swapped for a loopback nobody
+answers, so the outer backstop is guaranteed rather than merely likely to fire), and the two
+wedge tests branch their `isWarm()` assertion on which kill site's message came back. This still
+does not touch the 5s value itself -- it is still a guess, not a derived bound, and the paragraph
+above still applies in full to anyone touching either deadline.
