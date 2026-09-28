@@ -456,7 +456,13 @@ final class ServerStdioTest extends TestCase
         // Absolute config path passes through unchanged; a relative one resolves
         // against the project (working) dir, matching the production daemon.
         $configPath = str_starts_with($config, '/') ? $config : $project . '/' . $config;
+        // #97: same shebang-without-interpreter fix as invoke() below --
+        // $bin (or self::$bin) is a shebang-only PHP script proc_open()
+        // cannot resolve on Windows with no interpreter prepended. This
+        // review found this second call site still missing the prepend
+        // after invoke() alone was fixed.
         $cmd = [
+            PHP_BINARY,
             $bin ?? self::$bin,
             '--working-dir=' . $project,
             '--config=' . $configPath,
