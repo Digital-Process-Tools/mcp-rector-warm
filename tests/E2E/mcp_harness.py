@@ -159,8 +159,11 @@ def process_descendants(root_pid: int) -> list[tuple[int, int, str]]:
     call... a <defunct> entry confirms it"). One `ps -eo pid,ppid,stat` snapshot
     (not `ps --ppid`, which some `ps` builds refuse for a pid with no children at
     all rather than returning empty) walked as a tree from root_pid, POSIX `ps`
-    output, portable across the ubuntu-latest runners this repo's CI actually
-    uses; CI itself never runs this on anything but ubuntu-latest (#79).
+    output, portable across the ubuntu-latest runners this repo's CI used to
+    run exclusively on (#79). #97/#98 self-review correction: CI now also has
+    a macos-latest leg (see below) and a windows-latest leg (see the skip
+    guard below) -- this sentence used to say CI never ran anything but
+    ubuntu-latest, which the workflow this diff ships makes false.
 
     #79 follow-up, observed rather than reasoned: `ps -eo pid,ppid,stat` was run
     directly against a real macOS (Darwin/BSD `ps`) process tree, including one
@@ -173,10 +176,12 @@ def process_descendants(root_pid: int) -> list[tuple[int, int, str]]:
     padding inside parts[2] rather than splitting on it), and `"Z" in d[2]`
     membership checks below are unaffected by trailing whitespace, so zombie
     detection was confirmed working on this platform. This does not extend to
-    every BSD/macOS `ps` build or flag ordering, and CI still only runs Linux, so
-    the gap this issue names — no CI leg ever exercises this — remains real; only
-    the "does the parsing itself break" half of the reasoning has now been
-    checked on one real BSD-family `ps`, not merely assumed.
+    every BSD/macOS `ps` build or flag ordering, and only one real BSD-family
+    `ps` has been checked by hand, not merely assumed. #98 adds a real
+    macos-latest CI leg that now exercises this for real on every run; its
+    own first execution there (reasoned, not yet observed, as of this diff)
+    is what settles whether a GitHub-hosted macOS runner's `ps` build matches
+    what was checked by hand above.
 
     #97: Windows has no `ps` at all (and no pcntl/fork either -- the daemon
     never has a forked descendant to look for there in the first place, see

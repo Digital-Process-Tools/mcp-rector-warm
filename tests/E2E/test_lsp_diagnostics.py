@@ -205,7 +205,11 @@ def test_did_save_on_a_file_fixed_after_being_broken_does_not_drop_to_clean(serv
     uri = path.as_uri()
     did_open(server, uri)
 
-    path.write_text((project / "src" / "Fixable.php").read_text())
+    # Self-review finding: read_text()/write_text() with no `newline=` do
+    # universal-newline translation on read AND (on Windows) LF -> os.linesep
+    # on write -- on a Windows runner that would silently rewrite this
+    # fixture's line endings mid-test. Bytes in, bytes out, no translation.
+    path.write_bytes((project / "src" / "Fixable.php").read_bytes())
     notification = did_save(server, uri)
 
     diagnostics = notification["params"]["diagnostics"]
@@ -359,14 +363,18 @@ def test_a_second_save_on_the_same_warm_worker_is_not_stale(server, project):
     # content, not a cached copy of the first diagnose() result.
     path = project / "src" / "Fixable.php"
     uri = path.as_uri()
-    original_text = path.read_text()
+    original_bytes = path.read_bytes()
     did_open(server, uri)  # 1st call: 1 diagnostic
 
-    path.write_text((project / "src" / "Clean.php").read_text().replace("Clean", "Fixable"))
+    # Same self-review fix as test_did_save_on_a_file_fixed_after_being_broken_
+    # does_not_drop_to_clean above: bytes in, bytes out, no os.linesep
+    # translation on write.
+    clean_text = (project / "src" / "Clean.php").read_text().replace("Clean", "Fixable")
+    path.write_bytes(clean_text.encode("utf-8"))
     first_save = did_save(server, uri, version=2)
     assert first_save["params"]["diagnostics"] == []  # now clean
 
-    path.write_text(original_text)  # bring the fixable content back
+    path.write_bytes(original_bytes)  # bring the fixable content back
     second_save = did_save(server, uri, version=3)
 
     diagnostics = second_save["params"]["diagnostics"]
