@@ -149,4 +149,71 @@ final class RectorDiffParserTest extends TestCase
         self::assertSame(['RectorA', 'RectorB'], $fixes[0]['rectors']);
         self::assertSame([], $fixes[1]['rectors']);
     }
+
+    public function testBuildFixesAttributesASingleLeftoverRuleToTheOneUnattributedHunk(): void
+    {
+        // #100: two hunks; `changes` only names the rule for the first, but
+        // the file applied a SECOND rule the closest-hunk matching never
+        // attaches to anything. When exactly one hunk is unattributed and
+        // exactly one applied rule is unaccounted for, that leftover is
+        // unambiguous -- it must be the second hunk's rule.
+        $diff = "--- Original\n+++ New\n"
+            . "@@ -70,10 +70,10 @@\n"
+            . " c1\n c2\n c3\n c4\n c5\n-removed_A\n+added_A\n c6\n c7\n c8\n c9\n"
+            . "@@ -90,5 +90,5 @@\n"
+            . " d1\n d2\n d3\n-removed_B\n+added_B\n d4\n";
+
+        $changes = [
+            ['rector' => 'RectorA', 'line' => 75],
+        ];
+
+        $fixes = RectorDiffParser::buildFixes($diff, ['RectorA', 'RectorC'], $changes);
+
+        self::assertCount(2, $fixes);
+        self::assertSame(['RectorA'], $fixes[0]['rectors']);
+        self::assertSame(['RectorC'], $fixes[1]['rectors']);
+    }
+
+    public function testBuildFixesLeavesTwoUnattributedHunksGenericWhenOnlyOneRuleIsLeftover(): void
+    {
+        // Negative control: TWO hunks are unattributed and only ONE rule is
+        // leftover -- assigning it to either would violate "never attribute
+        // a rule that did not produce the hunk" (the E2E-checked invariant
+        // the issue itself names), so both must stay unattributed.
+        $diff = "--- Original\n+++ New\n"
+            . "@@ -70,10 +70,10 @@\n"
+            . " c1\n c2\n c3\n c4\n c5\n-removed_A\n+added_A\n c6\n c7\n c8\n c9\n"
+            . "@@ -90,5 +90,5 @@\n"
+            . " d1\n d2\n d3\n-removed_B\n+added_B\n d4\n";
+
+        $fixes = RectorDiffParser::buildFixes($diff, ['RectorC'], []);
+
+        // #91's file-wide fallback (`$changes === []`) already broadcasts
+        // RectorC to BOTH hunks here -- this pins that the new leftover
+        // logic does not change that pre-existing, deliberate behaviour.
+        self::assertSame(['RectorC'], $fixes[0]['rectors']);
+        self::assertSame(['RectorC'], $fixes[1]['rectors']);
+    }
+
+    public function testBuildFixesLeavesGenericWhenNoLeftoverRuleRemains(): void
+    {
+        // A second negative control: one unattributed hunk, but nothing is
+        // actually leftover (every applied rule was already matched
+        // elsewhere) -- must stay unattributed rather than reusing a rule
+        // that DID produce another hunk.
+        $diff = "--- Original\n+++ New\n"
+            . "@@ -70,10 +70,10 @@\n"
+            . " c1\n c2\n c3\n c4\n c5\n-removed_A\n+added_A\n c6\n c7\n c8\n c9\n"
+            . "@@ -90,5 +90,5 @@\n"
+            . " d1\n d2\n d3\n-removed_B\n+added_B\n d4\n";
+
+        $changes = [
+            ['rector' => 'RectorA', 'line' => 75],
+        ];
+
+        $fixes = RectorDiffParser::buildFixes($diff, ['RectorA'], $changes);
+
+        self::assertSame(['RectorA'], $fixes[0]['rectors']);
+        self::assertSame([], $fixes[1]['rectors']);
+    }
 }

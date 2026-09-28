@@ -66,7 +66,7 @@ final class LspServer
         }
 
         if ($method === 'initialized') {
-            return [];
+            return [$this->registerConfigFileWatcher()];
         }
 
         if ($method === 'shutdown') {
@@ -91,6 +91,10 @@ final class LspServer
             return [$this->codeAction($id, is_array($params) ? $params : [])];
         }
 
+        if ($method === 'workspace/didChangeWatchedFiles') {
+            return $this->watchedFilesChanged(is_array($params) ? ($params['changes'] ?? []) : []);
+        }
+
         if ($isRequest) {
             return [$this->error($id, -32601, sprintf('Method not found: %s', (string) $method))];
         }
@@ -101,6 +105,85 @@ final class LspServer
     public function isShuttingDown(): bool
     {
         return $this->shuttingDown;
+    }
+
+    /**
+     * #101: a `client/registerCapability` REQUEST (server -> client, per
+     * the LSP spec -- not a notification) asking the client to report
+     * changes to rector.php and composer.lock via
+     * `workspace/didChangeWatchedFiles`. Without this, the warm worker's
+     * own per-call config reload (RectorRunner::configFileChanged()) is
+     * correct on the NEXT diagnose() call, but nothing ever triggers that
+     * next call for a document the editor does not itself re-save -- the
+     * exact "diagnostics silently drift" gap the issue describes.
+     *
+     * @return array<string, mixed>
+     */
+    private function registerConfigFileWatcher(): array
+    {
+        return [
+            'jsonrpc' => '2.0',
+            'id' => 'rector-warm-lsp/config-watch',
+            'method' => 'client/registerCapability',
+            'params' => [
+                'registrations' => [
+                    [
+                        'id' => 'rector-warm-lsp-config-watch',
+                        'method' => 'workspace/didChangeWatchedFiles',
+                        'registerOptions' => [
+                            'watchers' => [
+                                ['globPattern' => '**/rector.php'],
+                                ['globPattern' => '**/composer.lock'],
+                            ],
+                        ],
+                    ],
+                ],
+            ],
+        ];
+    }
+
+    /**
+     * #101: re-diagnose every currently-open document when the client
+     * reports a change to a watched file that is actually rector.php or
+     * composer.lock -- an arbitrary watched-file event must NOT trigger
+     * this (see LspServerTest's negative control), only the config files
+     * registerConfigFileWatcher() asked to be told about.
+     *
+     * @param list<array<string, mixed>> $changes
+     * @return list<array<string, mixed>>
+     */
+    private function watchedFilesChanged(array $changes): array
+    {
+        $isConfigChange = false;
+        foreach ($changes as $change) {
+            $uri = $change['uri'] ?? null;
+            if (is_string($uri) && self::isWatchedConfigFile($uri)) {
+                $isConfigChange = true;
+                break;
+            }
+        }
+
+        if (!$isConfigChange) {
+            return [];
+        }
+
+        $frames = [];
+        foreach (array_keys($this->documentVersions) as $uri) {
+            $frames = array_merge($frames, $this->diagnoseDocument([
+                'uri' => $uri,
+                'version' => $this->documentVersions[$uri],
+            ]));
+        }
+
+        return $frames;
+    }
+
+    private static function isWatchedConfigFile(string $uri): bool
+    {
+        $path = self::uriToPath($uri);
+        $basename = basename(str_replace('\\', '/', $path));
+
+        return $basename === 'rector.php' || $basename === 'composer.lock';
     }
 
     /**
@@ -303,14 +386,26 @@ final class LspServer
      * and ONLY THEN does the leading slash need stripping. Reasoned, not
      * observed on this machine (no Windows available) -- see the developer
      * report for the platform-band note.
+     *
+     * #99: a UNC URI (`file://server/share/A.php`) puts `server` in
+     * parse_url()'s HOST component -- reading only PHP_URL_PATH used to
+     * drop it by accident, collapsing to the host-free (and wrong)
+     * `/share/A.php`. Handled deliberately here: a non-empty host other
+     * than `localhost` (RFC 8089's spelling for an empty authority) is
+     * folded back in as a `\\\\host\\share` UNC prefix.
      */
     private static function uriToPath(string $uri): string
     {
         $path = parse_url($uri, PHP_URL_PATH);
+        $host = parse_url($uri, PHP_URL_HOST);
         $path = is_string($path) ? rawurldecode($path) : $uri;
 
         if (preg_match('#^/[A-Za-z]:#', $path) === 1) {
             $path = substr($path, 1);
+        }
+
+        if (is_string($host) && $host !== '' && strcasecmp($host, 'localhost') !== 0) {
+            return '\\\\' . $host . str_replace('/', '\\', $path);
         }
 
         return $path;
