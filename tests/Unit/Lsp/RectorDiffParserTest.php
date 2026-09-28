@@ -26,12 +26,23 @@ final class RectorDiffParserTest extends TestCase
         );
 
         self::assertCount(1, $fixes);
+        // #91.2: the range covers only the four changed lines (old lines
+        // 7-10 -- the removed `if`/`return true`/`}`/`return false`), not
+        // the full 9-line hunk span the diff header carries (old lines
+        // 4-12), which includes 3 lines of context on each side.
         self::assertSame(
-            ['start' => ['line' => 3, 'character' => 0], 'end' => ['line' => 12, 'character' => 0]],
+            ['start' => ['line' => 6, 'character' => 0], 'end' => ['line' => 10, 'character' => 0]],
             $fixes[0]['range'],
         );
+        // Self-review correction (post-merge CI failure -- warm-vs-cold
+        // divergence in test_code_action_edit_matches_a_cold_rector_apply):
+        // newText must be narrowed the same way the range was, or a narrow
+        // range applied with WIDE replacement text (the full hunk, context
+        // included) duplicates the context lines still on disk either side
+        // of the range. Only the actual replacement -- the `+` line -- goes
+        // in newText; the surrounding `{`/`}` context lines stay untouched.
         self::assertSame(
-            "{\n    public function isEmpty(array \$items): bool\n    {\n        return count(\$items) === 0;\n    }\n}\n",
+            "        return count(\$items) === 0;\n",
             $fixes[0]['newText'],
         );
         self::assertSame(
@@ -70,7 +81,14 @@ final class RectorDiffParserTest extends TestCase
 
         $hunks = RectorDiffParser::parseHunks($diff);
 
-        self::assertSame([['oldStart' => 2, 'oldCount' => 0, 'newLines' => ['new line']]], $hunks);
+        self::assertSame([[
+            'oldStart' => 2,
+            'oldCount' => 0,
+            'newLines' => ['new line'],
+            'hasChange' => true,
+            'changeFrom' => 2,
+            'changeToExclusive' => 2,
+        ]], $hunks);
     }
 
     public function testParseHunksHandlesMultipleHunksInOneDiff(): void
@@ -82,5 +100,53 @@ final class RectorDiffParserTest extends TestCase
         self::assertCount(2, $hunks);
         self::assertSame(1, $hunks[0]['oldStart']);
         self::assertSame(10, $hunks[1]['oldStart']);
+    }
+
+    public function testParseHunksFlagsAContextOnlyHunkAsNoChange(): void
+    {
+        // #91.3: Rector has been observed emitting a hunk with no `+`/`-`
+        // lines at all for a CRLF-only difference -- every line is context.
+        $diff = "--- Original\n+++ New\n@@ -1,3 +1,3 @@\n <?php\n \n class X {}\n";
+
+        $hunks = RectorDiffParser::parseHunks($diff);
+
+        self::assertCount(1, $hunks);
+        self::assertFalse($hunks[0]['hasChange']);
+        self::assertNull($hunks[0]['changeFrom']);
+        self::assertNull($hunks[0]['changeToExclusive']);
+    }
+
+    public function testBuildFixesSkipsAContextOnlyNoOpHunk(): void
+    {
+        // Positive control for the case above: a hunk with real changes
+        // still produces a fix -- only the no-op hunk is skipped.
+        $diff = "--- Original\n+++ New\n@@ -1,3 +1,3 @@\n <?php\n \n class X {}\n";
+
+        self::assertSame([], RectorDiffParser::buildFixes($diff, ['SomeRector'], []));
+    }
+
+    public function testBuildFixesAttributesAnOutOfRangeChangeToTheClosestHunkOnly(): void
+    {
+        // #91.1: a change whose line falls one past the first hunk's own
+        // span (and far from the second hunk) used to broadcast to EVERY
+        // hunk in the file via the file-wide applied_rectors fallback. It
+        // must now attach only to the closer hunk, leaving the other hunk's
+        // rectors empty rather than also inheriting it.
+        $diff = "--- Original\n+++ New\n"
+            . "@@ -70,10 +70,10 @@\n"
+            . " c1\n c2\n c3\n c4\n c5\n-removed_A\n+added_A\n c6\n c7\n c8\n c9\n"
+            . "@@ -90,5 +90,5 @@\n"
+            . " d1\n d2\n d3\n-removed_B\n+added_B\n d4\n";
+
+        $changes = [
+            ['rector' => 'RectorA', 'line' => 75],
+            ['rector' => 'RectorB', 'line' => 81],
+        ];
+
+        $fixes = RectorDiffParser::buildFixes($diff, ['RectorA', 'RectorB'], $changes);
+
+        self::assertCount(2, $fixes);
+        self::assertSame(['RectorA', 'RectorB'], $fixes[0]['rectors']);
+        self::assertSame([], $fixes[1]['rectors']);
     }
 }

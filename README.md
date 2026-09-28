@@ -197,9 +197,18 @@ rather than an agent calling a tool. Same `--working-dir` flag as
 
 On `didOpen`/`didSave` it runs `rector_process` with `dryRun: true` on that
 file and publishes one diagnostic per changed hunk (severity Information,
-`source: "rector"`, message = the rule name(s) that hunk came from).
-`textDocument/codeAction` over a diagnostic offers `Apply Rector: <rule>` --
-a `WorkspaceEdit` built straight from Rector's own unified diff, no full-file
+`source: "rector"`, message = the rule name(s) attributed to that hunk, or
+`"Rector fix"` when none could be pinned to it specifically), narrowed to the
+lines the hunk actually changes rather than the surrounding diff context, and
+attributed to the hunk closest to where the rule reported its change. A hunk
+with no real change at all (observed for a CRLF-only difference) is skipped
+rather than published as a no-op fix. A failed call -- a syntax error, an
+out-of-root path, or any other Rector/tool-level error -- is published too,
+as an Error-severity diagnostic with no quickfix behind it, so a broken file
+is never indistinguishable from a clean one (#90, #91).
+`textDocument/codeAction` over a diagnostic offers `Apply Rector: <rule>` (or
+`Apply Rector: Rector fix` for the same no-rule-pinned case) -- a
+`WorkspaceEdit` built straight from Rector's own unified diff, no full-file
 read needed -- plus a whole-file "Apply all Rector fixes" action. `didClose`
 clears a file's diagnostics. Results are pinned to the document version that
 requested them, so a stale one is discarded if a newer `didSave` for the same
