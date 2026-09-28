@@ -26,6 +26,8 @@
     "authority": "loop",
     "merge_method": "squash",
     "create_release": true,
+    "draft": false,
+    "latest": true,
     "commit_subject": null,
     "triggers": {
       "merged_prs": 10,
