@@ -86,6 +86,35 @@ final class ServerVersionTest extends TestCase
         self::assertSame($expected, ServerVersion::normalizeComposerVersion($pretty));
     }
 
+    /**
+     * #77: fromInstalledVersions() called class_exists() with autoloading
+     * disabled (the second argument false). Composer\InstalledVersions is a
+     * classmap-only class -- vendor/autoload.php never requires it eagerly --
+     * so with autoloading off the check always returns false and the
+     * Composer-pretty-version branch never runs, in any process, ever.
+     *
+     * Run in a separate process (a fresh PHP interpreter) so this is a true
+     * positive control: without process isolation, an earlier test in the
+     * same run could have already triggered the autoload of
+     * Composer\InstalledVersions for an unrelated reason, which would make
+     * the "not loaded yet" assertion below pass even with the bug present.
+     */
+    #[\PHPUnit\Framework\Attributes\RunInSeparateProcess]
+    public function testResolveActuallyAutoloadsComposerInstalledVersions(): void
+    {
+        self::assertFalse(
+            class_exists(\Composer\InstalledVersions::class, false),
+            'positive control: the class must not already be loaded in this fresh process',
+        );
+
+        ServerVersion::resolve();
+
+        self::assertTrue(
+            class_exists(\Composer\InstalledVersions::class, false),
+            'resolve() must autoload Composer\InstalledVersions itself via its own class_exists() check, not merely observe that something else already loaded it',
+        );
+    }
+
     public static function composerVersionShapes(): array
     {
         return [
