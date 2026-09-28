@@ -38,10 +38,17 @@ final class RectorRunnerProcessTreeKillTest extends TestCase
             chdir($tmp);
             $_SERVER['argv'] = ['rector'];
 
+            // The pre-#108 cold subprocess per call: since #108 only reached through
+            // the MCP_RECTOR_WARM_NO_PCNTL=cold escape hatch, pinned here directly.
             $runner = new class(self::DEADLINE_SECONDS) extends RectorRunner {
                 protected function canFork(): bool
                 {
                     return false;
+                }
+
+                protected function noPcntlMode(): string
+                {
+                    return self::NO_PCNTL_MODE_COLD;
                 }
             };
 
@@ -126,6 +133,79 @@ final class RectorRunnerProcessTreeKillTest extends TestCase
             $runner?->reboot();
             chdir($previousCwd);
             $_SERVER['argv'] = $previousArgv;
+            self::removeProject($tmp);
+        }
+    }
+
+    /**
+     * #108: without pcntl the call runs IN the standby worker process, so the deadline
+     * kill takes the worker's whole tree (worker + Rector's parallel workers) down --
+     * there is no inner grandchild to scope it to -- and the next call must boot a
+     * fresh worker rather than write to the dead one.
+     */
+    public function testStandbyWorkerCallKilledAtItsDeadlineLeavesNoProcessBehindAndTheNextCallReboots(): void
+    {
+        [$tmp, $pidFile] = self::makeWedgedProject('standby');
+        // No class, so the wedged rule (Class_ nodes only) never fires on it.
+        file_put_contents($tmp . '/src/plain.php', "<?php\n\ndeclare(strict_types=1);\n\n\$x = 1;\n");
+        $previousCwd = getcwd();
+        $previousArgv = $_SERVER['argv'] ?? ['rector'];
+        $runner = null;
+
+        try {
+            chdir($tmp);
+            $_SERVER['argv'] = ['rector'];
+
+            $runner = new class(self::DEADLINE_SECONDS) extends RectorRunner {
+                protected function canFork(): bool
+                {
+                    return false;
+                }
+
+                protected function noPcntlMode(): string
+                {
+                    return self::NO_PCNTL_MODE_STANDBY;
+                }
+
+                // The boot is setup, not what is under test (#113).
+                protected function bootDeadlineNs(): ?int
+                {
+                    return null;
+                }
+            };
+
+            try {
+                $runner->run(['rector', 'process', '--no-progress-bar', '--', $tmp . '/src/Foo.php']);
+                self::fail('expected the wedged standby-worker call to be killed at its deadline');
+            } catch (\RuntimeException $e) {
+                self::assertStringContainsString('--call-timeout', $e->getMessage());
+                self::assertStringContainsString('warm worker process was killed', $e->getMessage());
+            }
+
+            $pids = self::recordedPids($pidFile);
+            self::assertNotSame([], $pids['rule'], 'must fire: the wedged rule never ran, so nothing here was tested');
+            self::assertNotSame([], $pids['config'], 'must fire: the worker process loaded rector.php');
+            $killed = \array_values(\array_unique(\array_merge($pids['config'], $pids['rule'])));
+            self::assertSame(
+                [],
+                self::stillAlive($killed),
+                'the worker and every process spawned for a timed-out call must be gone after the kill (#112)',
+            );
+            self::assertFalse($runner->isWarm(), 'a killed worker must be forgotten, not left as a standby');
+
+            // The next call reboots a fresh worker (positive control: it succeeds and
+            // is served by a process that was not among the killed ones).
+            $next = $runner->run(['rector', 'process', '--no-progress-bar', '--dry-run', '--', $tmp . '/src/plain.php']);
+            self::assertFalse($next['warm_boot'], 'the call after a kill must boot a fresh worker');
+            $fresh = \array_values(\array_diff(self::recordedPids($pidFile)['config'], $killed));
+            self::assertNotSame([], $fresh, 'a fresh worker process must have loaded rector.php for the next call');
+        } finally {
+            // The next call left a standby booting with its cwd in $tmp: reboot()
+            // kills and reaps it, so the directory is free to remove (Windows).
+            $runner?->reboot();
+            chdir($previousCwd);
+            $_SERVER['argv'] = $previousArgv;
+            @unlink($tmp . '/src/plain.php');
             self::removeProject($tmp);
         }
     }

@@ -23,7 +23,7 @@ jobs:
         php: ['8.2', '8.3', '8.4']
         include:
           # Windows: no pcntl, so RectorRunner::canFork() is false and the
-          # reboot-before-each-call fallback (#8) is the real path here --
+          # standby worker process path (#108) is the real path here --
           # that is the point of this leg, not a gap in it (#97).
           - os: windows-latest
             php: '8.3'
@@ -94,9 +94,9 @@ jobs:
         shell: bash
         run: ./vendor/bin/phpunit --no-coverage --colors=never --no-progress --display-warnings
 
-  # No-pcntl fallback: the ubuntu-latest matrix above always has pcntl, so
-  # RectorRunner::canFork() is always true there and the reboot-before-each-call
-  # fallback (#8) only ever runs through a stubbed unit test. This job disables
+  # No-pcntl path: the ubuntu-latest matrix above always has pcntl, so
+  # RectorRunner::canFork() is always true there and the no-pcntl standby
+  # worker (#108) would only run on the windows-latest leg. This job disables
   # pcntl_fork/pcntl_waitpid/stream_socket_pair via php.ini so the real
   # boot()/reboot()/execute() sequence in tests/Integration/ServerStdioTest.php
   # runs the fallback path for real, over a real subprocess. One PHP version:
@@ -315,3 +315,45 @@ jobs:
 
       - name: Run Helix health check
         run: tests/E2E/nvim/run_helix_health.sh
+
+  # #108: the no-pcntl standby worker under the whole E2E oracle suite on Linux
+  # too, not only as a side effect of windows-latest having no pcntl. A job of its
+  # own rather than a matrix dimension on `e2e`, so the required `e2e (<os>)`
+  # check names stay as they are. E2E_DISABLE_PCNTL makes the harness start the
+  # server with the same disable_functions list as the no-pcntl job above.
+  e2e-no-pcntl:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Setup PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.3'
+          coverage: none
+          tools: composer:v2
+
+      - name: Setup Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: tests/E2E/requirements.txt
+
+      - name: Cache composer
+        uses: actions/cache@v6
+        with:
+          path: ~/.composer/cache
+          key: composer-e2e-no-pcntl-${{ hashFiles('composer.json') }}
+
+      - name: Install dependencies
+        run: |
+          composer install --no-progress --prefer-dist
+          python -m pip install -r tests/E2E/requirements.txt
+
+      - name: Run end-to-end suite without pcntl
+        env:
+          E2E_PYTHON: python
+          E2E_DISABLE_PCNTL: '1'
+        run: tests/E2E/run.sh

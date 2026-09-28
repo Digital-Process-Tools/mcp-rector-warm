@@ -117,16 +117,22 @@ def write_wrapper_config(config: Path, dest: Path) -> Path:
 
 def build_project_vendor_shim(project_autoload: Path, shim: Path) -> Path:
     """bin/ + src/ + vendor/autoload.php: the checkout's unchanged bin takes its first
-    autoload candidate (__DIR__ . '/../vendor/autoload.php'), which is the shim."""
+    autoload candidate (__DIR__ . '/../vendor/autoload.php'), which is the shim.
+
+    The helper scripts RectorRunner spawns without pcntl (bin/rector-cold-call.php,
+    bin/rector-warm-worker.php, #108) are found relative to RectorRunner's own file, so
+    the shim serves src/ from its OWN copy: those scripts then resolve to shim/bin and
+    load the shim too, rather than the checkout's vendor/ (a different Rector)."""
     if shim.exists():
         shutil.rmtree(shim)
     (shim / "bin").mkdir(parents=True)
     (shim / "vendor").mkdir()
-    shutil.copy2(REPO / "bin" / "mcp-rector-warm", shim / "bin" / "mcp-rector-warm")
+    for script in ("mcp-rector-warm", "rector-cold-call.php", "rector-warm-worker.php"):
+        shutil.copy2(REPO / "bin" / script, shim / "bin" / script)
     shutil.copytree(REPO / "src", shim / "src")  # scanned by the SDK's tool discovery
     (shim / "vendor" / "autoload.php").write_text(
         SHIM_AUTOLOAD_PHP.replace("__AUTOLOAD__", php_str(str(project_autoload)))
-        .replace("__SRC__", php_str(str(REPO / "src") + "/")),
+        .replace("__SRC__", php_str(str(shim / "src") + "/")),
         encoding="utf-8",
     )
     return shim / "bin" / "mcp-rector-warm"
@@ -202,6 +208,10 @@ async def run_warm(args: argparse.Namespace, bin_path: Path, files: list[Path], 
                     async with ClientSession(read, write, client_info=client_info) as session:
                         await session.initialize()
                         while len(results) < len(files):
+                            if results and args.warm_gap > 0:
+                                # Think time between calls, outside the timer: what a
+                                # no-pcntl standby worker (#108) boots in the background.
+                                await asyncio.sleep(args.warm_gap)
                             path = files[len(results)]
                             arguments = dict(path=str(path), dryRun=True)
                             started = time.perf_counter()
@@ -342,7 +352,7 @@ def write_markdown(report: dict[str, Any], dest: Path) -> None:
         f"- mode: **{m['mode']}**; checkout HEAD {m['checkout_head']}, src/+bin/ digest {m['code_digest'][:12]}",
         f"- project: `{m['project']}`; config: `{m['config']}`",
         f"- php: `{m['php']}` ({m['php_version']}); platform: {m['platform']}",
-        f"- files: {m['sampled']} of {m['candidates']} candidates (seed {m['seed']}, limit {m['limit']}); cold jobs: {m['jobs']}",
+        f"- files: {m['sampled']} of {m['candidates']} candidates (seed {m['seed']}, limit {m['limit']}); cold jobs: {m['jobs']}; warm gap: {m.get('warm_gap', 0)}s",
         f"- warm sessions: {m['warm_sessions']} (more than 1 means the server was restarted)", "",
         "| match | mismatch | warm error | cold error | both error |",
         "| ---: | ---: | ---: | ---: | ---: |",
@@ -441,6 +451,8 @@ def main() -> int:
     ap.add_argument("--rector", type=Path, help="rector binary for the cold side (default: the one the mode implies)")
     ap.add_argument("--timeout", type=float, default=600.0, help="seconds per call, either side")
     ap.add_argument("--progress", action="store_true", help="one line per call on stderr")
+    ap.add_argument("--warm-gap", type=float, default=0.0,
+                    help="seconds to wait between warm calls, not timed (think time; #108's no-pcntl standby boots in it)")
     args = ap.parse_args()
 
     args.project = args.project.resolve()
@@ -495,7 +507,7 @@ def main() -> int:
         warm_bin=str(bin_path), cold_rector=str(rector), wrapper_config=str(args.server_config),
         project_autoload=str(args.project_autoload) if args.project_autoload else None,
         shim_loaded=shim_lines, files_spec=args.files, seed=args.seed, limit=args.limit,
-        jobs=args.jobs, candidates=candidates, sampled=len(files),
+        jobs=args.jobs, warm_gap=args.warm_gap, candidates=candidates, sampled=len(files),
         warm_sessions=max(w["session"] for w in warm),
         finished=datetime.now(timezone.utc).isoformat(timespec="seconds"),
     )

@@ -17,7 +17,7 @@ from mcp_types.version import HANDSHAKE_PROTOCOL_VERSIONS
 
 from mcp_harness import (
     FIXTURE_PROJECT,
-    NO_PCNTL_PLATFORM,
+    EXPECT_COLD_EVERY_CALL,
     REPO,
     exit_record,
     non_jsonrpc_lines,
@@ -128,9 +128,8 @@ def test_dry_run_returns_a_diff_and_leaves_the_file_alone(project: Path, record:
 
 
 def test_second_call_in_the_same_session_is_warm_and_agrees_with_the_first(project: Path, record: Path) -> None:
-    """On a no-pcntl platform (Windows, #97) the second call is cold instead, since
-    RectorRunner never forks a warm worker there at all -- this function's own name
-    describes the pcntl-available platforms the fixture normally runs on."""
+    """Warm on every platform since #108 (without pcntl: a pre-booted standby worker
+    process); cold only under the MCP_RECTOR_WARM_NO_PCNTL=cold escape hatch."""
     target = project / "src" / "Money.php"
 
     async def scenario():
@@ -142,18 +141,19 @@ def test_second_call_in_the_same_session_is_warm_and_agrees_with_the_first(proje
     first, second = anyio.run(scenario)
 
     assert first["warm_boot"] is False
-    if NO_PCNTL_PLATFORM:
-        assert second["warm_boot"] is False, "no pcntl on this platform (#97) -- every call must be a cold boot"
+    if EXPECT_COLD_EVERY_CALL:
+        assert second["warm_boot"] is False, "MCP_RECTOR_WARM_NO_PCNTL=cold -- every call must be a cold boot"
     else:
+        # #108: also without pcntl -- the second call is served by the standby worker
+        # process the first call left booted.
         assert second["warm_boot"] is True, "the second call must reuse the warm container"
     assert normalise(second, project) == normalise(first, project)
     assert normalise(second, project)["changed_files"] == ["src/Money.php"]
 
 
 def test_a_different_second_file_in_a_warm_session_is_refactored(project: Path, record: Path) -> None:
-    """On a no-pcntl platform (Windows, #97) the second call is cold instead, since
-    RectorRunner never forks a warm worker there at all -- this function's own name
-    describes the pcntl-available platforms the fixture normally runs on."""
+    """Warm on every platform since #108 (without pcntl: a pre-booted standby worker
+    process); cold only under the MCP_RECTOR_WARM_NO_PCNTL=cold escape hatch."""
     async def scenario():
         async with open_server(project, record, project / "rector.php") as server:
             first = await server.process(project / "src" / "Sample.php")
@@ -163,8 +163,8 @@ def test_a_different_second_file_in_a_warm_session_is_refactored(project: Path, 
     first, second = anyio.run(scenario)
 
     assert normalise(first, project)["changed_files"] == []
-    if NO_PCNTL_PLATFORM:
-        assert second["warm_boot"] is False, "no pcntl on this platform (#97) -- every call must be a cold boot"
+    if EXPECT_COLD_EVERY_CALL:
+        assert second["warm_boot"] is False, "MCP_RECTOR_WARM_NO_PCNTL=cold -- every call must be a cold boot"
     else:
         assert second["warm_boot"] is True
     assert normalise(second, project)["changed_files"] == ["src/Money.php"]

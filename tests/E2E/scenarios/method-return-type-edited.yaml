@@ -1,0 +1,66 @@
+description: "A class method in another file changes its native return type mid-session; the caller's inferred return type must follow (#8's own reproduction, as a class method rather than a function: a container that already analysed the caller keeps PHPStan's cached class reflection and still answers int -- measured on #108's rejected 'reuse' no-pcntl mode)."
+config: |
+  <?php
+
+  declare(strict_types=1);
+
+  use Rector\Config\RectorConfig;
+  use Rector\TypeDeclaration\Rector\ClassMethod\ReturnTypeFromStrictTypedCallRector;
+  use Rector\ValueObject\PhpVersion;
+
+  return RectorConfig::configure()
+      ->withPaths([__DIR__ . "/src"])
+      ->withAutoloadPaths([__DIR__ . "/src"])
+      ->withPhpVersion(PhpVersion::PHP_83)
+      ->withRules([ReturnTypeFromStrictTypedCallRector::class]);
+files:
+  src/Dependency.php: |
+    <?php
+
+    declare(strict_types=1);
+
+    namespace App;
+
+    final class Dependency
+    {
+        public function foo(): int
+        {
+            return 1;
+        }
+    }
+  src/Caller.php: |
+    <?php
+
+    declare(strict_types=1);
+
+    namespace App;
+
+    final class Caller
+    {
+        public function bar(Dependency $dependency)
+        {
+            return $dependency->foo();
+        }
+    }
+steps:
+  - call: src/Caller.php
+    expect:
+      changed: 1
+      diff_contains: "+    public function bar(Dependency $dependency): int"
+  - edit:
+      path: src/Dependency.php
+      old: "public function foo(): int\n    {\n        return 1;"
+      new: "public function foo(): string\n    {\n        return 'x';"
+  - call: src/Caller.php
+    expect:
+      changed: 1
+      diff_contains: "+    public function bar(Dependency $dependency): string"
+  # Revert: the cached shape must not win in the other direction either.
+  - edit:
+      path: src/Dependency.php
+      old: "public function foo(): string\n    {\n        return 'x';"
+      new: "public function foo(): int\n    {\n        return 1;"
+  - call: src/Caller.php
+    expect:
+      changed: 1
+      diff_contains: "+    public function bar(Dependency $dependency): int"

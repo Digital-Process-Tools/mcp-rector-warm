@@ -20,7 +20,7 @@ from typing import Any, AsyncIterator
 
 import pytest
 from mcp import ClientSession, StdioServerParameters
-from mcp.client.stdio import stdio_client
+from mcp.client.stdio import get_default_environment, stdio_client
 from mcp.types import Implementation
 
 HERE = Path(__file__).resolve().parent
@@ -45,7 +45,19 @@ CALL_TIMEOUT = float(os.environ.get("E2E_CALL_TIMEOUT", "180"))
 # broken, but because it is doing exactly what it is documented to do. Folding this
 # in here (rather than skipping the assertion outright) keeps it a real check on
 # Windows too: it still pins that every call actually goes cold there.
-NO_PCNTL_PLATFORM = sys.platform.startswith("win")
+# E2E_DISABLE_PCNTL=1 (#108) runs the SERVER with pcntl disabled through php.ini --
+# the same disable_functions list the CI no-pcntl job uses -- so the no-pcntl path can
+# be exercised on a POSIX host, not only on windows-latest. The cold oracle is not
+# affected: it never forks either way.
+DISABLE_PCNTL = os.environ.get("E2E_DISABLE_PCNTL") == "1"
+NO_PCNTL_INI = ["-ddisable_functions=pcntl_fork,pcntl_waitpid,stream_socket_pair"] if DISABLE_PCNTL else []
+NO_PCNTL_PLATFORM = sys.platform.startswith("win") or DISABLE_PCNTL
+
+# #108: without pcntl the server is warm too now (a pre-booted standby worker process
+# per call), so warm_boot follows the same rules as on a pcntl platform. Only the
+# escape hatch MCP_RECTOR_WARM_NO_PCNTL=cold (inherited by the server from this
+# environment) brings back "every call is a cold boot".
+EXPECT_COLD_EVERY_CALL = NO_PCNTL_PLATFORM and os.environ.get("MCP_RECTOR_WARM_NO_PCNTL", "").strip().lower() == "cold"
 
 
 def php_binary() -> str:
@@ -91,14 +103,20 @@ async def open_server(
     # php_ini: `-d key=value` for the SERVER process only (e.g. a short
     # default_socket_timeout, #32). The cold oracle runs with PHP defaults.
     ini_flags = [f"-d{key}={value}" for key, value in (php_ini or {}).items()]
-    args = [str(TAP), str(record_dir), "--", php_binary(), *ini_flags, str(BIN), f"--working-dir={project}"]
+    args = [str(TAP), str(record_dir), "--", php_binary(), *NO_PCNTL_INI, *ini_flags, str(BIN), f"--working-dir={project}"]
     if config is not None:
         args.append(f"--config={config}")
     # call_timeout: --call-timeout=N on the SERVER only (#58), so a scenario can
     # pin a small deadline without waiting out the 600s production default.
     if call_timeout is not None:
         args.append(f"--call-timeout={call_timeout}")
-    params = StdioServerParameters(command=sys.executable, args=args, cwd=str(project))
+    # The SDK hands the server only a short whitelist of the environment (HOME, PATH,
+    # ...) unless told otherwise, so the #108 strategy switch has to be forwarded
+    # explicitly, or MCP_RECTOR_WARM_NO_PCNTL set for this suite never reaches it.
+    env = None
+    if "MCP_RECTOR_WARM_NO_PCNTL" in os.environ:
+        env = {**get_default_environment(), "MCP_RECTOR_WARM_NO_PCNTL": os.environ["MCP_RECTOR_WARM_NO_PCNTL"]}
+    params = StdioServerParameters(command=sys.executable, args=args, cwd=str(project), env=env)
 
     transport_errors: list[Exception] = []
 

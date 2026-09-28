@@ -158,6 +158,8 @@ Returns:
 ```
 
 `warm_boot: true` ⇒ container reused. `false` ⇒ first call (cold boot just finished).
+Without pcntl (Windows), `true` means the call was served by a worker process booted
+before it arrived -- see [Windows and other PHP builds without pcntl](#windows-and-other-php-builds-without-pcntl).
 
 **Failure is reported as an MCP tool error.** A rejected path (outside the
 working dir), a nonexistent path, a project with no `rector.php` and no
@@ -401,6 +403,35 @@ Three decisions worth knowing:
 3. **Runtime-prefixed namespace handled.** Rector's bundled Symfony is namespaced `RectorPrefix<date>\\Symfony\\Component\\Console\\...` to avoid dependency conflicts. The runner detects the prefix at boot and resolves Application/Input/Output class names dynamically. Survives Rector version bumps.
 
 4. **A missing config, a config with zero rules, or a project's own `rector.php` printing while it loads, cannot corrupt the MCP stdout.** Rector's CLI treats a missing `rector.php`, or one that loads fine but registers no rules or sets, as friendly onboarding, and Symfony's console output writes straight to the real stdout stream, bypassing an `ob_start()` wrap entirely -- and a project's `rector.php` can `echo`, or trigger a notice/deprecation, while it loads. None of that reaches the JSON-RPC pipe: both a missing config and a config with zero registered rules are refused as a real, reported error *before* any of Rector's own console machinery runs (per call, not at server startup -- a `rector.php` fixed up later just works on the next call), config resolution and container boot run inside an output buffer, and PHP's own error display is pointed at stderr (`display_errors=stderr`).
+
+### Windows and other PHP builds without pcntl
+
+PHP on Windows has no `pcntl`, so there is no fork (the same holds for a build that
+disables `pcntl_fork` in `disable_functions`). The server is still warm there, by a
+different route ([#108](https://github.com/Digital-Process-Tools/mcp-rector-warm/issues/108)):
+right after a call returns, it starts a **standby** `php` worker process that boots the
+Rector container in the background. The next call is served by that already-booted
+worker, which then exits; a fresh standby starts for the call after. Each call still runs
+in a container nothing else was analysed in -- the same guarantee the forked worker gives
+-- so the answers match a cold `rector process`.
+
+Reusing one worker process for every call was measured and rejected: 25 of the 55 E2E
+warm-vs-cold scenarios diverged (a dependency's edited method still answered with its old
+return type, and even a second, unedited file was reported as unchanged).
+
+What that costs compared with the fork:
+
+- **The boot has to fit between calls.** A call that arrives while the standby is still
+  booting waits for the rest of that boot -- never longer than a cold run, but not warm
+  either. On a large project (20 files, ~7s boot, PHP 8.2, Apple Silicon): 0.75s per call
+  (p50) with 15s between calls, against 7.4s cold; back-to-back calls with no pause,
+  7.6s against 8.1s cold. The fork path does 0.56s back-to-back on the same files.
+- **The config runs once per call**, as with cold Rector: side effects of loading
+  `rector.php` (clearing a cache, say) happen before every call, not once per session.
+- One idle `php` process holds a booted container between calls, as the forked worker does.
+
+`MCP_RECTOR_WARM_NO_PCNTL=cold` in the server's environment turns this off: every call then
+boots and runs in its own fresh `php` subprocess, as before #108.
 
 ## FAQ
 
