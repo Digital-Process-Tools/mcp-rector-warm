@@ -265,17 +265,35 @@ final class TempCopySweeperTest extends TestCase
     }
 
     /**
-     * `mklink /J` needs no elevated privilege, unlike `mklink /D`. Uses
-     * proc_open() with the command given as an ARRAY, not a shell string --
-     * PHP's symlink() cannot create a junction, link() creates a hardlink (a
-     * different reparse type again), and building this as a shell string via
-     * escapeshellarg() would hit the exact %/!/" mangling bug #162 guards
-     * against, sabotaging the very fixture meant to reproduce it.
+     * `mklink /J` needs no elevated privilege, unlike `mklink /D`. PHP's
+     * symlink() cannot create a junction, link() creates a hardlink (a
+     * different reparse type again), so this shells out to the `mklink`
+     * builtin -- which only exists inside cmd.exe, it is not a standalone
+     * executable.
+     *
+     * That rules out the ARRAY form of proc_open(): `cmd /c` needs the
+     * builtin's whole invocation as ONE command-line string, but the array
+     * form quotes each element ('cmd', '/c', 'mklink', '/J', $link, $target)
+     * as its own separate token, so cmd.exe receives '"mklink"' as a quoted
+     * token and tries to run it as a standalone program -- "'\"mklink\"' is
+     * not recognized as an internal or external command" (observed on CI).
+     *
+     * It also rules out escapeshellarg(): on Windows it replaces %, ! and "
+     * with spaces (the exact #162 mangling bug), which would corrupt the
+     * `!`-containing path the sibling test below exists to exercise.
+     *
+     * So this passes a plain STRING to proc_open() -- like the pre-#162
+     * exec()-based version, PHP routes a string command through cmd.exe
+     * automatically on Windows -- with paths wrapped in literal double
+     * quotes (no other escaping) rather than escapeshellarg(). Temp
+     * directory names here never contain a literal `"`, so this is safe
+     * without needing cmd's own quoting rules.
      */
     private static function createJunction(string $target, string $link): void
     {
         $descriptors = [1 => ['pipe', 'w'], 2 => ['pipe', 'w']];
-        $process = proc_open(['cmd', '/c', 'mklink', '/J', $link, $target], $descriptors, $pipes);
+        $command = 'mklink /J "' . $link . '" "' . $target . '"';
+        $process = proc_open($command, $descriptors, $pipes);
         self::assertIsResource($process, 'could not start mklink');
 
         $output = stream_get_contents($pipes[1]) . stream_get_contents($pipes[2]);
