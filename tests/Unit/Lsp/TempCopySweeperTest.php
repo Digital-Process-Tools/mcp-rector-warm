@@ -222,16 +222,85 @@ final class TempCopySweeperTest extends TestCase
     }
 
     /**
-     * `mklink /J` needs no elevated privilege, unlike `mklink /D`. Uses
-     * cmd.exe's mklink directly -- PHP's symlink() cannot create a
-     * junction, and link() creates a hardlink, a different reparse type
-     * again.
+     * #162: round-3 release-delta audit finding. escapeshellarg() on
+     * Windows replaces the characters %, ! and " with spaces (documented
+     * php-src behaviour) -- isLinkOrJunction()'s old `fsutil reparsepoint
+     * query` call built its command as a shell STRING via escapeshellarg(),
+     * so a path containing any of those characters got fsutil asked about a
+     * mangled path that does not exist, which exits non-zero and reads as
+     * "not a junction". A junction planted at such a path would bypass both
+     * sweepTree()'s and removeIfStale()'s guards, reopening #142/#144 for
+     * that narrower path shape. Windows-only: there is no junction concept
+     * to create elsewhere, and escapeshellarg()'s character-mangling here is
+     * Windows-specific too.
+     */
+    public function testIsLinkOrJunctionDetectsAJunctionUnderAPathContainingAnExclamationMark(): void
+    {
+        if (PHP_OS_FAMILY !== 'Windows') {
+            self::markTestSkipped('NTFS junctions, and escapeshellarg()\'s %/!/" mangling, are Windows-specific.');
+        }
+
+        $externalRoot = sys_get_temp_dir() . '/mcp-rector-sweep-external-' . bin2hex(random_bytes(4));
+        mkdir($externalRoot, 0o700, true);
+        $externalFile = $externalRoot . '/Outside.txt';
+        file_put_contents($externalFile, "not part of the workspace\\n");
+
+        // The `!` is the point of this test: escapeshellarg() mangles it.
+        $parentWithBang = sys_get_temp_dir() . '/mcp-rector-sweep-bang-!-' . bin2hex(random_bytes(4));
+        mkdir($parentWithBang, 0o700, true);
+        $junctionPath = $parentWithBang . '/.rector-warm-' . self::deadPid();
+
+        try {
+            self::createJunction($externalRoot, $junctionPath);
+
+            self::assertTrue(
+                TempCopySweeper::isLinkOrJunction($junctionPath),
+                'a junction under a path containing "!" must still be detected as a junction',
+            );
+        } finally {
+            self::removeLink($junctionPath);
+            self::removeTree($externalRoot);
+            self::removeTree($parentWithBang);
+        }
+    }
+
+    /**
+     * `mklink /J` needs no elevated privilege, unlike `mklink /D`. PHP's
+     * symlink() cannot create a junction, link() creates a hardlink (a
+     * different reparse type again), so this shells out to the `mklink`
+     * builtin -- which only exists inside cmd.exe, it is not a standalone
+     * executable.
+     *
+     * That rules out the ARRAY form of proc_open(): `cmd /c` needs the
+     * builtin's whole invocation as ONE command-line string, but the array
+     * form quotes each element ('cmd', '/c', 'mklink', '/J', $link, $target)
+     * as its own separate token, so cmd.exe receives '"mklink"' as a quoted
+     * token and tries to run it as a standalone program -- "'\"mklink\"' is
+     * not recognized as an internal or external command" (observed on CI).
+     *
+     * It also rules out escapeshellarg(): on Windows it replaces %, ! and "
+     * with spaces (the exact #162 mangling bug), which would corrupt the
+     * `!`-containing path the sibling test below exists to exercise.
+     *
+     * So this passes a plain STRING to proc_open() -- like the pre-#162
+     * exec()-based version, PHP routes a string command through cmd.exe
+     * automatically on Windows -- with paths wrapped in literal double
+     * quotes (no other escaping) rather than escapeshellarg(). Temp
+     * directory names here never contain a literal `"`, so this is safe
+     * without needing cmd's own quoting rules.
      */
     private static function createJunction(string $target, string $link): void
     {
-        $output = [];
-        $exitCode = 0;
-        exec(sprintf('mklink /J %s %s 2>&1', escapeshellarg($link), escapeshellarg($target)), $output, $exitCode);
-        self::assertSame(0, $exitCode, 'could not create the test junction: ' . implode("\n", $output));
+        $descriptors = [1 => ['pipe', 'w'], 2 => ['pipe', 'w']];
+        $command = 'mklink /J "' . $link . '" "' . $target . '"';
+        $process = proc_open($command, $descriptors, $pipes);
+        self::assertIsResource($process, 'could not start mklink');
+
+        $output = stream_get_contents($pipes[1]) . stream_get_contents($pipes[2]);
+        fclose($pipes[1]);
+        fclose($pipes[2]);
+        $exitCode = proc_close($process);
+
+        self::assertSame(0, $exitCode, 'could not create the test junction: ' . $output);
     }
 }

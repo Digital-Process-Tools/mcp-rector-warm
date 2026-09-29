@@ -243,22 +243,72 @@ final class RectorDiagnosticsSource implements BufferDiagnosticsSource, Workspac
                 return self::failure(sprintf('rector-warm-lsp: could not create a temp directory in %s', $directory));
             }
 
+            // #161: mkdir()'s 0o700 above only ever applies on the call that
+            // actually creates $tempDirectory -- once it exists (a
+            // not-yet-cleaned-up earlier run of this same pid, or a
+            // directory an attacker planted ahead of time under this
+            // guessable name), is_dir() short-circuits true and mkdir()
+            // never runs, so whatever mode it already had is kept -- wide
+            // enough for another user to read the unsaved buffer this
+            // method is about to write into it. Reapplied unconditionally,
+            // on every call, whether or not this call is the one that
+            // created the directory.
+            @chmod($tempDirectory, 0o700);
+
             // #149: the directory-level guard above stops a symlinked or
             // junctioned `.rector-warm-<pid>` NAME from being entered, but a
             // genuinely real directory (e.g. one an attacker plants ahead of
             // time, matching this server's own live pid so TempCopySweeper's
             // startup sweep skips it) passes that guard -- and can then
             // contain a symlink at the LEAF path, named after this buffer's
-            // own basename. Without this check, file_put_contents() below
-            // would follow it and overwrite whatever it points to, anywhere
-            // this process can write, before RectorTool's own realpath
+            // own basename. Without this check, the write below would
+            // follow it and overwrite whatever it points to, anywhere this
+            // process can write, before RectorTool's own realpath
             // containment check ever runs (that check only gates whether
             // Rector is invoked afterwards -- too late to stop the write).
             if (TempCopySweeper::isLinkOrJunction($tempPath)) {
                 return self::failure(sprintf('rector-warm-lsp: refusing a symlinked or junctioned temp file in %s', $directory));
             }
 
-            if (@file_put_contents($tempPath, $content) !== strlen($content)) {
+            // #161: isLinkOrJunction() above only widens is_link() with a
+            // Windows junction check -- neither detects a HARD LINK, a
+            // second directory entry pointing at the same inode as a file
+            // elsewhere. is_link() is correctly false for a hard link (it
+            // genuinely is not a symlink), so the guard above lets one
+            // straight through, and a plain write would truncate-and-
+            // overwrite whatever it points at. Rather than naming a third
+            // link type to check for, fopen(..., 'x') (O_CREAT|O_EXCL)
+            // refuses unconditionally if anything -- file, symlink, or hard
+            // link -- already exists at $tempPath: it does not need to know
+            // WHAT is there, only that something is, which also closes the
+            // check-then-write TOCTOU gap between the guard above and the
+            // write itself (same family as #145). Never in the way for the
+            // legitimate repeat-call pattern (two diagnoseBuffer() calls for
+            // the same buffer in a row): the `finally` block below removes
+            // $tempPath on every exit from this method, so by the time a
+            // second call for the same buffer reaches here, nothing is left
+            // at that path to collide with.
+            $handle = @fopen($tempPath, 'x');
+            if ($handle === false) {
+                return self::failure(sprintf('rector-warm-lsp: refusing to write a temp file that already exists in %s', $directory));
+            }
+
+            @chmod($tempPath, 0o600);
+
+            $length = strlen($content);
+            $written = 0;
+            while ($written < $length) {
+                $chunk = @fwrite($handle, substr($content, $written));
+                if ($chunk === false || $chunk <= 0) {
+                    break;
+                }
+                $written += $chunk;
+            }
+            fclose($handle);
+
+            if ($written !== $length) {
+                @unlink($tempPath);
+
                 return self::failure(sprintf('rector-warm-lsp: could not write the unsaved buffer to a temp file in %s', $directory));
             }
 
