@@ -826,9 +826,16 @@ final class RectorRunnerStandbyWorkerTest extends TestCase
             sleep(4);
 
             self::assertTrue(self::isAlive($daemonPid), 'control: the daemon must still be alive right before it is killed');
-            self::assertTrue(posix_kill($daemonPid, \SIGKILL) || \PHP_OS_FAMILY === 'Windows', 'must be able to kill -9 the driver ("daemon")');
+            // posix_kill()/SIGKILL are pcntl/posix-only: both are UNCONDITIONALLY
+            // evaluated by a bare `||` expression regardless of which side short-
+            // circuits, so referencing either on Windows (no posix extension, and
+            // SIGKILL is defined by pcntl, absent there too -- see this file's own
+            // src/RectorRunner.php:1554 comment) is a fatal error before the
+            // fallback ever runs, not a graceful skip (self-review finding).
             if (\PHP_OS_FAMILY === 'Windows') {
                 \Dpt\McpRectorWarm\Support\ProcessTree::killTree($daemonPid);
+            } else {
+                self::assertTrue(posix_kill($daemonPid, \SIGKILL), 'must be able to kill -9 the driver ("daemon")');
             }
 
             // Positive control for the poll itself: the worker pid must still

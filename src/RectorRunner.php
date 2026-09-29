@@ -1050,7 +1050,10 @@ class RectorRunner implements RunnerInterface
     /** How often an idle standby checks that its daemon is alive. 2s, not less: on
      *  Windows each check starts a `tasklist`. #127: also throttles
      *  forkAndExecute()'s orphan check while a call is IN FLIGHT on the pcntl
-     *  warm-worker path -- not only an idle standby's poll any more. */
+     *  warm-worker path -- not only an idle standby's poll any more. #134: also
+     *  the poll interval bin/rector-warm-orphan-watchdog.php is spawned with
+     *  (spawnOrphanWatchdog() passes it as that script's own argv), the same
+     *  idea's third consumer -- the no-pcntl path's own in-call orphan check. */
     private const ORPHAN_POLL_SECONDS = 2;
 
     /** The no-pcntl worker this instance talks to, or null.

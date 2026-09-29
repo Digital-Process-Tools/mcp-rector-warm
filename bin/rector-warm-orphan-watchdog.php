@@ -63,19 +63,24 @@ while (true) {
         ? $parent !== $daemonPid
         : (\PHP_OS_FAMILY === 'Windows' && ProcessTree::isAlive($daemonPid) === false);
     if ($orphaned) {
-        // A direct SIGKILL of the worker itself first, THEN the tree-kill for its
-        // descendants (Rector's own parallel mode, off here -- #134's own repro
-        // uses --debug -- but not necessarily off for every call this guards):
-        // ProcessTree::killTree()'s POSIX path freezes the WHOLE tree with
-        // repeated `ps -A` enumeration rounds before its own final SIGKILL, which
-        // is the right trade-off for a clean multi-process kill but is not the
-        // fast, bounded response this worker's own exit needs to be -- the direct
-        // kill below gives that immediately, and the tree-kill afterward is then
-        // pure best-effort cleanup of anything the worker itself spawned.
-        if (\function_exists('posix_kill')) {
-            @\posix_kill($workerPid, \defined('SIGKILL') ? \SIGKILL : 9);
-        }
-        ProcessTree::killTree($workerPid);
+        // Same tree-kill as a --call-timeout kill (#112), and in the SAME order
+        // RectorRunner::discardProcWorker() already uses it in ("Before
+        // proc_terminate(): taskkill /T must find the root alive"): the root must
+        // still be alive when its descendants are enumerated, since a dead root's
+        // children are reparented to init immediately, before anyone reaps them --
+        // the exact fact the parentOf() comment above relies on. A direct kill of
+        // the worker FIRST (tried, self-review finding) would reparent any
+        // process the worker itself spawned (Rector's own parallel mode) out from
+        // under this enumeration, leaking it -- the very #112 leak this call
+        // exists to prevent, for the scenario #134 exists to guard.
+        //
+        // THIS PROCESS is itself one of the worker's own children (spawned by
+        // spawnOrphanWatchdog(), which runs INSIDE the worker) -- without
+        // excluding its own pid, killTree()'s freeze loop would enumerate this
+        // watchdog as a descendant of its own target and SIGSTOP it mid-kill,
+        // deadlocking before it ever reaches the final SIGKILL (self-review
+        // finding, reproduced empirically).
+        ProcessTree::killTree($workerPid, [\getmypid()]);
         exit(0);
     }
     sleep($pollSeconds);

@@ -32,8 +32,21 @@ final class ProcessTree
      * and the caller still waits on it (pcntl_waitpid(), proc_close()) exactly as
      * it did before #112. The descendants are not the caller's children; once
      * their parents die they are reparented and reaped by init/launchd.
+     *
+     * $excludePids (#134): pids to leave alone even if the process table shows
+     * them as $rootPid's own descendants. This exists for a caller that IS
+     * itself one of $rootPid's children (bin/rector-warm-orphan-watchdog.php,
+     * spawned by the very worker process it watches) -- without an exclusion,
+     * the freeze loop below would enumerate that caller as a descendant of its
+     * own target and SIGSTOP it mid-call, before it ever reaches the final
+     * SIGKILL, deadlocking the very kill it is in the middle of performing
+     * (reproduced empirically: the freeze loop's own debug trace stopped dead
+     * between finding the watchdog's pid as a "new" descendant and the next
+     * round, with no further progress ever logged).
+     *
+     * @param list<int> $excludePids
      */
-    public static function killTree(int $rootPid): void
+    public static function killTree(int $rootPid, array $excludePids = []): void
     {
         if ($rootPid <= 0) {
             return;
@@ -41,6 +54,8 @@ final class ProcessTree
         if (\PHP_OS_FAMILY === 'Windows') {
             // /T walks the tree by parent pid, so it must run while the root is
             // still alive -- before the caller's proc_terminate(), never after.
+            // $excludePids has no Windows equivalent here (taskkill /T takes no
+            // per-pid exclusion) -- no caller currently needs it on this branch.
             self::run(['taskkill', '/T', '/F', '/PID', (string) $rootPid]);
 
             return;
@@ -53,14 +68,14 @@ final class ProcessTree
         self::signal([$rootPid], 'STOP');
         $frozen = [];
         for ($round = 0; $round < self::MAX_FREEZE_ROUNDS; $round++) {
-            $new = \array_values(\array_diff(self::descendantsOf($rootPid), $frozen));
+            $new = \array_values(\array_diff(self::descendantsOf($rootPid), $frozen, $excludePids));
             if ($new === []) {
                 break;
             }
             self::signal($new, 'STOP');
             $frozen = \array_merge($frozen, $new);
         }
-        self::signal(\array_merge($frozen, [$rootPid]), 'KILL');
+        self::signal(\array_values(\array_diff(\array_merge($frozen, [$rootPid]), $excludePids)), 'KILL');
     }
 
     /**
