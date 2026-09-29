@@ -35,7 +35,7 @@ Both ship in one package. Run one, or both side by side.
 ## Same answers. Just faster.
 
 - **~10× faster per call.** 0.68s warm against 7.02s cold, at the median.
-- **Identical output.** All 20 benchmark files gave the same answer warm and cold. CI runs every end-to-end scenario through both and compares. Nothing to re-check.
+- **Identical output.** All 20 benchmark files gave the same answer warm and cold, and CI checks warm output against a fresh cold Rector run. Nothing to re-check.
 - **One-time boot.** The first call costs about one cold run (~6.4s), once per session. An idle server costs nothing.
 - **Edit `rector.php` freely.** Config changes apply on the next call. No restart.
 
@@ -93,7 +93,7 @@ rector-warm-lsp --working-dir=/path/to/project
 
 for PHP files, with `composer.json` / `rector.php` as root markers.
 
-**[Full setup →](docs/lsp.md#editor-setup)** copy-paste configs for Neovim and Helix (tested), Sublime Text and PhpStorm.
+**[Full setup →](docs/lsp.md#editor-setup)** copy-paste configs for Neovim and Helix (tested in CI), Zed, Sublime Text and PhpStorm.
 
 ## Rector in your validation loop
 
