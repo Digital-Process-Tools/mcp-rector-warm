@@ -122,6 +122,33 @@ final class ProcessTree
     }
 
     /**
+     * $pid's own parent pid right now, read from the process table (POSIX only --
+     * Windows has no equivalent reparenting-to-init concept to read), or null when
+     * that cannot be told (no proc_open()/`ps`, or $pid itself no longer exists).
+     *
+     * Unlike isAlive($otherPid) probed from a THIRD process, this is not fooled by
+     * a zombie: reparenting to init/launchd happens the instant a process's real
+     * parent dies -- before anyone reaps it -- so a caller watching $pid from
+     * outside (neither $pid's parent nor grandparent) can still notice its parent
+     * dying immediately, the same guarantee posix_getppid() gives a process
+     * checking its OWN parent (see RectorRunner::serveProcessWorker()'s and
+     * forkAndExecute()'s own #127 comments for the zombie caveat this sidesteps).
+     */
+    public static function parentOf(int $pid): ?int
+    {
+        if (\PHP_OS_FAMILY === 'Windows' || $pid <= 0) {
+            return null;
+        }
+        $out = self::run(['ps', '-o', 'ppid=', '-p', (string) $pid]);
+        if ($out === null) {
+            return null;
+        }
+        $trimmed = \trim($out);
+
+        return $trimmed === '' ? null : (int) $trimmed;
+    }
+
+    /**
      * @param list<int> $pids
      * @param 'STOP'|'KILL' $name
      */
