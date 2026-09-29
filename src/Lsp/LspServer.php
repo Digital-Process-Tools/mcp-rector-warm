@@ -1424,8 +1424,35 @@ final class LspServer
      * technique, on precisely the two platforms (macOS default, Windows)
      * this whole issue is about -- and a miss here reopens #140 itself: the
      * disk-derived fix would silently overwrite the very buffer this check
-     * exists to protect. The buffer map is small (open, dirty documents
-     * only), so a linear fallback scan is cheap.
+     * exists to protect.
+     *
+     * Round-2 self-review finding (oss:auditor, second pass): a
+     * case-insensitive match ALONE, with nothing else to disambiguate it,
+     * is unsafe in the other direction -- on a case-SENSITIVE filesystem
+     * (Linux, this repo's own default ubuntu-latest CI leg) `A.php` and
+     * `a.php` can be two genuinely different files that merely share a
+     * case-folded name; without a further check, a dirty buffer for one
+     * would wrongly mark the other's unrelated, legitimate fix as
+     * "skipped".
+     *
+     * Disambiguated with stat()'s device+inode pair, NOT realpath():
+     * realpath() on a case-insensitive-but-case-PRESERVING filesystem
+     * (macOS/APFS, confirmed by direct probe during self-review) simply
+     * echoes back whichever case was passed in once it confirms the path
+     * resolves at all -- it does NOT canonicalize to the on-disk case, so
+     * realpath('A.php') !== realpath('a.php') as STRINGS even when they
+     * are the exact same file, which would have silently defeated this
+     * whole case-insensitive fallback on macOS. stat()'s dev+ino pair
+     * identifies the underlying file itself regardless of which case was
+     * used to open it, confirmed against both a same-file pair (two
+     * differently-cased opens of one file) and a genuinely-distinct pair
+     * (two different files that happen to share a case-folded name).
+     *
+     * When either side's stat() fails (a test fixture path, or a file
+     * deleted between the workspace scan and this check) there is nothing
+     * left to disambiguate with; treated as the same file rather than
+     * risking a silent overwrite, consistent with this whole check erring
+     * toward skipping over applying.
      */
     private function isBufferDirty(string $uri): bool
     {
@@ -1433,8 +1460,18 @@ final class LspServer
             return true;
         }
 
+        $candidateStat = @stat(self::uriToPath($uri));
         foreach (array_keys($this->buffers) as $bufferUri) {
-            if (strcasecmp($bufferUri, $uri) === 0) {
+            if (strcasecmp($bufferUri, $uri) !== 0) {
+                continue;
+            }
+
+            $bufferStat = @stat(self::uriToPath($bufferUri));
+            if ($candidateStat === false || $bufferStat === false) {
+                return true;
+            }
+
+            if ($candidateStat['dev'] === $bufferStat['dev'] && $candidateStat['ino'] === $bufferStat['ino']) {
                 return true;
             }
         }

@@ -2235,4 +2235,112 @@ final class LspServerTest extends TestCase
         self::assertNotNull($result);
         self::assertSame(['skippedDirtyBuffers' => ['file:///proj/A.PHP']], $result['result']);
     }
+
+    /**
+     * Round-2 self-review finding (oss:auditor, second pass over the fix
+     * above): the case-insensitive fallback must not, by itself, conflate
+     * two genuinely DIFFERENT files that merely share a case-folded name.
+     * On a case-SENSITIVE filesystem (this repo's own ubuntu-latest CI
+     * leg) `A.php` and `a.php` can coexist as distinct real files; a dirty
+     * buffer for `a.php` must never cause `A.php`'s own, unrelated fix to
+     * be silently skipped. Uses real files on disk (via realpath()) rather
+     * than the fake fixture paths the other tests use, because this is
+     * exactly the disambiguation realpath() exists to provide -- skipped
+     * outright on a filesystem where the two names collide into one file
+     * (this repo's own dev machines, macOS default), since the scenario
+     * this test pins cannot be constructed there at all.
+     */
+    public function testExecuteCommandDoesNotConflateTwoDistinctFilesSharingACaseFoldedName(): void
+    {
+        $dir = sys_get_temp_dir() . '/lsp-case-test-' . bin2hex(random_bytes(4));
+        mkdir($dir);
+        $upper = $dir . '/A.php';
+        $lower = $dir . '/a.php';
+        file_put_contents($upper, "<?php\n// A\n");
+        file_put_contents($lower, "<?php\n// a\n");
+
+        // Same disambiguation isBufferDirty() itself uses: dev+ino, not
+        // realpath(). realpath() on a case-insensitive-but-preserving
+        // filesystem (macOS/APFS) just echoes back whichever case was
+        // passed in -- it does NOT collapse to the same string for two
+        // differently-cased opens of the same file, so comparing realpath()
+        // strings here would (wrongly) never detect the collision and this
+        // test would silently run its "distinct files" assertions against
+        // what is actually a single file on such a filesystem.
+        $upperStat = is_file($upper) ? stat($upper) : false;
+        $lowerStat = is_file($lower) ? stat($lower) : false;
+        $isSameFile = $upperStat !== false && $lowerStat !== false
+            && $upperStat['dev'] === $lowerStat['dev'] && $upperStat['ino'] === $lowerStat['ino'];
+
+        if ($upperStat === false || $lowerStat === false || $isSameFile) {
+            @unlink($upper);
+            @unlink($lower);
+            @rmdir($dir);
+            self::markTestSkipped(
+                'This filesystem is case-insensitive -- A.php and a.php collide into one file, '
+                . 'so the two-distinct-files scenario this test pins cannot be constructed here.',
+            );
+        }
+
+        try {
+            $server = new LspServer('1.0.0', self::fakeWorkspaceAndBufferSource([
+                $upper => [self::fix(0, 1, "<?php\n// A fixed\n", 'RectorA')],
+            ]));
+            self::initialize($server, [
+                'workspace' => ['applyEdit' => true, 'workspaceEdit' => ['documentChanges' => true]],
+            ]);
+
+            // Dirty the DIFFERENT, lowercase file -- A.php itself is never
+            // opened or changed, so it has no dirty buffer of its own.
+            $lowerUri = 'file://' . $lower;
+            $server->handle([
+                'jsonrpc' => '2.0',
+                'method' => 'textDocument/didOpen',
+                'params' => ['textDocument' => ['uri' => $lowerUri, 'version' => 1]],
+            ]);
+            $server->handle([
+                'jsonrpc' => '2.0',
+                'method' => 'textDocument/didChange',
+                'params' => [
+                    'textDocument' => ['uri' => $lowerUri, 'version' => 2],
+                    'contentChanges' => [['text' => "<?php\n// a, unsaved\n"]],
+                ],
+            ]);
+
+            $responses = $server->handle([
+                'jsonrpc' => '2.0',
+                'id' => 24,
+                'method' => 'workspace/executeCommand',
+                'params' => ['command' => 'rector-warm.fixWorkspace'],
+            ]);
+        } finally {
+            unlink($upper);
+            unlink($lower);
+            rmdir($dir);
+        }
+
+        $applyEdit = null;
+        $result = null;
+        foreach ($responses as $frame) {
+            if (($frame['method'] ?? null) === 'workspace/applyEdit') {
+                $applyEdit = $frame;
+            }
+            if (array_key_exists('id', $frame) && $frame['id'] === 24) {
+                $result = $frame;
+            }
+        }
+
+        self::assertNotNull(
+            $applyEdit,
+            "A.php's own fix must still be sent -- it has no dirty buffer of its own, "
+            . 'only a distinct, differently-cased file does',
+        );
+        $uris = array_column(
+            array_column($applyEdit['params']['edit']['documentChanges'], 'textDocument'),
+            'uri',
+        );
+        self::assertSame(['file://' . $upper], $uris);
+        self::assertNotNull($result);
+        self::assertNull($result['result']);
+    }
 }
