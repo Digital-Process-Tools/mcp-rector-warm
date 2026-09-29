@@ -316,6 +316,45 @@ final class LspServerBufferTest extends TestCase
         self::assertCount(2, $source->calls);
     }
 
+    public function testAWatchedConfigChangeDoesNotDiagnoseADocumentThatOnlyEverHadAnIneligibleDidChange(): void
+    {
+        // Must not fire (#106 rebase finding): a didChange for an untitled:
+        // buffer is never buffer-eligible (changeDocument()'s own
+        // file:/full-sync/isWatchedConfigFile guard) -- but that guard runs
+        // AFTER documentVersions[$uri] is already written, so the ineligible
+        // URI still leaves a documentVersions entry with no buffer and no
+        // activityOrder entry (no didOpen/didSave either). The
+        // watchedFilesChanged() union added for the rebase (see its own
+        // comment) must not turn that leftover entry into a spurious
+        // diagnose() call on the next real config change.
+        $source = self::source();
+        $server = new LspServer('1.0.0', $source);
+
+        $server->handle([
+            'jsonrpc' => '2.0',
+            'method' => 'textDocument/didChange',
+            'params' => [
+                'textDocument' => ['uri' => 'untitled:Untitled-1', 'version' => 1],
+                'contentChanges' => [['text' => "<?php\nfixable\n"]],
+            ],
+        ]);
+
+        // Positive control paired with the must-not-fire case above: a
+        // real, currently-open buffer document must still get requeued by
+        // the same config change -- proving the exclusion is targeted, not
+        // a broadcast "the loop no longer runs" bug.
+        self::change($server, 1, "<?php\nfixable\n");
+
+        self::watchedChange($server, 'file:///tmp/rector.php');
+        self::assertNotNull($server->nextDiagnosticsDeadline());
+        $server->runDueDiagnostics(self::LATER);
+
+        self::assertSame(
+            [['kind' => 'buffer', 'path' => '/tmp/Sample.php', 'content' => "<?php\nfixable\n"]],
+            $source->calls,
+        );
+    }
+
     /**
      * @return iterable<string, array{string}>
      */

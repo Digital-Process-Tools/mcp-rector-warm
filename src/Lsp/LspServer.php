@@ -371,11 +371,27 @@ final class LspServer
         // Appending the documentVersions keys not already covered keeps
         // such a buffer-only document from being silently skipped here
         // (it would otherwise never get requeued on a config change).
+        //
+        // Self-review finding: changeDocument() writes documentVersions[$uri]
+        // BEFORE it checks whether the change is buffer-eligible at all --
+        // an untitled: URI, an incremental (ranged) change, or a change to
+        // rector.php/composer.lock itself leaves a documentVersions entry
+        // with no buffer and no activityOrder entry either. Left in the
+        // union above, such a URI would fall through to diagnoseDocument()
+        // (no buffers[$uri] to catch it) and get spuriously "diagnosed" as
+        // though it were a real, resolvable source file. Restricting the
+        // union to a file: URI that is not itself a watched config file
+        // matches exactly the eligibility changeDocument() already applies
+        // before it ever writes to $this->buffers.
         $uris = array_reverse($this->activityOrder);
         foreach (array_keys($this->documentVersions) as $uri) {
-            if (!in_array($uri, $uris, true)) {
-                $uris[] = $uri;
+            if (in_array($uri, $uris, true)) {
+                continue;
             }
+            if (strncasecmp($uri, 'file:', 5) !== 0 || self::isWatchedConfigFile($uri)) {
+                continue;
+            }
+            $uris[] = $uri;
         }
 
         $frames = [];
