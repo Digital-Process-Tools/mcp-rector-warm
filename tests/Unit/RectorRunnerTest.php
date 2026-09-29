@@ -1653,8 +1653,13 @@ final class RectorRunnerTest extends TestCase
      */
     public function testServeWorkerNeverUnwindsWhenTheSocketIsAlreadyDead(): void
     {
-        if (!\function_exists('pcntl_fork') || !\function_exists('pcntl_waitpid')) {
-            self::markTestSkipped('pcntl_fork/pcntl_waitpid unavailable in this environment');
+        // Same three functions canFork() itself requires (RectorRunner.php) --
+        // this repo's dedicated no-pcntl CI job disables all three together via
+        // disable_functions, but checking all three here too (not only the
+        // first two) matches production's own guard exactly, rather than
+        // assuming they are always disabled as a set.
+        if (!\function_exists('pcntl_fork') || !\function_exists('pcntl_waitpid') || !\function_exists('stream_socket_pair')) {
+            self::markTestSkipped('pcntl_fork/pcntl_waitpid/stream_socket_pair unavailable in this environment');
         }
 
         $tmp = sys_get_temp_dir() . '/rector-runner-133-serveworker-escape-test-' . bin2hex(random_bytes(8));
