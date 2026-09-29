@@ -19,3 +19,8 @@ again once you're done (`rm .supertool.json`) so it doesn't linger as a stray co
 
 Plain `read`/`edit`/`paste`/`grep` work fine via `cwd:<worktree>` even without the copy -- only
 the `git-*`/`gh-*` preset ops need it.
+
+**A fresh worktree also has no `vendor/` -- Composer dependencies aren't checked out either,
+same root cause (untracked/ignored).** `./vendor/bin/phpunit` fails outright until `composer
+install --no-interaction --quiet` runs in the new worktree; nothing else is needed once that
+completes.

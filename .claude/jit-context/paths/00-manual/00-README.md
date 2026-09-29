@@ -37,3 +37,62 @@ fragment whose claim is about the code).
   where v0.5.0 timed out the socket read after ~60s) was fixed by commit `410118c` (PR #76,
   "Correct the #72 changelog/README wedged-write description"): `README.md`'s `--call-timeout` row
   now states this exact trade-off in full. No rule needed.
+- **`trap.d/100.leftover-rule-ambiguity.md`** (still true, checked against HEAD by curate
+  2026-09-29) -- `RectorDiffParser::buildFixes()`'s leftover-rule gate (`src/Lsp/RectorDiffParser.php:191-212`)
+  can still misattribute a hunk when one rule produces two hunks (only one reported by `changes[]`)
+  and a second, unrelated rule produces zero hunks. One-off finding about the code, not an
+  agent-facing lesson -- filed as #154.
+- **`trap.d/110.adr-0001-stale-line-citations.md`** (still true, checked against HEAD by curate
+  2026-09-29) -- `docs/decisions/0001-lsp-library-choice.md`'s line citations for `boot()`/
+  `forkAndExecute()`/`readExactly()` are further stale than when filed (now at lines 2124/688/1863,
+  not the fragment's own 358/591/1012). One-off doc-drift finding, not an agent-facing lesson --
+  filed as #155.
+- **`trap.d/125.collect-ini-override-args-cannot-tell-empty-from-failed.md`** (still true, checked
+  against HEAD by curate 2026-09-29) -- `RectorRunner::collectIniOverrideArgs()` (`src/RectorRunner.php:1237`)
+  still does `\ini_get_all(null, true) ?: []`, collapsing "nothing to forward" and "enumeration
+  failed" into the same empty result with no distinguishing signal. One-off finding about the code
+  -- filed as #156.
+- **`trap.d/125.d-flag-values-with-spaces-or-quotes-untested-on-windows.md`** (already fixed,
+  checked against HEAD by curate 2026-09-29) -- the exact shape this fragment names as untested (a
+  forwarded `-d` value containing reserved characters AND a literal quote, round-tripped through a
+  real child process) is now pinned by
+  `RectorRunnerStandbyWorkerTest::testAForwardedValueWithReservedCharactersAndAQuoteSurvivesARealChildProcess`,
+  and confirmed OBSERVED passing on `windows-latest` (job #109621807229, run #36631565059,
+  `tests (windows-latest, 8.3)`, 11/11 steps green) -- not merely reasoned, as the fragment left it.
+  No rule needed.
+- **`trap.d/127.getmypid-false-silent-orphan-skip.md`** (still true, checked against HEAD by curate
+  2026-09-29) -- `boot()`'s `$daemonPid = \getmypid();` / `$daemonPid !== false ? $daemonPid :
+  null` pattern (`src/RectorRunner.php:418-429`) is unchanged; a `false` return still silently
+  disables #127's orphan-kill detection with no log line. One-off finding about the code -- filed
+  as #157.
+- **`trap.d/131.buffered-mode-progress-frames-silently-dropped.md`** (still true, checked against
+  HEAD by curate 2026-09-29) -- `LspServer::runDueDiagnostics()` (`src/Lsp/LspServer.php:334-383`)
+  is still declared `void` and still never returns its own local `$frames`, so the cold-boot
+  progress frames it computes are silently discarded whenever no `frameWriter` is wired. One-off
+  finding about the code -- filed as #158.
+- **`trap.d/134.parentof-null-ambiguous-on-ps-failure.md`** (still true, checked against HEAD by
+  curate 2026-09-29) -- `ProcessTree::parentOf()` (`src/Support/ProcessTree.php:159`) still folds
+  "pid gone" and "`ps` unavailable" into the same `null`, and the #134 orphan watchdog's fallback
+  (`bin/rector-warm-orphan-watchdog.php:61-64`) is still unconditionally `false` on POSIX, so a
+  `ps`-less container still makes the watchdog silently inert. One-off finding about the code --
+  filed as #159.
+- **`trap.d/134.supertool-config-missing-again.md`** -- confirms
+  `.claude/jit-context/tools/00-manual/worktree-missing-supertool-config.md`'s existing rule exactly
+  (a fresh worktree has no `.supertool.json`); no new information, already covered by that rule. No
+  new rule needed.
+- **`trap.d/53.crlf-line-endings-not-preserved.md`** (still true, checked against HEAD by curate
+  2026-09-29) -- `RectorDiffParser::hunkNewText()` (`src/Lsp/RectorDiffParser.php:295-302`) still
+  hardcodes `implode("\n", ...)` on rejoin; #96's CRLF E2E cases only cover `didOpen`/diagnostics,
+  never `codeAction`/apply, so this join is still never exercised against a real CRLF file. One-off
+  finding about test coverage -- filed as #160.
+- **`trap.d/73.windows-exitcode-first-read-uncertainty.md`** (already fixed, checked against HEAD by
+  curate 2026-09-29) -- the fragment's own #97 follow-up said this becomes checkable once a
+  `windows-latest` leg runs `testColdCallReportsRealExitCodeWithoutPcntl`; that leg (`tests
+  (windows-latest, 8.3)`, job #109621807229, run #36631565059) is now OBSERVED green, 11/11 steps.
+  No rule needed.
+- **`trap.d/96.windows-rmdir-race-fixed.md`** and **`trap.d/97.windows-tests-leg-warning-exit1.md`**
+  (already fixed, checked against HEAD by curate 2026-09-29) -- both fragments' own root cause,
+  #112 (a leaked orphan php process on Windows holding a directory handle, making any rmdir-retry
+  budget a structural dead end), is closed via #119 (`ProcessTree::killTree()`, confirmed in
+  `discardProcWorker()`). The retry-widening saga both fragments document is superseded history, not
+  an open lesson. No rule needed.
