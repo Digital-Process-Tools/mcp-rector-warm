@@ -115,4 +115,55 @@ final class StdioLspTransportTest extends TestCase
         $this->expectException(\RuntimeException::class);
         $transport->write(['jsonrpc' => '2.0', 'method' => 'initialized']);
     }
+
+    /**
+     * PR #128 E2E review (blocking finding 2): tryRead() must return the
+     * message when one is already fully available -- otherwise the
+     * create-refusal peek in LspServer could never see a reply that really
+     * is sitting there. A connected socket pair (php://memory is NOT
+     * select()-able, see the ValueError test below) gives a real,
+     * poll-able stream in-process.
+     */
+    public function testTryReadReturnsAMessageThatIsAlreadyWaiting(): void
+    {
+        [$readEnd, $writeEnd] = stream_socket_pair(STREAM_PF_UNIX, STREAM_SOCK_STREAM, STREAM_IPPROTO_IP);
+        $body = '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}';
+        fwrite($writeEnd, "Content-Length: " . strlen($body) . "\r\n\r\n" . $body);
+
+        $transport = new StdioLspTransport($readEnd, fopen('php://memory', 'w'));
+
+        self::assertSame(
+            ['jsonrpc' => '2.0', 'id' => 1, 'method' => 'initialize', 'params' => []],
+            $transport->tryRead(),
+        );
+    }
+
+    /**
+     * Positive control for the test above: nothing waiting must return
+     * null rather than blocking -- this is the ordinary case (a real
+     * client that has not replied yet), and the whole point of tryRead()
+     * over read() is that this case returns immediately instead of
+     * hanging the server.
+     */
+    public function testTryReadReturnsNullWhenNothingIsWaiting(): void
+    {
+        [$readEnd, ] = stream_socket_pair(STREAM_PF_UNIX, STREAM_SOCK_STREAM, STREAM_IPPROTO_IP);
+
+        $transport = new StdioLspTransport($readEnd, fopen('php://memory', 'w'));
+
+        self::assertNull($transport->tryRead());
+    }
+
+    /**
+     * A stream stream_select() cannot poll at all (documented: PHP throws
+     * ValueError for this rather than returning false) must degrade to
+     * "nothing waiting", never propagate the exception -- the safe
+     * direction per tryRead()'s own docblock.
+     */
+    public function testTryReadReturnsNullRatherThanThrowingForAnUnpollableStream(): void
+    {
+        $transport = new StdioLspTransport(fopen('php://memory', 'r'), fopen('php://memory', 'w'));
+
+        self::assertNull($transport->tryRead());
+    }
 }

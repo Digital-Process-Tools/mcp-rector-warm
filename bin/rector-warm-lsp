@@ -49,11 +49,41 @@ if ($workingDir !== null) {
 
 $transport = new StdioLspTransport(STDIN, STDOUT);
 $diagnostics = new RectorDiagnosticsSource(new RectorTool());
-$server = new LspServer(ServerVersion::resolve(), $diagnostics);
+
+// PR #128 E2E review: a small FIFO of messages read AHEAD of the main loop
+// below by LspServer's own non-blocking peek (blocking finding 2), so a
+// message that turns out NOT to be the reply it was looking for is handed
+// back for ordinary dispatch on the very next iteration rather than lost.
+// Shared by reference between the two closures and the main loop's own
+// read below.
+$pending = [];
+
+$server = new LspServer(
+    ServerVersion::resolve(),
+    $diagnostics,
+    frameWriter: static function (array $frame) use ($transport): void {
+        // Blocking finding 1: write the moment a frame is ready, not
+        // batched until handle() returns -- this is what makes
+        // window/workDoneProgress/create and the $/progress begin
+        // notification reach the client BEFORE a slow cold-boot diagnose()
+        // call, rather than after it.
+        $transport->write($frame);
+    },
+    tryReadAhead: static function () use ($transport, &$pending): ?array {
+        if ($pending !== []) {
+            return array_shift($pending);
+        }
+
+        return $transport->tryRead();
+    },
+    pushBackMessage: static function (array $message) use (&$pending): void {
+        array_unshift($pending, $message);
+    },
+);
 
 while (true) {
     try {
-        $message = $transport->read();
+        $message = $pending !== [] ? array_shift($pending) : $transport->read();
     } catch (\RuntimeException $e) {
         fwrite(STDERR, "rector-warm-lsp: {$e->getMessage()}\n");
         exit(1);

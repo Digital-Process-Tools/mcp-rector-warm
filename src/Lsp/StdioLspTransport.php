@@ -102,4 +102,52 @@ final class StdioLspTransport
 
         fflush($this->out);
     }
+
+    /**
+     * PR #128 E2E review (blocking finding 2): a non-blocking peek --
+     * returns the next message ONLY if it is already fully available
+     * without waiting, null otherwise. `stream_select()` with a 0/0
+     * timeout is a poll: it returns immediately, so this never blocks on
+     * "nothing sent yet". It CAN still block briefly on `read()`'s own
+     * fgets/fread once select() says the stream is readable but only part
+     * of the frame has arrived so far -- an accepted, bounded trade-off for
+     * a local stdio pipe (not a network socket), same discipline read()
+     * already applies to its own short-read case above.
+     *
+     * Cross-platform note (reasoned, not observed -- no Windows box
+     * available): `stream_select()` is documented to work reliably for
+     * pipes/files only on POSIX; on Windows it is reliable for sockets but
+     * not for arbitrary file-backed streams like an inherited STDIN pipe.
+     * Degrading to "nothing waiting" is the SAFE direction on failure --
+     * `@` suppresses the platform warning, and both `false` (error) and
+     * `0` (nothing ready) return null here, never block, never throw. The
+     * one consequence of that degradation is that the create-refusal check
+     * this method exists for simply never fires on that platform -- not a
+     * hang, not a crash, just the enhancement not helping there.
+     */
+    public function tryRead(): ?array
+    {
+        $read = [$this->in];
+        $write = null;
+        $except = null;
+
+        try {
+            // `@` covers the platform WARNING case (documented above).
+            // PHP 8's stream_select() throws a ValueError instead of
+            // warning for a stream it cannot poll at all -- observed for
+            // php://memory (this repo's own test doubles for STDIN, see
+            // StdioLspTransportTest) -- which `@` does not suppress. Same
+            // safe direction either way: cannot tell, so assume nothing
+            // is waiting.
+            $ready = @stream_select($read, $write, $except, 0, 0);
+        } catch (\ValueError) {
+            return null;
+        }
+
+        if ($ready === false || $ready === 0) {
+            return null;
+        }
+
+        return $this->read();
+    }
 }

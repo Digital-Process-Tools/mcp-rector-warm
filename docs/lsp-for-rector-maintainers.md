@@ -33,12 +33,16 @@ an agent calling a tool:
   from a clean one (#90, #91).
 - **Cold-boot progress and cancellation.** `window/workDoneProgress` fires
   around the first diagnose only (the cold-boot call), when the client
-  declares the capability. `$/cancelRequest` for a `textDocument/codeAction`
-  not yet dispatched is answered "Request cancelled" rather than run, but --
-  same caveat as the stale-result discard above -- that can only fire in a
-  future non-synchronous transport: a conforming client's cancellation for
-  id X always reaches this one-message-at-a-time server after id X's own
-  response was already written (#111).
+  declares the capability, with `create`/`begin` written to the transport
+  BEFORE that diagnose runs (not batched with `end` afterwards) and
+  suppressed entirely if the client's own refusal of the progress token is
+  already available via a non-blocking peek (PR #128 review). `$/cancelRequest`
+  for a `textDocument/codeAction` not yet dispatched is answered "Request
+  cancelled" rather than run, but -- same caveat as the stale-result discard
+  above -- that can only fire in a future non-synchronous transport: a
+  conforming client's cancellation for id X always reaches this
+  one-message-at-a-time server after id X's own response was already
+  written (#111).
 
 Editor setup for six clients (Neovim, Helix, Sublime Text, PhpStorm/LSP4IJ,
 plus the generic pattern) is in the README's [Editor

@@ -1249,4 +1249,179 @@ final class LspServerTest extends TestCase
         self::assertArrayHasKey('result', $responses[0]);
         self::assertNotEmpty($responses[0]['result']);
     }
+
+    /**
+     * PR #128 E2E review, blocking finding 1: progress must reach the
+     * transport LIVE -- `create` and `begin` written BEFORE diagnose()
+     * runs, not batched together with `end`/publishDiagnostics after it
+     * finishes. A log shared between the frame writer and the fake
+     * DiagnosticsSource is the only way to observe WHEN each thing
+     * happened, not just what order handle()'s return value lists them in.
+     */
+    public function testProgressCreateAndBeginAreWrittenToTheTransportBeforeDiagnoseRuns(): void
+    {
+        $log = new class () {
+            /** @var list<string> */
+            public array $entries = [];
+        };
+
+        $diagnostics = new class ($log) implements DiagnosticsSource {
+            public function __construct(private object $log)
+            {
+            }
+
+            public function diagnose(string $absolutePath): array
+            {
+                $this->log->entries[] = 'diagnose-called';
+
+                return ['fixes' => []];
+            }
+        };
+
+        $frameWriter = function (array $frame) use ($log): void {
+            $log->entries[] = 'wrote:' . ($frame['method'] ?? '?');
+        };
+
+        $server = new LspServer('1.0.0', $diagnostics, $frameWriter);
+
+        $server->handle([
+            'jsonrpc' => '2.0',
+            'id' => 1,
+            'method' => 'initialize',
+            'params' => ['capabilities' => ['window' => ['workDoneProgress' => true]]],
+        ]);
+
+        $server->handle([
+            'jsonrpc' => '2.0',
+            'method' => 'textDocument/didOpen',
+            'params' => ['textDocument' => ['uri' => 'file:///tmp/Sample.php', 'version' => 1]],
+        ]);
+
+        self::assertSame([
+            'wrote:window/workDoneProgress/create',
+            'wrote:$/progress',
+            'diagnose-called',
+            'wrote:$/progress',
+            'wrote:textDocument/publishDiagnostics',
+        ], $log->entries);
+    }
+
+    /**
+     * PR #128 E2E review, blocking finding 2: when the client's reply to
+     * `create` is already available (non-blocking peek) and is an error,
+     * neither `$/progress` begin nor end may be sent for that token.
+     */
+    public function testProgressBeginAndEndAreSuppressedWhenTheClientRefusesCreate(): void
+    {
+        $server = new LspServer(
+            '1.0.0',
+            self::fakeSource([]),
+            null,
+            static fn (): array => [
+                'jsonrpc' => '2.0',
+                'id' => 'rector-warm-lsp/progress-create',
+                'error' => ['code' => -32800, 'message' => 'client declined this progress token'],
+            ],
+        );
+
+        $server->handle([
+            'jsonrpc' => '2.0',
+            'id' => 1,
+            'method' => 'initialize',
+            'params' => ['capabilities' => ['window' => ['workDoneProgress' => true]]],
+        ]);
+
+        $responses = $server->handle([
+            'jsonrpc' => '2.0',
+            'method' => 'textDocument/didOpen',
+            'params' => ['textDocument' => ['uri' => 'file:///tmp/Sample.php', 'version' => 1]],
+        ]);
+
+        $methods = array_map(static fn (array $frame): ?string => $frame['method'] ?? null, $responses);
+
+        self::assertSame(
+            ['window/workDoneProgress/create', 'textDocument/publishDiagnostics'],
+            $methods,
+        );
+    }
+
+    /**
+     * Positive control for the test above: when the peek finds NOTHING
+     * waiting (the ordinary case -- a real client has not replied yet),
+     * begin/end must still be sent as before. Without this, a bug that
+     * makes isProgressCreateRefused() ALWAYS suppress progress would pass
+     * the refusal test above and go undetected.
+     */
+    public function testProgressStillFiresWhenTheReadAheadFindsNothingWaiting(): void
+    {
+        $server = new LspServer(
+            '1.0.0',
+            self::fakeSource([]),
+            null,
+            static fn (): ?array => null,
+        );
+
+        $server->handle([
+            'jsonrpc' => '2.0',
+            'id' => 1,
+            'method' => 'initialize',
+            'params' => ['capabilities' => ['window' => ['workDoneProgress' => true]]],
+        ]);
+
+        $responses = $server->handle([
+            'jsonrpc' => '2.0',
+            'method' => 'textDocument/didOpen',
+            'params' => ['textDocument' => ['uri' => 'file:///tmp/Sample.php', 'version' => 1]],
+        ]);
+
+        $methods = array_map(static fn (array $frame): ?string => $frame['method'] ?? null, $responses);
+
+        self::assertSame(
+            ['window/workDoneProgress/create', '$/progress', '$/progress', 'textDocument/publishDiagnostics'],
+            $methods,
+        );
+    }
+
+    /**
+     * The read-ahead peek can legitimately find a message that is NOT the
+     * create reply (e.g. the client sent something else first) -- it must
+     * be handed back via $pushBackMessage rather than silently dropped,
+     * and progress must still proceed as if nothing had been read ahead.
+     */
+    public function testAnUnrelatedReadAheadMessageIsPushedBackAndProgressStillFires(): void
+    {
+        $pushedBack = [];
+        $unrelated = ['jsonrpc' => '2.0', 'method' => 'textDocument/didSave', 'params' => ['textDocument' => ['uri' => 'file:///tmp/Other.php']]];
+
+        $server = new LspServer(
+            '1.0.0',
+            self::fakeSource([]),
+            null,
+            static fn (): array => $unrelated,
+            function (array $message) use (&$pushedBack): void {
+                $pushedBack[] = $message;
+            },
+        );
+
+        $server->handle([
+            'jsonrpc' => '2.0',
+            'id' => 1,
+            'method' => 'initialize',
+            'params' => ['capabilities' => ['window' => ['workDoneProgress' => true]]],
+        ]);
+
+        $responses = $server->handle([
+            'jsonrpc' => '2.0',
+            'method' => 'textDocument/didOpen',
+            'params' => ['textDocument' => ['uri' => 'file:///tmp/Sample.php', 'version' => 1]],
+        ]);
+
+        $methods = array_map(static fn (array $frame): ?string => $frame['method'] ?? null, $responses);
+
+        self::assertSame(
+            ['window/workDoneProgress/create', '$/progress', '$/progress', 'textDocument/publishDiagnostics'],
+            $methods,
+        );
+        self::assertSame([$unrelated], $pushedBack);
+    }
 }

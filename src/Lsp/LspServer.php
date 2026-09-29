@@ -58,10 +58,69 @@ final class LspServer
      */
     private array $fixesByUri = [];
 
+    /**
+     * PR #128 E2E review (blocking finding 1): every frame diagnoseDocument()
+     * produces used to be collected into one array and handed back only
+     * after handle() returns -- so `window/workDoneProgress/create` and the
+     * `$/progress` begin notification reached the client at the SAME instant
+     * as `end` and `publishDiagnostics`, all AFTER the (slow, cold-boot)
+     * diagnose() call had already finished. That defeats the entire point
+     * of #111: the editor never sees "warming up" DURING the wait, only
+     * after it is over. $frameWriter, when given, is called synchronously
+     * the moment a frame is ready -- wired by bin/rector-warm-lsp to write
+     * straight to the transport -- so `create`/`begin` genuinely reach the
+     * wire before diagnose() runs. Left null (every existing unit test),
+     * emit() falls back to the original buffer-and-return-at-the-end
+     * behaviour, so nothing already covered changes shape.
+     */
     public function __construct(
         private readonly string $serverVersion,
         private readonly ?DiagnosticsSource $diagnostics = null,
+        private readonly ?\Closure $frameWriter = null,
+        /**
+         * PR #128 E2E review (blocking finding 2): a non-blocking,
+         * best-effort "has the client already replied to something" check
+         * -- used ONLY to see whether the client's reply to
+         * `window/workDoneProgress/create` is already sitting in the pipe
+         * before this server commits to sending `$/progress` begin. Must
+         * never block: called with nothing guaranteed to be waiting.
+         * Returns the message if one was already available (consuming it),
+         * null otherwise. Left null in every existing unit test and in any
+         * caller that cannot offer a genuinely non-blocking peek --
+         * degrading safely to "assume no reply yet, send progress as
+         * before" rather than ever risking a hang.
+         *
+         * @var (\Closure(): (array<string, mixed>|null))|null
+         */
+        private readonly ?\Closure $tryReadAhead = null,
+        /**
+         * Companion to $tryReadAhead: called when a message WAS read ahead
+         * but turned out not to be the create-request's own reply, so it
+         * must be handed back for ordinary dispatch rather than dropped.
+         *
+         * @var (\Closure(array<string, mixed>): void)|null
+         */
+        private readonly ?\Closure $pushBackMessage = null,
     ) {
+    }
+
+    /**
+     * Write $frame immediately via $frameWriter when one is wired (the
+     * production path), or buffer it into $buffer for the caller to return
+     * (every existing unit test, which has no real transport to write to).
+     *
+     * @param array<string, mixed> $frame
+     * @param list<array<string, mixed>> $buffer
+     */
+    private function emit(array $frame, array &$buffer): void
+    {
+        if ($this->frameWriter !== null) {
+            ($this->frameWriter)($frame);
+
+            return;
+        }
+
+        $buffer[] = $frame;
     }
 
     /**
@@ -355,15 +414,33 @@ final class LspServer
         $this->hasBootedOnce = true;
 
         $frames = [];
+        // PR #128 E2E review (blocking finding 1): emit(), not a plain
+        // array push -- when $frameWriter is wired, `create` reaches the
+        // transport HERE, before diagnose() below ever runs, rather than
+        // being batched with every other frame until this whole function
+        // returns.
+        $progressRefused = false;
         if ($reportProgress) {
-            $frames[] = $this->progressCreate();
-            $frames[] = $this->progressBegin('Rector: warming up', 'Rector: analysing ' . basename(str_replace('\\', '/', $path)));
+            $this->emit($this->progressCreate(), $frames);
+
+            // PR #128 E2E review (blocking finding 2): give the client a
+            // (non-blocking) chance to have already refused this progress
+            // token before committing to `begin` -- the LSP spec forbids
+            // sending $/progress for a token the client's own reply to
+            // `create` rejected.
+            $progressRefused = $this->isProgressCreateRefused();
+            if (!$progressRefused) {
+                $this->emit(
+                    $this->progressBegin('Rector: warming up', 'Rector: analysing ' . basename(str_replace('\\', '/', $path))),
+                    $frames,
+                );
+            }
         }
 
         $result = $this->diagnostics->diagnose($path);
 
-        if ($reportProgress) {
-            $frames[] = $this->progressEnd();
+        if ($reportProgress && !$progressRefused) {
+            $this->emit($this->progressEnd(), $frames);
         }
 
         // Drop a stale result (#53): comparing against the version THIS call
@@ -413,7 +490,7 @@ final class LspServer
             ];
         }
 
-        $frames[] = $this->publishDiagnostics($uri, $diagnostics);
+        $this->emit($this->publishDiagnostics($uri, $diagnostics), $frames);
 
         return $frames;
     }
@@ -451,6 +528,47 @@ final class LspServer
                 'value' => ['kind' => 'end'],
             ],
         ];
+    }
+
+    /**
+     * PR #128 E2E review (blocking finding 2): the LSP spec forbids sending
+     * `$/progress` for a token whose `create` request the client answered
+     * with an error. This server cannot genuinely BLOCK waiting for that
+     * reply (bin/rector-warm-lsp answers one message at a time -- see
+     * diagnoseDocument()'s stale-result comment above), so it only ever
+     * gets to see the reply if it was ALREADY sitting in the transport's
+     * buffer by the time this runs, via a non-blocking peek. A slower
+     * client's reply, arriving after this check, is a residual gap this
+     * synchronous architecture cannot close without real async I/O --
+     * documented, not silently claimed away.
+     */
+    private function isProgressCreateRefused(): bool
+    {
+        if ($this->tryReadAhead === null) {
+            return false;
+        }
+
+        $message = ($this->tryReadAhead)();
+        if ($message === null) {
+            return false;
+        }
+
+        $isOurCreateReply = array_key_exists('id', $message)
+            && ($message['id'] ?? null) === 'rector-warm-lsp/progress-create'
+            && ($message['method'] ?? null) === null;
+
+        if (!$isOurCreateReply) {
+            // Not our reply -- something else the client sent that must
+            // still reach ordinary dispatch, so hand it back rather than
+            // dropping it on the floor.
+            if ($this->pushBackMessage !== null) {
+                ($this->pushBackMessage)($message);
+            }
+
+            return false;
+        }
+
+        return array_key_exists('error', $message);
     }
 
     /**
