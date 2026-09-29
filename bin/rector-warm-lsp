@@ -72,8 +72,8 @@ $server = new LspServer(
     // pushBack()), so LspLoop's own read() calls -- which know nothing
     // about this mechanism -- see a pushed-back message exactly like any
     // other, with no separate queue to wire through here.
-    tryReadAhead: static function () use ($transport): ?array {
-        return $transport->tryRead();
+    tryReadAhead: static function (float $timeoutSeconds) use ($transport): ?array {
+        return $transport->tryRead($timeoutSeconds);
     },
     pushBackMessage: static function (array $message) use ($transport): void {
         $transport->pushBack($message);

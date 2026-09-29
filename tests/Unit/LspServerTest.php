@@ -1345,19 +1345,15 @@ final class LspServerTest extends TestCase
     }
 
     /**
-     * Positive control for the test above: when the peek finds NOTHING
-     * waiting (the ordinary case -- a real client has not replied yet),
-     * begin/end must still be sent as before. Without this, a bug that
-     * makes isProgressCreateRefused() ALWAYS suppress progress would pass
-     * the refusal test above and go undetected.
+     * Second E2E review round, PR #128: when $tryReadAhead is not wired at
+     * all (every caller that cannot offer this capability), progress must
+     * still fire normally -- this is the ONE case that still assumes
+     * success without confirmation, because there is no mechanism to ask.
+     * Every OTHER "we could not confirm" case below now skips instead.
      */
-    public function testProgressStillFiresWhenTheReadAheadFindsNothingWaiting(): void
+    public function testProgressFiresNormallyWhenNoReadAheadCapabilityIsWiredAtAll(): void
     {
-        $server = new LspServer(
-            '1.0.0',
-            self::fakeSource([]),
-            tryReadAhead: static fn (): ?array => null,
-        );
+        $server = new LspServer('1.0.0', self::fakeSource([]));
 
         $server->handle([
             'jsonrpc' => '2.0',
@@ -1381,12 +1377,53 @@ final class LspServerTest extends TestCase
     }
 
     /**
-     * The read-ahead peek can legitimately find a message that is NOT the
-     * create reply (e.g. the client sent something else first) -- it must
-     * be handed back via $pushBackMessage rather than silently dropped,
-     * and progress must still proceed as if nothing had been read ahead.
+     * Second E2E review round, PR #128: the window elapsing with no reply
+     * AT ALL must now skip progress, not assume success -- a client that
+     * never acks `create` must never see a live $/progress for that token.
+     * This is a real semantic change from the first PR #128 fix, which
+     * treated "nothing seen yet" (a zero-timeout peek) as "proceed";
+     * $tryReadAhead is now given a genuine window (isProgressCreateRefused's
+     * own CREATE_REPLY_TIMEOUT_SECONDS), so "still nothing after waiting
+     * for it" is a real timeout, not an instant, meaningless peek.
      */
-    public function testAnUnrelatedReadAheadMessageIsPushedBackAndProgressStillFires(): void
+    public function testProgressIsSkippedWhenTheCreateReplyNeverArrivesWithinTheWindow(): void
+    {
+        $server = new LspServer(
+            '1.0.0',
+            self::fakeSource([]),
+            tryReadAhead: static fn (float $timeoutSeconds): ?array => null,
+        );
+
+        $server->handle([
+            'jsonrpc' => '2.0',
+            'id' => 1,
+            'method' => 'initialize',
+            'params' => ['capabilities' => ['window' => ['workDoneProgress' => true]]],
+        ]);
+
+        $responses = $server->handle([
+            'jsonrpc' => '2.0',
+            'method' => 'textDocument/didOpen',
+            'params' => ['textDocument' => ['uri' => 'file:///tmp/Sample.php', 'version' => 1]],
+        ]);
+
+        $methods = array_map(static fn (array $frame): ?string => $frame['method'] ?? null, $responses);
+
+        self::assertSame(
+            ['window/workDoneProgress/create', 'textDocument/publishDiagnostics'],
+            $methods,
+        );
+    }
+
+    /**
+     * Second E2E review round, PR #128: the read-ahead peek can legitimately
+     * find a message that is NOT the create reply (e.g. the client sent
+     * something else first) -- it must be handed back via
+     * $pushBackMessage rather than silently dropped, but this round's
+     * create reply is now unresolved (not "assumed fine" the way the
+     * first PR #128 fix treated it), so progress is skipped too.
+     */
+    public function testAnUnrelatedReadAheadMessageIsPushedBackAndProgressIsSkipped(): void
     {
         $pushedBack = [];
         $unrelated = ['jsonrpc' => '2.0', 'method' => 'textDocument/didSave', 'params' => ['textDocument' => ['uri' => 'file:///tmp/Other.php']]];
@@ -1394,9 +1431,117 @@ final class LspServerTest extends TestCase
         $server = new LspServer(
             '1.0.0',
             self::fakeSource([]),
-            tryReadAhead: static fn (): array => $unrelated,
+            tryReadAhead: static fn (float $timeoutSeconds): array => $unrelated,
             pushBackMessage: function (array $message) use (&$pushedBack): void {
                 $pushedBack[] = $message;
+            },
+        );
+
+        $server->handle([
+            'jsonrpc' => '2.0',
+            'id' => 1,
+            'method' => 'initialize',
+            'params' => ['capabilities' => ['window' => ['workDoneProgress' => true]]],
+        ]);
+
+        $responses = $server->handle([
+            'jsonrpc' => '2.0',
+            'method' => 'textDocument/didOpen',
+            'params' => ['textDocument' => ['uri' => 'file:///tmp/Sample.php', 'version' => 1]],
+        ]);
+
+        $methods = array_map(static fn (array $frame): ?string => $frame['method'] ?? null, $responses);
+
+        self::assertSame(
+            ['window/workDoneProgress/create', 'textDocument/publishDiagnostics'],
+            $methods,
+        );
+        self::assertSame([$unrelated], $pushedBack);
+    }
+
+    /**
+     * PR #128 second E2E review (the blocking finding this round): the
+     * bug was a TIMING gap, not a missing check -- isProgressCreateRefused()
+     * used to call $tryReadAhead with no timeout at all (PHP defaults the
+     * unused parameter to 0.0), so a real client's DELAYED reply was never
+     * actually seen; begin/end fired before it could arrive. This fake
+     * closure models exactly that: it only "sees" the reply if given a
+     * REAL window to wait for it -- called with a timeout shorter than the
+     * delay (the old, unfixed call shape) sees nothing at all. Confirmed
+     * red against commit 75a63eb before this fix (asserted below);
+     * green after.
+     */
+    public function testProgressIsSkippedWhenTheDelayedCreateReplyIsAnError(): void
+    {
+        $replyDelaySeconds = 0.05;
+
+        $server = new LspServer(
+            '1.0.0',
+            self::fakeSource([]),
+            tryReadAhead: static function (float $timeoutSeconds = 0.0) use ($replyDelaySeconds): ?array {
+                if ($timeoutSeconds < $replyDelaySeconds) {
+                    // The old call shape (no timeout argument at all, or
+                    // one shorter than the delay): the reply is not there
+                    // YET, exactly what a zero-timeout peek would see.
+                    return null;
+                }
+
+                usleep((int) ($replyDelaySeconds * 1_000_000));
+
+                return [
+                    'jsonrpc' => '2.0',
+                    'id' => 'rector-warm-lsp/progress-create',
+                    'error' => ['code' => -32800, 'message' => 'client declined this progress token'],
+                ];
+            },
+        );
+
+        $server->handle([
+            'jsonrpc' => '2.0',
+            'id' => 1,
+            'method' => 'initialize',
+            'params' => ['capabilities' => ['window' => ['workDoneProgress' => true]]],
+        ]);
+
+        $responses = $server->handle([
+            'jsonrpc' => '2.0',
+            'method' => 'textDocument/didOpen',
+            'params' => ['textDocument' => ['uri' => 'file:///tmp/Sample.php', 'version' => 1]],
+        ]);
+
+        $methods = array_map(static fn (array $frame): ?string => $frame['method'] ?? null, $responses);
+
+        self::assertSame(
+            ['window/workDoneProgress/create', 'textDocument/publishDiagnostics'],
+            $methods,
+        );
+    }
+
+    /**
+     * Positive control for the test above: the SAME delayed-reply closure,
+     * but the delayed reply is a SUCCESS this time -- begin/end must still
+     * fire once the wait genuinely confirms it, proving this is a real
+     * wait-and-check, not a change that suppresses progress unconditionally.
+     */
+    public function testProgressFiresWhenTheDelayedCreateReplyIsASuccess(): void
+    {
+        $replyDelaySeconds = 0.05;
+
+        $server = new LspServer(
+            '1.0.0',
+            self::fakeSource([]),
+            tryReadAhead: static function (float $timeoutSeconds = 0.0) use ($replyDelaySeconds): ?array {
+                if ($timeoutSeconds < $replyDelaySeconds) {
+                    return null;
+                }
+
+                usleep((int) ($replyDelaySeconds * 1_000_000));
+
+                return [
+                    'jsonrpc' => '2.0',
+                    'id' => 'rector-warm-lsp/progress-create',
+                    'result' => null,
+                ];
             },
         );
 
@@ -1419,6 +1564,5 @@ final class LspServerTest extends TestCase
             ['window/workDoneProgress/create', '$/progress', '$/progress', 'textDocument/publishDiagnostics'],
             $methods,
         );
-        self::assertSame([$unrelated], $pushedBack);
     }
 }

@@ -104,19 +104,26 @@ final class LspServer
         private readonly float $debounceSeconds = 0.5,
         private readonly ?\Closure $frameWriter = null,
         /**
-         * PR #128 E2E review (blocking finding 2): a non-blocking,
-         * best-effort "has the client already replied to something" check
-         * -- used ONLY to see whether the client's reply to
-         * `window/workDoneProgress/create` is already sitting in the pipe
-         * before this server commits to sending `$/progress` begin. Must
-         * never block: called with nothing guaranteed to be waiting.
-         * Returns the message if one was already available (consuming it),
-         * null otherwise. Left null in every existing unit test and in any
-         * caller that cannot offer a genuinely non-blocking peek --
-         * degrading safely to "assume no reply yet, send progress as
-         * before" rather than ever risking a hang.
+         * PR #128 E2E review (blocking finding 2): waits up to the given
+         * number of seconds for a message to become available, returning
+         * it (consuming it) or null if the window elapses with nothing.
+         * Used to see whether the client's reply to
+         * `window/workDoneProgress/create` arrives before this server
+         * decides whether to send `$/progress` begin.
          *
-         * @var (\Closure(): (array<string, mixed>|null))|null
+         * Second E2E review round, PR #128: a zero-timeout, "already
+         * sitting in the pipe" peek is NOT enough -- a real client's
+         * reply arrives milliseconds later over a real transport, never
+         * instantly, so a bare peek right after writing `create` never
+         * actually saw it (the exact bug this closure's own earlier
+         * version reintroduced). isProgressCreateRefused() below now
+         * calls this with a real, non-zero window and genuinely waits.
+         * Left null in every existing unit test and in any caller that
+         * cannot offer this at all -- degrading safely to "cannot
+         * confirm the client accepted create, so send no progress for
+         * this round" rather than ever risking a hang.
+         *
+         * @var (\Closure(float): (array<string, mixed>|null))|null
          */
         private readonly ?\Closure $tryReadAhead = null,
         /**
@@ -740,16 +747,37 @@ final class LspServer
     }
 
     /**
+     * #111: how long isProgressCreateRefused() waits for the client's own
+     * reply to `window/workDoneProgress/create` before giving up on it.
+     * Second E2E review round, PR #128: a real client's reply arrives
+     * milliseconds later over a real transport, never instantly -- this
+     * has to be a real window, not the zero-timeout peek the first fix
+     * used, which never actually saw a delayed reply at all.
+     */
+    private const CREATE_REPLY_TIMEOUT_SECONDS = 0.2;
+
+    /**
      * PR #128 E2E review (blocking finding 2): the LSP spec forbids sending
      * `$/progress` for a token whose `create` request the client answered
-     * with an error. This server cannot genuinely BLOCK waiting for that
-     * reply (bin/rector-warm-lsp answers one message at a time -- see
-     * diagnoseDocument()'s stale-result comment above), so it only ever
-     * gets to see the reply if it was ALREADY sitting in the transport's
-     * buffer by the time this runs, via a non-blocking peek. A slower
-     * client's reply, arriving after this check, is a residual gap this
-     * synchronous architecture cannot close without real async I/O --
-     * documented, not silently claimed away.
+     * with an error.
+     *
+     * Second E2E review round: the first fix here only ever peeked for a
+     * reply ALREADY sitting in the transport's buffer (a zero-timeout
+     * check), so a real client's reply -- which arrives milliseconds
+     * later, not instantly -- was never actually seen; begin/end still
+     * fired on a token the client went on to refuse. Fixed by genuinely
+     * waiting up to CREATE_REPLY_TIMEOUT_SECONDS via $tryReadAhead (which
+     * now takes that timeout and, in production, is
+     * StdioLspTransport::waitForInput() underneath -- the same primitive
+     * #106's own debounce timer uses, Windows-safe there too).
+     *
+     * Only an EXPLICIT success reply is treated as "not refused" now.
+     * Anything else -- an explicit error, the window elapsing with no
+     * reply at all, or a message that turns out not to be this reply --
+     * skips progress for this round: this server can no longer confirm
+     * the client actually accepted the token, and the LSP spec violation
+     * this whole method exists to avoid is exactly what happens if it
+     * guesses "probably fine" instead.
      */
     private function isProgressCreateRefused(): bool
     {
@@ -757,9 +785,11 @@ final class LspServer
             return false;
         }
 
-        $message = ($this->tryReadAhead)();
+        $message = ($this->tryReadAhead)(self::CREATE_REPLY_TIMEOUT_SECONDS);
         if ($message === null) {
-            return false;
+            // The window elapsed with no reply at all -- treat as
+            // unresolved, not as success. See this method's own docblock.
+            return true;
         }
 
         $isOurCreateReply = array_key_exists('id', $message)
@@ -767,14 +797,15 @@ final class LspServer
             && ($message['method'] ?? null) === null;
 
         if (!$isOurCreateReply) {
-            // Not our reply -- something else the client sent that must
-            // still reach ordinary dispatch, so hand it back rather than
-            // dropping it on the floor.
+            // Not our reply -- something else the client sent while we
+            // were waiting. Hand it back for ordinary dispatch rather
+            // than dropping it, but this round's create reply is still
+            // unresolved, so treat it the same as no reply at all.
             if ($this->pushBackMessage !== null) {
                 ($this->pushBackMessage)($message);
             }
 
-            return false;
+            return true;
         }
 
         return array_key_exists('error', $message);

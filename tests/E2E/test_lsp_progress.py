@@ -63,6 +63,13 @@ def stop_server(proc) -> None:
 
 
 def test_progress_create_begin_end_surround_the_first_diagnose(project):
+    # PR #128 second E2E review: isProgressCreateRefused() now genuinely
+    # WAITS (up to ~200ms) for the client's reply to `create` before
+    # sending `begin` -- a real, spec-compliant client always answers a
+    # server-initiated request, so this pipelines that answer in the same
+    # write as didOpen (same buffering technique as the refusal test
+    # below), exactly what a conforming client's own event loop would do
+    # well within the wait window.
     server = start_server(project, {"window": {"workDoneProgress": True}})
     try:
         uri = (project / "src" / "Fixable.php").as_uri()
@@ -70,6 +77,11 @@ def test_progress_create_begin_end_surround_the_first_diagnose(project):
             "jsonrpc": "2.0",
             "method": "textDocument/didOpen",
             "params": {"textDocument": {"uri": uri, "languageId": "php", "version": 1, "text": ""}},
+        }))
+        server.stdin.write(frame({
+            "jsonrpc": "2.0",
+            "id": "rector-warm-lsp/progress-create",
+            "result": None,
         }))
         server.stdin.flush()
 

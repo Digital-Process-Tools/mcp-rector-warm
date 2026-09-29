@@ -221,9 +221,9 @@ final class StdioLspTransport
     }
 
     /**
-     * PR #128 E2E review (blocking finding 2): a non-blocking peek --
-     * returns the next message ONLY if it is already available without
-     * waiting, null otherwise.
+     * PR #128 E2E review (blocking finding 2): reads the next message ONLY
+     * if it becomes available within $timeoutSeconds, null otherwise --
+     * 0.0 (the default) is a pure non-blocking peek.
      *
      * Self-review correction (second E2E pass, PR #128): this used to run
      * its own `stream_select()` call with a bare 0/0 timeout, independent
@@ -236,10 +236,17 @@ final class StdioLspTransport
      * polls via `PeekNamedPipe`/`fstat()` there instead of `select()`), so
      * this delegates to it rather than duplicating a narrower, broken
      * version of the same logic.
+     *
+     * Third self-review pass (PR #128, second E2E review round): a
+     * zero-timeout peek right after writing `create` never actually saw a
+     * real client's reply, which arrives milliseconds later over a real
+     * transport, not instantly -- accepting a real $timeoutSeconds here is
+     * what lets LspServer::isProgressCreateRefused() genuinely wait for it
+     * instead.
      */
-    public function tryRead(): ?array
+    public function tryRead(float $timeoutSeconds = 0.0): ?array
     {
-        return $this->waitForInput(0.0) ? $this->read() : null;
+        return $this->waitForInput($timeoutSeconds) ? $this->read() : null;
     }
 
     /**
