@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Dpt\McpRectorWarm\Tests\Unit;
 
+use Dpt\McpRectorWarm\Lsp\BufferDiagnosticsSource;
 use Dpt\McpRectorWarm\Lsp\DiagnosticsSource;
 use Dpt\McpRectorWarm\Lsp\LspServer;
 use Dpt\McpRectorWarm\Lsp\WorkspaceDiagnosticsSource;
@@ -70,6 +71,40 @@ final class LspServerTest extends TestCase
             public function diagnoseWorkspace(string $rootPath): array
             {
                 return ['files' => $this->files, 'errors' => $this->errors];
+            }
+        };
+    }
+
+    /**
+     * #140: same as fakeWorkspaceSource() but ALSO implements
+     * BufferDiagnosticsSource, so a textDocument/didChange the test sends
+     * actually populates LspServer's own $buffers[$uri] -- changeDocument()
+     * only tracks a buffer when the configured diagnostics source
+     * implements that interface. Without it, fixWorkspace's dirty-buffer
+     * skip would have nothing to observe.
+     *
+     * @param array<string, list<array<string, mixed>>> $files absolute path -> fixes
+     */
+    private static function fakeWorkspaceAndBufferSource(array $files): DiagnosticsSource
+    {
+        return new class ($files) implements DiagnosticsSource, WorkspaceDiagnosticsSource, BufferDiagnosticsSource {
+            public function __construct(private readonly array $files)
+            {
+            }
+
+            public function diagnose(string $absolutePath): array
+            {
+                return ['fixes' => $this->files[$absolutePath] ?? []];
+            }
+
+            public function diagnoseWorkspace(string $rootPath): array
+            {
+                return ['files' => $this->files, 'errors' => []];
+            }
+
+            public function diagnoseBuffer(string $absolutePath, string $content): array
+            {
+                return ['fixes' => []];
             }
         };
     }
@@ -1971,5 +2006,341 @@ final class LspServerTest extends TestCase
         $methods = array_map(static fn (array $frame): ?string => $frame['method'] ?? null, $responses);
         self::assertNotContains('$/progress', $methods);
         self::assertNotContains('window/workDoneProgress/create', $methods);
+    }
+
+    /**
+     * #140: fixWorkspace's edit is computed from disk. A file the server
+     * knows has an unsaved (dirty) buffer -- textDocument/didChange sent,
+     * never saved -- must never be overwritten with that disk-derived
+     * content: doing so would silently discard the unsaved edits, and
+     * "version": null on the OptionalVersionedTextDocumentIdentifier gives
+     * the client no way to detect the mismatch itself. Paired with the
+     * positive control below (a file that is open but NOT dirty still gets
+     * fixed) per CLAUDE.md's own rule that a must-not-fire assertion needs
+     * a must-fire sibling.
+     */
+    public function testExecuteCommandSkipsAFileWithAnUnsavedDirtyBuffer(): void
+    {
+        $server = new LspServer('1.0.0', self::fakeWorkspaceAndBufferSource([
+            '/proj/A.php' => [self::fix(0, 1, "<?php\nclass A {}\n", 'RectorA')],
+        ]));
+        self::initialize($server, [
+            'workspace' => ['applyEdit' => true, 'workspaceEdit' => ['documentChanges' => true]],
+        ]);
+
+        $server->handle([
+            'jsonrpc' => '2.0',
+            'method' => 'textDocument/didOpen',
+            'params' => ['textDocument' => ['uri' => 'file:///proj/A.php', 'version' => 1]],
+        ]);
+        $server->handle([
+            'jsonrpc' => '2.0',
+            'method' => 'textDocument/didChange',
+            'params' => [
+                'textDocument' => ['uri' => 'file:///proj/A.php', 'version' => 2],
+                'contentChanges' => [['text' => "<?php\nclass A { public function unsaved(): void {} }\n"]],
+            ],
+        ]);
+
+        $responses = $server->handle([
+            'jsonrpc' => '2.0',
+            'id' => 20,
+            'method' => 'workspace/executeCommand',
+            'params' => ['command' => 'rector-warm.fixWorkspace'],
+        ]);
+
+        $applyEdit = null;
+        $result = null;
+        foreach ($responses as $frame) {
+            if (($frame['method'] ?? null) === 'workspace/applyEdit') {
+                $applyEdit = $frame;
+            }
+            if (array_key_exists('id', $frame) && $frame['id'] === 20) {
+                $result = $frame;
+            }
+        }
+
+        self::assertNull(
+            $applyEdit,
+            'the only fix in this workspace is for a dirty buffer -- no workspace/applyEdit must be sent at all',
+        );
+        self::assertNotNull($result, 'expected a response to the executeCommand request itself');
+        self::assertArrayNotHasKey('error', $result);
+        self::assertSame(['skippedDirtyBuffers' => ['file:///proj/A.php']], $result['result']);
+    }
+
+    /**
+     * Positive control for the test above: a file that IS open, but has no
+     * unsaved buffer content (no didChange since didOpen), is not at risk
+     * of the buffer being overwritten and must still get its fix -- proving
+     * the skip above triggers on dirtiness, not on merely being open.
+     */
+    public function testExecuteCommandStillFixesAFileThatIsOpenButNotDirty(): void
+    {
+        $server = new LspServer('1.0.0', self::fakeWorkspaceAndBufferSource([
+            '/proj/A.php' => [self::fix(0, 1, "<?php\nclass A {}\n", 'RectorA')],
+        ]));
+        self::initialize($server, [
+            'workspace' => ['applyEdit' => true, 'workspaceEdit' => ['documentChanges' => true]],
+        ]);
+
+        $server->handle([
+            'jsonrpc' => '2.0',
+            'method' => 'textDocument/didOpen',
+            'params' => ['textDocument' => ['uri' => 'file:///proj/A.php', 'version' => 1]],
+        ]);
+
+        $responses = $server->handle([
+            'jsonrpc' => '2.0',
+            'id' => 21,
+            'method' => 'workspace/executeCommand',
+            'params' => ['command' => 'rector-warm.fixWorkspace'],
+        ]);
+
+        $applyEdit = null;
+        $result = null;
+        foreach ($responses as $frame) {
+            if (($frame['method'] ?? null) === 'workspace/applyEdit') {
+                $applyEdit = $frame;
+            }
+            if (array_key_exists('id', $frame) && $frame['id'] === 21) {
+                $result = $frame;
+            }
+        }
+
+        self::assertNotNull($applyEdit, 'a file that is open but not dirty is not at risk and must still be fixed');
+        self::assertSame(
+            ['file:///proj/A.php'],
+            array_column(array_column($applyEdit['params']['edit']['documentChanges'], 'textDocument'), 'uri'),
+        );
+        self::assertNotNull($result);
+        self::assertNull($result['result']);
+    }
+
+    /**
+     * Both cases in the same run: the dirty file is skipped and reported,
+     * the clean file is fixed normally -- proving the skip is per-file
+     * rather than an all-or-nothing refusal of the whole command.
+     */
+    public function testExecuteCommandFixesCleanFilesAndSkipsDirtyOnesInTheSameRun(): void
+    {
+        $server = new LspServer('1.0.0', self::fakeWorkspaceAndBufferSource([
+            '/proj/A.php' => [self::fix(0, 1, "<?php\nclass A {}\n", 'RectorA')],
+            '/proj/B.php' => [self::fix(0, 1, "<?php\nclass B {}\n", 'RectorB')],
+        ]));
+        self::initialize($server, [
+            'workspace' => ['applyEdit' => true, 'workspaceEdit' => ['documentChanges' => true]],
+        ]);
+
+        $server->handle([
+            'jsonrpc' => '2.0',
+            'method' => 'textDocument/didOpen',
+            'params' => ['textDocument' => ['uri' => 'file:///proj/A.php', 'version' => 1]],
+        ]);
+        $server->handle([
+            'jsonrpc' => '2.0',
+            'method' => 'textDocument/didChange',
+            'params' => [
+                'textDocument' => ['uri' => 'file:///proj/A.php', 'version' => 2],
+                'contentChanges' => [['text' => "<?php\nclass A { public function unsaved(): void {} }\n"]],
+            ],
+        ]);
+
+        $responses = $server->handle([
+            'jsonrpc' => '2.0',
+            'id' => 22,
+            'method' => 'workspace/executeCommand',
+            'params' => ['command' => 'rector-warm.fixWorkspace'],
+        ]);
+
+        $applyEdit = null;
+        $result = null;
+        foreach ($responses as $frame) {
+            if (($frame['method'] ?? null) === 'workspace/applyEdit') {
+                $applyEdit = $frame;
+            }
+            if (array_key_exists('id', $frame) && $frame['id'] === 22) {
+                $result = $frame;
+            }
+        }
+
+        self::assertNotNull($applyEdit);
+        self::assertSame(
+            ['file:///proj/B.php'],
+            array_column(array_column($applyEdit['params']['edit']['documentChanges'], 'textDocument'), 'uri'),
+        );
+        self::assertNotNull($result);
+        self::assertSame(['skippedDirtyBuffers' => ['file:///proj/A.php']], $result['result']);
+    }
+
+    /**
+     * Self-review finding (both the Explore and oss:auditor review passes,
+     * independently): the dirty-buffer skip must not rely on exact string
+     * equality between the URI reconstructed from the on-disk path
+     * (pathToUri($absolutePath), whatever case Rector's own file
+     * enumeration returned) and the URI the client actually sent on
+     * didChange ($this->buffers's own key) -- on a case-insensitive
+     * filesystem (macOS default, Windows) those two can differ only in
+     * case, and a naive `isset()` would silently miss the dirty buffer,
+     * reopening #140 itself. Here the workspace source reports the fix
+     * under an upper-cased path while the client opened and dirtied the
+     * lower-cased one.
+     */
+    public function testExecuteCommandSkipsADirtyBufferEvenWhenUriCasingDiffersFromDisk(): void
+    {
+        $server = new LspServer('1.0.0', self::fakeWorkspaceAndBufferSource([
+            '/proj/A.PHP' => [self::fix(0, 1, "<?php\nclass A {}\n", 'RectorA')],
+        ]));
+        self::initialize($server, [
+            'workspace' => ['applyEdit' => true, 'workspaceEdit' => ['documentChanges' => true]],
+        ]);
+
+        $server->handle([
+            'jsonrpc' => '2.0',
+            'method' => 'textDocument/didOpen',
+            'params' => ['textDocument' => ['uri' => 'file:///proj/A.php', 'version' => 1]],
+        ]);
+        $server->handle([
+            'jsonrpc' => '2.0',
+            'method' => 'textDocument/didChange',
+            'params' => [
+                'textDocument' => ['uri' => 'file:///proj/A.php', 'version' => 2],
+                'contentChanges' => [['text' => "<?php\nclass A { public function unsaved(): void {} }\n"]],
+            ],
+        ]);
+
+        $responses = $server->handle([
+            'jsonrpc' => '2.0',
+            'id' => 23,
+            'method' => 'workspace/executeCommand',
+            'params' => ['command' => 'rector-warm.fixWorkspace'],
+        ]);
+
+        $applyEdit = null;
+        $result = null;
+        foreach ($responses as $frame) {
+            if (($frame['method'] ?? null) === 'workspace/applyEdit') {
+                $applyEdit = $frame;
+            }
+            if (array_key_exists('id', $frame) && $frame['id'] === 23) {
+                $result = $frame;
+            }
+        }
+
+        self::assertNull(
+            $applyEdit,
+            'the only fix in this workspace is for a dirty buffer, reported under a differently-cased '
+            . 'URI -- no workspace/applyEdit must be sent',
+        );
+        self::assertNotNull($result);
+        self::assertSame(['skippedDirtyBuffers' => ['file:///proj/A.PHP']], $result['result']);
+    }
+
+    /**
+     * Round-2 self-review finding (oss:auditor, second pass over the fix
+     * above): the case-insensitive fallback must not, by itself, conflate
+     * two genuinely DIFFERENT files that merely share a case-folded name.
+     * On a case-SENSITIVE filesystem (this repo's own ubuntu-latest CI
+     * leg) `A.php` and `a.php` can coexist as distinct real files; a dirty
+     * buffer for `a.php` must never cause `A.php`'s own, unrelated fix to
+     * be silently skipped. Uses real files on disk (via realpath()) rather
+     * than the fake fixture paths the other tests use, because this is
+     * exactly the disambiguation realpath() exists to provide -- skipped
+     * outright on a filesystem where the two names collide into one file
+     * (this repo's own dev machines, macOS default), since the scenario
+     * this test pins cannot be constructed there at all.
+     */
+    public function testExecuteCommandDoesNotConflateTwoDistinctFilesSharingACaseFoldedName(): void
+    {
+        $dir = sys_get_temp_dir() . '/lsp-case-test-' . bin2hex(random_bytes(4));
+        mkdir($dir);
+        $upper = $dir . '/A.php';
+        $lower = $dir . '/a.php';
+        file_put_contents($upper, "<?php\n// A\n");
+        file_put_contents($lower, "<?php\n// a\n");
+
+        // Same disambiguation isBufferDirty() itself uses: dev+ino, not
+        // realpath(). realpath() on a case-insensitive-but-preserving
+        // filesystem (macOS/APFS) just echoes back whichever case was
+        // passed in -- it does NOT collapse to the same string for two
+        // differently-cased opens of the same file, so comparing realpath()
+        // strings here would (wrongly) never detect the collision and this
+        // test would silently run its "distinct files" assertions against
+        // what is actually a single file on such a filesystem.
+        $upperStat = is_file($upper) ? stat($upper) : false;
+        $lowerStat = is_file($lower) ? stat($lower) : false;
+        $isSameFile = $upperStat !== false && $lowerStat !== false
+            && $upperStat['dev'] === $lowerStat['dev'] && $upperStat['ino'] === $lowerStat['ino'];
+
+        if ($upperStat === false || $lowerStat === false || $isSameFile) {
+            @unlink($upper);
+            @unlink($lower);
+            @rmdir($dir);
+            self::markTestSkipped(
+                'This filesystem is case-insensitive -- A.php and a.php collide into one file, '
+                . 'so the two-distinct-files scenario this test pins cannot be constructed here.',
+            );
+        }
+
+        try {
+            $server = new LspServer('1.0.0', self::fakeWorkspaceAndBufferSource([
+                $upper => [self::fix(0, 1, "<?php\n// A fixed\n", 'RectorA')],
+            ]));
+            self::initialize($server, [
+                'workspace' => ['applyEdit' => true, 'workspaceEdit' => ['documentChanges' => true]],
+            ]);
+
+            // Dirty the DIFFERENT, lowercase file -- A.php itself is never
+            // opened or changed, so it has no dirty buffer of its own.
+            $lowerUri = 'file://' . $lower;
+            $server->handle([
+                'jsonrpc' => '2.0',
+                'method' => 'textDocument/didOpen',
+                'params' => ['textDocument' => ['uri' => $lowerUri, 'version' => 1]],
+            ]);
+            $server->handle([
+                'jsonrpc' => '2.0',
+                'method' => 'textDocument/didChange',
+                'params' => [
+                    'textDocument' => ['uri' => $lowerUri, 'version' => 2],
+                    'contentChanges' => [['text' => "<?php\n// a, unsaved\n"]],
+                ],
+            ]);
+
+            $responses = $server->handle([
+                'jsonrpc' => '2.0',
+                'id' => 24,
+                'method' => 'workspace/executeCommand',
+                'params' => ['command' => 'rector-warm.fixWorkspace'],
+            ]);
+        } finally {
+            unlink($upper);
+            unlink($lower);
+            rmdir($dir);
+        }
+
+        $applyEdit = null;
+        $result = null;
+        foreach ($responses as $frame) {
+            if (($frame['method'] ?? null) === 'workspace/applyEdit') {
+                $applyEdit = $frame;
+            }
+            if (array_key_exists('id', $frame) && $frame['id'] === 24) {
+                $result = $frame;
+            }
+        }
+
+        self::assertNotNull(
+            $applyEdit,
+            "A.php's own fix must still be sent -- it has no dirty buffer of its own, "
+            . 'only a distinct, differently-cased file does',
+        );
+        $uris = array_column(
+            array_column($applyEdit['params']['edit']['documentChanges'], 'textDocument'),
+            'uri',
+        );
+        self::assertSame(['file://' . $upper], $uris);
+        self::assertNotNull($result);
+        self::assertNull($result['result']);
     }
 }

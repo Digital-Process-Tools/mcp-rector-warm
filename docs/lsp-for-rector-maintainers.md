@@ -55,7 +55,11 @@ an agent calling a tool:
   `workspace/applyEdit` request, framed by its own `$/progress` token
   (distinct from the cold-boot one above). A client without
   `workspace.applyEdit` gets a JSON-RPC error rather than a command that
-  silently does nothing.
+  silently does nothing. The fix is computed from disk, so a file with an
+  unsaved (dirty) buffer is skipped instead of being overwritten with a
+  disk-derived edit that would silently discard the unsaved changes
+  (#140); skipped URIs are reported back in the command's result under
+  `skippedDirtyBuffers`.
 
 Editor setup for six clients (Neovim, Helix, Sublime Text, PhpStorm/LSP4IJ,
 plus the generic pattern) is in the README's [Editor

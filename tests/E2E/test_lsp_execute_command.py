@@ -16,7 +16,7 @@ import subprocess
 from pathlib import Path
 from urllib.parse import unquote, urlsplit
 
-from test_lsp_diagnostics import apply_edit, copy_fixture, start_server, stop_server
+from test_lsp_diagnostics import apply_edit, copy_fixture, did_change, did_open, start_server, stop_server
 from test_lsp_initialize import REPO, frame, php_binary, read_frame
 
 # A `file:///C:/Users/...` URI's path component, per urlsplit(), keeps the
@@ -131,3 +131,60 @@ def test_fix_workspace_refuses_without_client_apply_edit_support(tmp_path):
     assert len(frames) == 1
     assert "error" in frames[0]
     assert "applyEdit" not in [f.get("method") for f in frames]
+
+
+def test_fix_workspace_skips_a_dirty_buffer_and_reports_it(tmp_path):
+    # #140, must not fire: an open, unsaved (dirty) buffer must never be
+    # overwritten with a fix computed from disk -- applying one would
+    # silently discard the buffer's unsaved edits, exactly the bug this
+    # issue reports (real subprocess, real stdio -- the unit-level tests in
+    # LspServerTest already pin the same behaviour against a fake source).
+    project = tmp_path / "project"
+    copy_fixture(project)
+    proc = start_server(project, APPLY_EDIT_CAPABILITIES)
+    fixable_uri = (project / "src" / "Fixable.php").as_uri()
+
+    try:
+        did_open(proc, fixable_uri)
+        original = (project / "src" / "Fixable.php").read_bytes().decode("utf-8")
+        did_change(proc, fixable_uri, 2, original + "\n// unsaved, must survive\n")
+        read_frame(proc.stdout)  # drain the didChange diagnostics publish
+
+        frames = execute_fix_workspace(proc)
+    finally:
+        stop_server(proc)
+
+    result = next(f for f in frames if f.get("id") == 2)
+    assert "error" not in result, result
+    assert result["result"] == {"skippedDirtyBuffers": [fixable_uri]}, result
+
+    apply_edit_request = next((f for f in frames if f.get("method") == "workspace/applyEdit"), None)
+    if apply_edit_request is not None:
+        uris = [c["textDocument"]["uri"] for c in apply_edit_request["params"]["edit"]["documentChanges"]]
+        assert fixable_uri not in uris, uris
+
+
+def test_fix_workspace_still_fixes_a_file_that_is_open_but_not_dirty(tmp_path):
+    # Positive control for the test above (CLAUDE.md's own rule: a
+    # must-not-fire assertion needs a must-fire sibling): a file that IS
+    # open, but has no unsaved buffer content (no didChange since didOpen),
+    # is not at risk and must still get its fix -- proving the skip is
+    # triggered by dirtiness, not by merely being open.
+    project = tmp_path / "project"
+    copy_fixture(project)
+    proc = start_server(project, APPLY_EDIT_CAPABILITIES)
+    fixable_uri = (project / "src" / "Fixable.php").as_uri()
+
+    try:
+        did_open(proc, fixable_uri)
+        frames = execute_fix_workspace(proc)
+    finally:
+        stop_server(proc)
+
+    result = next(f for f in frames if f.get("id") == 2)
+    assert "error" not in result, result
+    assert result["result"] is None, result
+
+    apply_edit_request = next(f for f in frames if f.get("method") == "workspace/applyEdit")
+    uris = [c["textDocument"]["uri"] for c in apply_edit_request["params"]["edit"]["documentChanges"]]
+    assert fixable_uri in uris, uris

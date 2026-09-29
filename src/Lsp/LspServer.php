@@ -610,7 +610,10 @@ final class LspServer
         $frames = [];
         foreach ($uris as $uri) {
             // #106: a document with an unsaved buffer is re-diagnosed from
-            // that buffer, not from disk -- due now, run by the loop.
+            // that buffer, not from disk -- due now, run by the loop. $uri
+            // here comes from the same $this->buffers map (via $uris just
+            // above), so this is never the disk-vs-client URI mismatch
+            // isBufferDirty() exists for -- plain isset() is correct.
             if (isset($this->buffers[$uri])) {
                 $this->pendingDeadlines[$uri] = microtime(true);
                 continue;
@@ -1070,6 +1073,17 @@ final class LspServer
      * fix silently undelivered, which is exactly the failure mode the
      * issue calls out.
      *
+     * #140: the fix itself is computed from disk (via `diagnoseWorkspace()`
+     * -- there is no per-URI buffer override on this path), so a file the
+     * client has an unsaved (dirty) buffer for is skipped rather than
+     * fixed: applying a disk-derived edit there would silently discard the
+     * unsaved edits, and there is no tracked buffer version to put on the
+     * `OptionalVersionedTextDocumentIdentifier` that would let the client
+     * detect the mismatch itself. Skipped URIs are reported back in the
+     * command's own result (`skippedDirtyBuffers`), never silently
+     * dropped. A file that is open but not dirty is unaffected and still
+     * gets its fix.
+     *
      * @param array<string, mixed> $params
      * @return list<array<string, mixed>>
      */
@@ -1169,8 +1183,23 @@ final class LspServer
 
         $documentChanges = [];
         $changes = [];
+        $skippedDirtyBuffers = [];
         foreach ($outcome['files'] as $absolutePath => $fixes) {
             $uri = self::pathToUri($absolutePath);
+
+            // #140: an unsaved (dirty) buffer for this URI means the fix
+            // just computed from disk no longer matches what the client
+            // has open -- applying it would silently discard the unsaved
+            // edits. Skip it and report it, rather than overwrite it. A
+            // URI that is open but NOT in $this->buffers (never opened,
+            // or opened with no didChange since) is not at risk and still
+            // gets its fix below.
+            if ($this->isBufferDirty($uri)) {
+                $skippedDirtyBuffers[] = $uri;
+
+                continue;
+            }
+
             $edits = array_map(
                 static fn (array $fix): array => ['range' => $fix['range'], 'newText' => $fix['newText']],
                 $fixes,
@@ -1182,13 +1211,24 @@ final class LspServer
                     // fix (this never goes through codeAction's per-URI
                     // $fixesVersions) -- null is the documented "not
                     // tracked" value for an OptionalVersionedTextDocument
-                    // Identifier.
+                    // Identifier. Safe here: the skip above already
+                    // removed every URI this server knows has unsaved
+                    // buffer content, which is the only case "version":
+                    // null could silently clobber.
                     'textDocument' => ['uri' => $uri, 'version' => null],
                     'edits' => $edits,
                 ];
             } else {
                 $changes[$uri] = $edits;
             }
+        }
+
+        $resultPayload = $skippedDirtyBuffers === [] ? null : ['skippedDirtyBuffers' => $skippedDirtyBuffers];
+
+        if ($documentChanges === [] && $changes === []) {
+            $frames[] = $this->result($id, $resultPayload);
+
+            return $frames;
         }
 
         $this->emit([
@@ -1203,7 +1243,7 @@ final class LspServer
             ],
         ], $frames);
 
-        $frames[] = $this->result($id, null);
+        $frames[] = $this->result($id, $resultPayload);
 
         return $frames;
     }
@@ -1370,6 +1410,73 @@ final class LspServer
         }
 
         return 'file://' . implode('/', $segments);
+    }
+
+    /**
+     * #140 self-review finding (independent Explore + oss:auditor review
+     * passes, same finding from both): a plain `isset($this->buffers[$uri])`
+     * would silently miss a dirty buffer whenever $uri -- reconstructed by
+     * pathToUri() from the absolute path diagnoseWorkspace() enumerated off
+     * disk -- differs only in case from the URI the client itself sent on
+     * didChange (the literal string $this->buffers is keyed by). That is
+     * exactly the case-insensitive-filesystem trap isWatchedConfigFile()
+     * already documents and guards against with the same strcasecmp()
+     * technique, on precisely the two platforms (macOS default, Windows)
+     * this whole issue is about -- and a miss here reopens #140 itself: the
+     * disk-derived fix would silently overwrite the very buffer this check
+     * exists to protect.
+     *
+     * Round-2 self-review finding (oss:auditor, second pass): a
+     * case-insensitive match ALONE, with nothing else to disambiguate it,
+     * is unsafe in the other direction -- on a case-SENSITIVE filesystem
+     * (Linux, this repo's own default ubuntu-latest CI leg) `A.php` and
+     * `a.php` can be two genuinely different files that merely share a
+     * case-folded name; without a further check, a dirty buffer for one
+     * would wrongly mark the other's unrelated, legitimate fix as
+     * "skipped".
+     *
+     * Disambiguated with stat()'s device+inode pair, NOT realpath():
+     * realpath() on a case-insensitive-but-case-PRESERVING filesystem
+     * (macOS/APFS, confirmed by direct probe during self-review) simply
+     * echoes back whichever case was passed in once it confirms the path
+     * resolves at all -- it does NOT canonicalize to the on-disk case, so
+     * realpath('A.php') !== realpath('a.php') as STRINGS even when they
+     * are the exact same file, which would have silently defeated this
+     * whole case-insensitive fallback on macOS. stat()'s dev+ino pair
+     * identifies the underlying file itself regardless of which case was
+     * used to open it, confirmed against both a same-file pair (two
+     * differently-cased opens of one file) and a genuinely-distinct pair
+     * (two different files that happen to share a case-folded name).
+     *
+     * When either side's stat() fails (a test fixture path, or a file
+     * deleted between the workspace scan and this check) there is nothing
+     * left to disambiguate with; treated as the same file rather than
+     * risking a silent overwrite, consistent with this whole check erring
+     * toward skipping over applying.
+     */
+    private function isBufferDirty(string $uri): bool
+    {
+        if (isset($this->buffers[$uri])) {
+            return true;
+        }
+
+        $candidateStat = @stat(self::uriToPath($uri));
+        foreach (array_keys($this->buffers) as $bufferUri) {
+            if (strcasecmp($bufferUri, $uri) !== 0) {
+                continue;
+            }
+
+            $bufferStat = @stat(self::uriToPath($bufferUri));
+            if ($candidateStat === false || $bufferStat === false) {
+                return true;
+            }
+
+            if ($candidateStat['dev'] === $bufferStat['dev'] && $candidateStat['ino'] === $bufferStat['ino']) {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     /**
