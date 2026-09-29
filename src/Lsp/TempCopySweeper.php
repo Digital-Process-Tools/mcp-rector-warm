@@ -93,7 +93,13 @@ final class TempCopySweeper
 
     private static function removeIfStale(string $path, int $pid): bool
     {
-        if ($pid === getmypid() || self::isAlive($pid) !== false) {
+        // #142: the shared sink both sweepTree() (which also checks this
+        // itself, before ever reaching here) and sweepDirectory() (which
+        // does not -- its glob(..., GLOB_ONLYDIR) follows a symlink) funnel
+        // into. Refusing here closes both routes at once: a symlink can
+        // point anywhere, and deleting through it means deleting outside
+        // the workspace.
+        if (is_link($path) || $pid === getmypid() || self::isAlive($pid) !== false) {
             return false;
         }
 

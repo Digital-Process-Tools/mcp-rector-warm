@@ -113,4 +113,43 @@ final class TempCopySweeperTest extends TestCase
         self::assertDirectoryExists($elsewhere);
         self::assertDirectoryExists($live);
     }
+
+    /**
+     * #142: sweepDirectory() reaches removeIfStale() via
+     * glob(..., GLOB_ONLYDIR), which follows a symlink -- unlike
+     * sweepTree()'s own direct-child loop, which already skips one. A
+     * symlink named like a stale candidate must not have its target's
+     * contents deleted, wherever that target is.
+     */
+    public function testSweepDirectoryDoesNotFollowASymlinkedCandidate(): void
+    {
+        $externalRoot = sys_get_temp_dir() . '/mcp-rector-sweep-external-' . bin2hex(random_bytes(4));
+        mkdir($externalRoot, 0o700, true);
+        $externalFile = $externalRoot . '/Outside.txt';
+        file_put_contents($externalFile, "not part of the workspace\n");
+
+        $pid = self::deadPid();
+        $symlinkPath = $this->root . '/vendor/pkg/.rector-warm-' . $pid;
+        mkdir(dirname($symlinkPath), 0o700, true);
+        self::assertTrue(symlink($externalRoot, $symlinkPath), 'could not create the test symlink');
+
+        // Positive control, same run: a real stale directory (no symlink
+        // involved) is still removed -- proves the guard didn't just start
+        // refusing every candidate.
+        $realStale = $this->plant('vendor/pkg2/.rector-warm-' . $pid);
+
+        try {
+            TempCopySweeper::sweepDirectory($this->root . '/vendor/pkg');
+            TempCopySweeper::sweepDirectory($this->root . '/vendor/pkg2');
+
+            self::assertFileExists($externalFile, 'a symlinked candidate must not have its target swept');
+            self::assertDirectoryDoesNotExist($realStale, 'a real stale directory (no symlink) must still be removed');
+        } finally {
+            // Removed as a link, never recursed into: the teardown helper
+            // below is not symlink-safe, and following this link a second
+            // time would be the exact bug under test.
+            @unlink($symlinkPath);
+            self::removeTree($externalRoot);
+        }
+    }
 }

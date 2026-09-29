@@ -224,6 +224,14 @@ final class RectorDiagnosticsSource implements BufferDiagnosticsSource, Workspac
         TempCopySweeper::sweepDirectory($directory);
 
         try {
+            // #142: a symlink planted at the deterministic `.rector-warm-<pid>`
+            // name would have is_dir() follow it -- the write below then
+            // lands through it, and the finally block's unlink/rmdir would
+            // delete through it too. Refused before either happens.
+            if (is_link($tempDirectory)) {
+                return self::failure(sprintf('rector-warm-lsp: refusing a symlinked temp directory in %s', $directory));
+            }
+
             if (!is_dir($tempDirectory) && !@mkdir($tempDirectory, 0o700) && !is_dir($tempDirectory)) {
                 return self::failure(sprintf('rector-warm-lsp: could not create a temp directory in %s', $directory));
             }
