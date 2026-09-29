@@ -6,6 +6,7 @@ namespace Dpt\McpRectorWarm\Tests\Unit;
 
 use Dpt\McpRectorWarm\Lsp\DiagnosticsSource;
 use Dpt\McpRectorWarm\Lsp\LspServer;
+use Dpt\McpRectorWarm\Lsp\WorkspaceDiagnosticsSource;
 use PHPUnit\Framework\TestCase;
 
 /**
@@ -46,6 +47,32 @@ final class LspServerTest extends TestCase
         ];
     }
 
+    /**
+     * #102: a source that ALSO implements WorkspaceDiagnosticsSource, so
+     * `initialize` advertises executeCommandProvider and
+     * `workspace/executeCommand` has somewhere to go.
+     *
+     * @param array<string, list<array<string, mixed>>> $files absolute path -> fixes
+     */
+    private static function fakeWorkspaceSource(array $files): DiagnosticsSource
+    {
+        return new class ($files) implements DiagnosticsSource, WorkspaceDiagnosticsSource {
+            public function __construct(private readonly array $files)
+            {
+            }
+
+            public function diagnose(string $absolutePath): array
+            {
+                return ['fixes' => $this->files[$absolutePath] ?? []];
+            }
+
+            public function diagnoseWorkspace(string $rootPath): array
+            {
+                return ['files' => $this->files, 'errors' => []];
+            }
+        };
+    }
+
     public function testInitializeReturnsCapabilitiesAndServerInfo(): void
     {
         $server = new LspServer('0.1.0-prototype');
@@ -65,6 +92,34 @@ final class LspServerTest extends TestCase
         self::assertSame(
             ['name' => 'rector-warm-lsp', 'version' => '0.1.0-prototype'],
             $response['result']['serverInfo'],
+        );
+        // #102: negative control for
+        // testInitializeAdvertisesExecuteCommandProviderForAWorkspaceFixSource
+        // below -- with no diagnostics source at all (this server), there
+        // is nothing a fixWorkspace command could run, so it must not be
+        // advertised.
+        self::assertArrayNotHasKey('executeCommandProvider', $response['result']['capabilities']);
+    }
+
+    /**
+     * #102: positive control for the negative assertion above -- a source
+     * that DOES implement WorkspaceDiagnosticsSource makes `initialize`
+     * advertise the command.
+     */
+    public function testInitializeAdvertisesExecuteCommandProviderForAWorkspaceFixSource(): void
+    {
+        $server = new LspServer('0.1.0-prototype', self::fakeWorkspaceSource([]));
+
+        $responses = $server->handle([
+            'jsonrpc' => '2.0',
+            'id' => 1,
+            'method' => 'initialize',
+            'params' => ['capabilities' => []],
+        ]);
+
+        self::assertSame(
+            ['commands' => ['rector-warm.fixWorkspace']],
+            $responses[0]['result']['capabilities']['executeCommandProvider'],
         );
     }
 
@@ -1644,5 +1699,212 @@ final class LspServerTest extends TestCase
             ['window/workDoneProgress/create', '$/progress', '$/progress', 'textDocument/publishDiagnostics'],
             $methods,
         );
+    }
+
+    private const APPLY_EDIT_ONLY = ['workspace' => ['applyEdit' => true]];
+
+    public function testExecuteCommandRefusesAnUnknownCommand(): void
+    {
+        $server = new LspServer('1.0.0', self::fakeWorkspaceSource([]));
+        self::initialize($server, self::APPLY_EDIT_ONLY);
+
+        $responses = $server->handle([
+            'jsonrpc' => '2.0',
+            'id' => 5,
+            'method' => 'workspace/executeCommand',
+            'params' => ['command' => 'some.other.command'],
+        ]);
+
+        self::assertCount(1, $responses);
+        self::assertSame(5, $responses[0]['id']);
+        self::assertArrayHasKey('error', $responses[0]);
+        self::assertArrayNotHasKey('result', $responses[0]);
+    }
+
+    /**
+     * #102 "refuse with a visible error, never a silent no-op": a client
+     * that never declared workspace.applyEdit gets a JSON-RPC error, not a
+     * quietly-empty result -- there would be nowhere to send the fix.
+     */
+    public function testExecuteCommandRefusesWithoutClientApplyEditSupport(): void
+    {
+        $server = new LspServer('1.0.0', self::fakeWorkspaceSource([
+            '/proj/Sample.php' => [self::fix(0, 1, "<?php\n", 'SomeRector')],
+        ]));
+        self::initialize($server, []); // no workspace.applyEdit declared
+
+        $responses = $server->handle([
+            'jsonrpc' => '2.0',
+            'id' => 6,
+            'method' => 'workspace/executeCommand',
+            'params' => ['command' => 'rector-warm.fixWorkspace'],
+        ]);
+
+        self::assertCount(1, $responses);
+        self::assertSame(6, $responses[0]['id']);
+        self::assertArrayHasKey('error', $responses[0]);
+    }
+
+    /**
+     * Positive control for the refusal above: the SAME source and command,
+     * but the client DOES declare workspace.applyEdit -- the command must
+     * actually go through and reach the client as an outbound
+     * `workspace/applyEdit` request, proving the refusal above is really
+     * about the missing capability and not e.g. a broken command name.
+     */
+    public function testExecuteCommandAppliesFixesAcrossEveryChangedFileWhenClientSupportsApplyEdit(): void
+    {
+        $server = new LspServer('1.0.0', self::fakeWorkspaceSource([
+            '/proj/A.php' => [self::fix(0, 1, "<?php\nclass A {}\n", 'RectorA')],
+            '/proj/B.php' => [self::fix(2, 3, "<?php\nclass B {}\n", 'RectorB')],
+        ]));
+        self::initialize($server, [
+            'workspace' => ['applyEdit' => true, 'workspaceEdit' => ['documentChanges' => true]],
+        ]);
+
+        $responses = $server->handle([
+            'jsonrpc' => '2.0',
+            'id' => 7,
+            'method' => 'workspace/executeCommand',
+            'params' => ['command' => 'rector-warm.fixWorkspace'],
+        ]);
+
+        $applyEdit = null;
+        $result = null;
+        foreach ($responses as $frame) {
+            if (($frame['method'] ?? null) === 'workspace/applyEdit') {
+                $applyEdit = $frame;
+            }
+            if (array_key_exists('id', $frame) && $frame['id'] === 7) {
+                $result = $frame;
+            }
+        }
+
+        self::assertNotNull($applyEdit, 'expected an outbound workspace/applyEdit request');
+        self::assertNotNull($result, 'expected a response to the executeCommand request itself');
+        self::assertArrayNotHasKey('error', $result);
+
+        $uris = array_column(
+            array_column($applyEdit['params']['edit']['documentChanges'], 'textDocument'),
+            'uri',
+        );
+        sort($uris);
+        self::assertSame(['file:///proj/A.php', 'file:///proj/B.php'], $uris);
+    }
+
+    /**
+     * Same fix content, but the client never declared
+     * workspace.workspaceEdit.documentChanges -- the edit must fall back to
+     * the plain `changes` map, exactly like codeAction's own
+     * canUseDocumentChanges branch.
+     */
+    public function testExecuteCommandUsesPlainChangesMapWithoutDocumentChangesSupport(): void
+    {
+        $server = new LspServer('1.0.0', self::fakeWorkspaceSource([
+            '/proj/A.php' => [self::fix(0, 1, "<?php\nclass A {}\n", 'RectorA')],
+        ]));
+        self::initialize($server, self::APPLY_EDIT_ONLY);
+
+        $responses = $server->handle([
+            'jsonrpc' => '2.0',
+            'id' => 8,
+            'method' => 'workspace/executeCommand',
+            'params' => ['command' => 'rector-warm.fixWorkspace'],
+        ]);
+
+        $applyEdit = null;
+        foreach ($responses as $frame) {
+            if (($frame['method'] ?? null) === 'workspace/applyEdit') {
+                $applyEdit = $frame;
+            }
+        }
+
+        self::assertNotNull($applyEdit);
+        self::assertArrayHasKey('file:///proj/A.php', $applyEdit['params']['edit']['changes']);
+        self::assertArrayNotHasKey('documentChanges', $applyEdit['params']['edit']);
+    }
+
+    /**
+     * Negative control paired with the test above: nothing to fix means no
+     * workspace/applyEdit is sent at all -- but the command still answers
+     * (not a silent hang), since "nothing changed" is a legitimate outcome,
+     * unlike the missing-capability refusal.
+     */
+    public function testExecuteCommandSendsNoApplyEditWhenNothingToFix(): void
+    {
+        $server = new LspServer('1.0.0', self::fakeWorkspaceSource([]));
+        self::initialize($server, self::APPLY_EDIT_ONLY);
+
+        $responses = $server->handle([
+            'jsonrpc' => '2.0',
+            'id' => 9,
+            'method' => 'workspace/executeCommand',
+            'params' => ['command' => 'rector-warm.fixWorkspace'],
+        ]);
+
+        $methods = array_map(static fn (array $frame): ?string => $frame['method'] ?? null, $responses);
+        self::assertNotContains('workspace/applyEdit', $methods);
+        self::assertSame(9, $responses[array_key_last($responses)]['id']);
+        self::assertArrayNotHasKey('error', $responses[array_key_last($responses)]);
+    }
+
+    /**
+     * #102 "report progress with $/progress": its own token
+     * (`rector-warm-lsp/fix-workspace`), distinct from #111's cold-boot
+     * one, so a client watching for the cold-boot token specifically never
+     * sees this progress mixed into it.
+     */
+    public function testExecuteCommandReportsProgressOnItsOwnToken(): void
+    {
+        $server = new LspServer('1.0.0', self::fakeWorkspaceSource([
+            '/proj/A.php' => [self::fix(0, 1, "<?php\n", 'SomeRector')],
+        ]));
+        self::initialize($server, [
+            'workspace' => ['applyEdit' => true],
+            'window' => ['workDoneProgress' => true],
+        ]);
+
+        $responses = $server->handle([
+            'jsonrpc' => '2.0',
+            'id' => 10,
+            'method' => 'workspace/executeCommand',
+            'params' => ['command' => 'rector-warm.fixWorkspace'],
+        ]);
+
+        $tokens = [];
+        foreach ($responses as $frame) {
+            if (($frame['method'] ?? null) === '$/progress' || ($frame['method'] ?? null) === 'window/workDoneProgress/create') {
+                $tokens[] = $frame['params']['token'];
+            }
+        }
+
+        self::assertNotEmpty($tokens);
+        foreach ($tokens as $token) {
+            self::assertSame('rector-warm-lsp/fix-workspace', $token);
+        }
+    }
+
+    /**
+     * Negative control for the progress test above: a client that never
+     * declared window.workDoneProgress gets no progress frames at all for
+     * fixWorkspace, the same as #111's existing cold-boot behaviour.
+     */
+    public function testExecuteCommandSendsNoProgressWithoutWorkDoneProgressCapability(): void
+    {
+        $server = new LspServer('1.0.0', self::fakeWorkspaceSource([
+            '/proj/A.php' => [self::fix(0, 1, "<?php\n", 'SomeRector')],
+        ]));
+        self::initialize($server, self::APPLY_EDIT_ONLY);
+
+        $responses = $server->handle([
+            'jsonrpc' => '2.0',
+            'id' => 11,
+            'method' => 'workspace/executeCommand',
+            'params' => ['command' => 'rector-warm.fixWorkspace'],
+        ]);
+
+        $methods = array_map(static fn (array $frame): ?string => $frame['method'] ?? null, $responses);
+        self::assertNotContains('$/progress', $methods);
+        self::assertNotContains('window/workDoneProgress/create', $methods);
     }
 }

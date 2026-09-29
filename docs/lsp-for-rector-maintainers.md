@@ -48,13 +48,21 @@ an agent calling a tool:
   future non-synchronous transport: a conforming client's cancellation for
   id X always reaches this one-message-at-a-time server after id X's own
   response was already written (#111).
+- **Workspace-wide fix (#102).** `workspace/executeCommand` advertises
+  `rector-warm.fixWorkspace` when the client's `initialize` declared
+  `workspace.applyEdit`. It dry-runs the same warm oracle over the whole
+  working directory and returns every changed file in one
+  `workspace/applyEdit` request, framed by its own `$/progress` token
+  (distinct from the cold-boot one above). A client without
+  `workspace.applyEdit` gets a JSON-RPC error rather than a command that
+  silently does nothing.
 
 Editor setup for six clients (Neovim, Helix, Sublime Text, PhpStorm/LSP4IJ,
 plus the generic pattern) is in the README's [Editor
 setup](../README.md#editor-setup) subsection.
 
-Out of v1 scope: unsaved buffers (Rector reads from disk), workspace-wide
-scans, and `workspace/configuration`.
+Out of scope: `workspace/configuration` and multi-root workspaces (#107, one
+warm worker per `rector.php` root).
 
 ## How
 

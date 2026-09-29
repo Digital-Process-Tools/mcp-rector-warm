@@ -12,7 +12,7 @@ use Mcp\Schema\Result\CallToolResult;
  * MCP tool uses (dry-run), on the single file the LSP asks about, and turns
  * its `file_diffs` entry into fixes via RectorDiffParser.
  */
-final class RectorDiagnosticsSource implements BufferDiagnosticsSource
+final class RectorDiagnosticsSource implements BufferDiagnosticsSource, WorkspaceDiagnosticsSource
 {
     public function __construct(private readonly RectorTool $tool)
     {
@@ -24,6 +24,93 @@ final class RectorDiagnosticsSource implements BufferDiagnosticsSource
     public function diagnose(string $absolutePath): array
     {
         return $this->interpret($this->tool->process($absolutePath, true), $absolutePath);
+    }
+
+    /**
+     * #102: `rector-warm.fixWorkspace` -- the same dry run as diagnose(),
+     * over $rootPath (the server's working dir) instead of one file, with
+     * every `file_diffs` entry turned into fixes rather than just the
+     * first.
+     *
+     * @return array{files: array<string, list<array<string, mixed>>>, errors: list<array{message: string, line: int}>}
+     */
+    public function diagnoseWorkspace(string $rootPath): array
+    {
+        return $this->interpretWorkspace($this->tool->process($rootPath, true), $rootPath);
+    }
+
+    /**
+     * @param array<string, mixed>|CallToolResult $result
+     * @return array{files: array<string, list<array<string, mixed>>>, errors: list<array{message: string, line: int}>}
+     */
+    private function interpretWorkspace(array|CallToolResult $result, string $rootPath): array
+    {
+        if ($result instanceof CallToolResult) {
+            $error = is_array($result->structuredContent) ? ($result->structuredContent['error'] ?? null) : null;
+            $message = is_string($error) && $error !== '' ? $error : 'unknown error';
+            fwrite(STDERR, sprintf(
+                "rector-warm-lsp: workspace fix failed for %s: %s\n",
+                $rootPath,
+                $message,
+            ));
+
+            return ['files' => [], 'errors' => [['message' => $message, 'line' => 0]]];
+        }
+
+        $report = self::extractReport($result['output'] ?? '');
+        if ($report === null) {
+            return ['files' => [], 'errors' => [[
+                'message' => 'rector_process succeeded but produced no parseable report.',
+                'line' => 0,
+            ]]];
+        }
+
+        $errors = self::buildErrors($report['errors'] ?? []);
+        $fileDiffs = $report['file_diffs'] ?? [];
+
+        $files = [];
+        foreach ($fileDiffs as $entry) {
+            if (!is_array($entry)) {
+                continue;
+            }
+
+            $file = $entry['file'] ?? null;
+            if (!is_string($file) || $file === '') {
+                continue;
+            }
+
+            $fixes = RectorDiffParser::buildFixes(
+                $entry['diff'] ?? '',
+                $entry['applied_rectors'] ?? [],
+                $entry['changes'] ?? [],
+            );
+            if ($fixes !== []) {
+                $files[self::resolveAbsolutePath($file, $rootPath)] = $fixes;
+            }
+        }
+
+        return ['files' => $files, 'errors' => $errors];
+    }
+
+    /**
+     * Rector's `file_diffs[].file` is relative to the path it was asked to
+     * process when that path is a directory (the workspace-fix case) --
+     * joined against $rootPath here so WorkspaceDiagnosticsSource's own
+     * contract (absolute `files` keys) holds regardless of what Rector's
+     * own report shape happens to be for a given path/version.
+     */
+    private static function resolveAbsolutePath(string $file, string $rootPath): string
+    {
+        if (self::isAbsolutePath($file)) {
+            return $file;
+        }
+
+        return rtrim($rootPath, '/\\') . DIRECTORY_SEPARATOR . $file;
+    }
+
+    private static function isAbsolutePath(string $path): bool
+    {
+        return str_starts_with($path, '/') || preg_match('#^[A-Za-z]:[\\/]#', $path) === 1;
     }
 
     /**

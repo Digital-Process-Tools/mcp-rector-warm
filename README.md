@@ -319,7 +319,24 @@ requires; with any other client the config is still reloaded on the next
 `didSave` (the warm worker compares a content hash of the config on every
 call), just not pushed to documents the editor does not re-save (#105).
 
-Out of scope: workspace-wide scans and `workspace/configuration`.
+**Workspace-wide fix (#102).** `workspace/executeCommand` advertises one
+command, `rector-warm.fixWorkspace`, only when the client's `initialize`
+declared `workspace.applyEdit`. Running it dry-runs the warm worker over the
+whole working directory (the same `RectorTool::process()`/`file_diffs` oracle
+`textDocument/codeAction` uses per file) and sends every changed file back in
+ONE `workspace/applyEdit` request -- `documentChanges` when the client
+declared `workspace.workspaceEdit.documentChanges`, the plain `changes` map
+otherwise. `window.workDoneProgress` clients see `$/progress` around the run
+("Rector: fixing workspace" / "Rector: analysing the workspace") on its own
+token, separate from the cold-boot one above, so the two never mix in a
+client that is watching for either specifically. A client that never
+declared `workspace.applyEdit` gets a JSON-RPC error (there would be nowhere
+to send the fix) rather than a command that silently does nothing; an
+unrecognised command name gets the standard "Method not found" shape too. A
+workspace with nothing to fix still answers the request, just with no
+`workspace/applyEdit` sent.
+
+Out of scope: `workspace/configuration` and multi-root workspaces (#107).
 
 For the architecture, the design decisions behind it, correctness (the warm
 == cold oracle) and current benchmark numbers -- written for someone

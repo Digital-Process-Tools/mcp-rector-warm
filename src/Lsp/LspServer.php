@@ -29,6 +29,18 @@ final class LspServer
     /** #111: set from `initialize`'s client capabilities (window.workDoneProgress) */
     private bool $canReportProgress = false;
 
+    /** #102: set from `initialize`'s client capabilities (workspace.applyEdit) */
+    private bool $canApplyWorkspaceEdit = false;
+
+    /** #102: the one `workspace/executeCommand` this server advertises/handles. */
+    private const FIX_WORKSPACE_COMMAND = 'rector-warm.fixWorkspace';
+
+    /** #102: its own $/progress token, distinct from #111's cold-boot one. */
+    private const FIX_WORKSPACE_PROGRESS_TOKEN = 'rector-warm-lsp/fix-workspace';
+
+    /** #102: the outbound `workspace/applyEdit` request id. */
+    private const FIX_WORKSPACE_APPLY_EDIT_ID = 'rector-warm-lsp/fix-workspace-apply-edit';
+
     /**
      * #111: the editor shows nothing during the first (cold-boot) diagnose,
      * about 1.3-1.8s per the issue. Only THAT first call is worth a progress
@@ -185,6 +197,7 @@ final class LspServer
             $this->canWatchFiles = self::clientSupportsDynamicWatchedFiles($capabilities);
             $this->canReportProgress = self::clientSupportsWorkDoneProgress($capabilities);
             $this->canUseDocumentChanges = self::clientSupportsDocumentChanges($capabilities);
+            $this->canApplyWorkspaceEdit = self::clientSupportsApplyEdit($capabilities);
 
             return [$this->result($id, [
                 'capabilities' => [
@@ -196,6 +209,14 @@ final class LspServer
                         'save' => ['includeText' => false],
                     ],
                     'codeActionProvider' => true,
+                    // #102: only advertised when $diagnostics actually
+                    // supports a workspace-wide dry run -- an executeCommand
+                    // that would only ever refuse is worse than not
+                    // advertising it, since a real editor may grey out
+                    // other UI on the assumption an advertised command works.
+                    ...($this->diagnostics instanceof WorkspaceDiagnosticsSource ? [
+                        'executeCommandProvider' => ['commands' => [self::FIX_WORKSPACE_COMMAND]],
+                    ] : []),
                 ],
                 'serverInfo' => [
                     'name' => 'rector-warm-lsp',
@@ -263,6 +284,10 @@ final class LspServer
 
         if ($method === 'workspace/didChangeWatchedFiles') {
             return $this->watchedFilesChanged(is_array($params) ? ($params['changes'] ?? []) : []);
+        }
+
+        if ($method === 'workspace/executeCommand') {
+            return $this->executeCommand($id, is_array($params) ? $params : []);
         }
 
         // #111: a NOTIFICATION (never a request -- the spec gives it no id),
@@ -432,6 +457,24 @@ final class LspServer
         $edit = is_array($workspace) ? ($workspace['workspaceEdit'] ?? null) : null;
 
         return is_array($edit) && ($edit['documentChanges'] ?? false) === true;
+    }
+
+    /**
+     * #102: `workspace.applyEdit` -- a plain boolean on the client's
+     * declared capabilities, distinct from `workspace.workspaceEdit.
+     * documentChanges` (clientSupportsDocumentChanges() above), which only
+     * says whether a SENT edit may carry document versions -- not whether
+     * the client accepts `workspace/applyEdit` requests at all.
+     */
+    private static function clientSupportsApplyEdit(mixed $capabilities): bool
+    {
+        if (!is_array($capabilities)) {
+            return false;
+        }
+
+        $workspace = $capabilities['workspace'] ?? null;
+
+        return is_array($workspace) && ($workspace['applyEdit'] ?? false) === true;
     }
 
     private static function clientSupportsDynamicWatchedFiles(mixed $capabilities): bool
@@ -744,36 +787,45 @@ final class LspServer
         return $this->publishDiagnostics($uri, $diagnostics, $withVersion && is_int($version) ? $version : null);
     }
 
-    /** #111: server-initiated `window/workDoneProgress/create`, before the first `$/progress`. */
-    private function progressCreate(): array
+    /**
+     * #111: server-initiated `window/workDoneProgress/create`, before the
+     * first `$/progress`. #102: $token defaults to the original cold-boot
+     * token so every existing call site is unchanged; fixWorkspace passes
+     * its own (FIX_WORKSPACE_PROGRESS_TOKEN) so the two never collide, but
+     * shares the same request id -- this server only ever has one such
+     * request outstanding at a time (handle() is synchronous), so
+     * isProgressCreateRefused() matching on that one literal id stays
+     * correct for either token.
+     */
+    private function progressCreate(string $token = 'rector-warm-lsp/cold-boot'): array
     {
         return [
             'jsonrpc' => '2.0',
             'id' => 'rector-warm-lsp/progress-create',
             'method' => 'window/workDoneProgress/create',
-            'params' => ['token' => 'rector-warm-lsp/cold-boot'],
+            'params' => ['token' => $token],
         ];
     }
 
-    private function progressBegin(string $title, string $message): array
+    private function progressBegin(string $title, string $message, string $token = 'rector-warm-lsp/cold-boot'): array
     {
         return [
             'jsonrpc' => '2.0',
             'method' => '$/progress',
             'params' => [
-                'token' => 'rector-warm-lsp/cold-boot',
+                'token' => $token,
                 'value' => ['kind' => 'begin', 'title' => $title, 'message' => $message],
             ],
         ];
     }
 
-    private function progressEnd(): array
+    private function progressEnd(string $token = 'rector-warm-lsp/cold-boot'): array
     {
         return [
             'jsonrpc' => '2.0',
             'method' => '$/progress',
             'params' => [
-                'token' => 'rector-warm-lsp/cold-boot',
+                'token' => $token,
                 'value' => ['kind' => 'end'],
             ],
         ];
@@ -1004,6 +1056,131 @@ final class LspServer
     }
 
     /**
+     * #102: `rector-warm.fixWorkspace` -- a whole-tree dry run on the warm
+     * worker (byte-for-byte the same oracle as codeAction's per-file
+     * WorkspaceEdit: both go through RectorDiffParser::buildFixes() on
+     * Rector's own `file_diffs`), turned into ONE `workspace/applyEdit`
+     * request across every file Rector changed, framed by `$/progress`
+     * like #111's cold-boot progress (its own token, so the two never
+     * collide -- see progressCreate()'s docblock).
+     *
+     * Refuses with a visible JSON-RPC error, never a silent no-op, for an
+     * unknown command or a client that never declared
+     * `workspace.applyEdit`: sending the request anyway would leave the
+     * fix silently undelivered, which is exactly the failure mode the
+     * issue calls out.
+     *
+     * @param array<string, mixed> $params
+     * @return list<array<string, mixed>>
+     */
+    private function executeCommand(mixed $id, array $params): array
+    {
+        $command = $params['command'] ?? null;
+        if ($command !== self::FIX_WORKSPACE_COMMAND) {
+            return [$this->error(
+                $id,
+                -32601,
+                sprintf('Unknown command: %s', is_string($command) ? $command : gettype($command)),
+            )];
+        }
+
+        if (!$this->diagnostics instanceof WorkspaceDiagnosticsSource) {
+            return [$this->error(
+                $id,
+                -32803,
+                'rector-warm.fixWorkspace refused: this server has no workspace-fix source configured.',
+            )];
+        }
+
+        if (!$this->canApplyWorkspaceEdit) {
+            return [$this->error(
+                $id,
+                -32803,
+                'rector-warm.fixWorkspace refused: the client did not declare workspace.applyEdit support, so the fix would have nowhere to go.',
+            )];
+        }
+
+        $root = getcwd();
+        if ($root === false) {
+            return [$this->error(
+                $id,
+                -32803,
+                'rector-warm.fixWorkspace refused: could not resolve the server working directory.',
+            )];
+        }
+
+        $frames = [];
+        $reportProgress = $this->canReportProgress;
+        $progressRefused = false;
+        if ($reportProgress) {
+            $this->emit($this->progressCreate(self::FIX_WORKSPACE_PROGRESS_TOKEN), $frames);
+            $progressRefused = $this->isProgressCreateRefused();
+            if (!$progressRefused) {
+                $this->emit(
+                    $this->progressBegin(
+                        'Rector: fixing workspace',
+                        'Rector: analysing the workspace',
+                        self::FIX_WORKSPACE_PROGRESS_TOKEN,
+                    ),
+                    $frames,
+                );
+            }
+        }
+
+        $outcome = $this->diagnostics->diagnoseWorkspace($root);
+
+        if ($reportProgress && !$progressRefused) {
+            $this->emit($this->progressEnd(self::FIX_WORKSPACE_PROGRESS_TOKEN), $frames);
+        }
+
+        if ($outcome['files'] === []) {
+            $frames[] = $this->result($id, null);
+
+            return $frames;
+        }
+
+        $documentChanges = [];
+        $changes = [];
+        foreach ($outcome['files'] as $absolutePath => $fixes) {
+            $uri = self::pathToUri($absolutePath);
+            $edits = array_map(
+                static fn (array $fix): array => ['range' => $fix['range'], 'newText' => $fix['newText']],
+                $fixes,
+            );
+
+            if ($this->canUseDocumentChanges) {
+                $documentChanges[] = [
+                    // #106: no known buffer version for a workspace-wide
+                    // fix (this never goes through codeAction's per-URI
+                    // $fixesVersions) -- null is the documented "not
+                    // tracked" value for an OptionalVersionedTextDocument
+                    // Identifier.
+                    'textDocument' => ['uri' => $uri, 'version' => null],
+                    'edits' => $edits,
+                ];
+            } else {
+                $changes[$uri] = $edits;
+            }
+        }
+
+        $this->emit([
+            'jsonrpc' => '2.0',
+            'id' => self::FIX_WORKSPACE_APPLY_EDIT_ID,
+            'method' => 'workspace/applyEdit',
+            'params' => [
+                'label' => 'Rector: fix workspace',
+                'edit' => $this->canUseDocumentChanges
+                    ? ['documentChanges' => $documentChanges]
+                    : ['changes' => $changes],
+            ],
+        ], $frames);
+
+        $frames[] = $this->result($id, null);
+
+        return $frames;
+    }
+
+    /**
      * @param list<array<string, mixed>> $diagnostics
      * @return array<string, mixed>
      */
@@ -1122,6 +1299,30 @@ final class LspServer
         }
 
         return $path;
+    }
+
+    /**
+     * #102: the inverse of uriToPath() for the one direction that method
+     * never needed before -- building a `file://` URI FROM an absolute path
+     * (WorkspaceDiagnosticsSource::diagnoseWorkspace()'s `files` keys) to
+     * put in a `workspace/applyEdit` request. Percent-encodes each path
+     * segment (a space, `#`, `?`, ... in a real filename must not corrupt
+     * the URI), never the separators themselves. A Windows drive-letter
+     * path (`C:\...`) is turned into the conformant `file:///C:/...` three-
+     * slash form uriToPath() already reads back correctly (its own
+     * docblock: PHP's parse_url() returns `C:/...` for that shape, no
+     * further UNC/drive-letter host handling needed on this side).
+     */
+    private static function pathToUri(string $absolutePath): string
+    {
+        $normalized = str_replace('\\', '/', $absolutePath);
+        if (preg_match('#^[A-Za-z]:#', $normalized) === 1) {
+            $normalized = '/' . $normalized;
+        }
+
+        $segments = array_map(static fn (string $segment): string => rawurlencode($segment), explode('/', $normalized));
+
+        return 'file://' . implode('/', $segments);
     }
 
     /**

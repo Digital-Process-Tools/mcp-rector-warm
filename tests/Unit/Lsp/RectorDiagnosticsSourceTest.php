@@ -172,4 +172,78 @@ final class RectorDiagnosticsSourceTest extends TestCase
         self::assertSame([], $result['fixes']);
         self::assertNotSame([], $result['errors']);
     }
+
+    /**
+     * #102: diagnoseWorkspace() is the multi-file sibling of diagnose() --
+     * every `file_diffs` entry becomes a `files` entry, not just the first
+     * (diagnose()'s own $fileDiffs[0] narrowing).
+     */
+    public function testDiagnoseWorkspaceReturnsFixesForEveryChangedFile(): void
+    {
+        $output = '{"totals":{"changed_files":2,"errors":0},"file_diffs":['
+            . '{"file":"A.php","diff":"--- Original\n+++ New\n@@ -1,1 +1,1 @@\n-old\n+new\n",'
+            . '"applied_rectors":["RectorA"],"changes":[]},'
+            . '{"file":"sub/B.php","diff":"--- Original\n+++ New\n@@ -2,1 +2,1 @@\n-old2\n+new2\n",'
+            . '"applied_rectors":["RectorB"],"changes":[]}'
+            . ']}';
+
+        $result = $this->fakeSource($output)->diagnoseWorkspace($this->workDir);
+
+        self::assertSame([], $result['errors']);
+        self::assertCount(2, $result['files']);
+        // #102: a relative `file_diffs[].file` (Rector's own shape when run
+        // against a directory) is resolved against $rootPath -- the
+        // WorkspaceDiagnosticsSource contract promises absolute keys.
+        self::assertArrayHasKey($this->workDir . DIRECTORY_SEPARATOR . 'A.php', $result['files']);
+        self::assertArrayHasKey($this->workDir . DIRECTORY_SEPARATOR . 'sub/B.php', $result['files']);
+        self::assertSame(['RectorA'], $result['files'][$this->workDir . DIRECTORY_SEPARATOR . 'A.php'][0]['rectors']);
+    }
+
+    public function testDiagnoseWorkspaceKeepsAnAlreadyAbsoluteFilePathAsIs(): void
+    {
+        $absolute = $this->workDir . '/Sample.php';
+        $output = '{"totals":{"changed_files":1,"errors":0},"file_diffs":['
+            . '{"file":"' . $absolute . '","diff":"--- Original\n+++ New\n@@ -1,1 +1,1 @@\n-old\n+new\n",'
+            . '"applied_rectors":["SomeRector"],"changes":[]}'
+            . ']}';
+
+        $result = $this->fakeSource($output)->diagnoseWorkspace($this->workDir);
+
+        self::assertArrayHasKey($absolute, $result['files']);
+    }
+
+    /**
+     * Negative control for the two tests above: a report with no file_diffs
+     * at all (nothing to fix) returns an empty `files` map, not an error --
+     * mirrors diagnose()'s own "empty fixes is not itself a failure" shape.
+     */
+    public function testDiagnoseWorkspaceWithNothingToFixReturnsEmptyFiles(): void
+    {
+        $result = $this->fakeSource('{"totals":{"changed_files":0,"errors":0},"file_diffs":[]}')
+            ->diagnoseWorkspace($this->workDir);
+
+        self::assertSame([], $result['files']);
+        self::assertSame([], $result['errors']);
+    }
+
+    /**
+     * #90-equivalent for the workspace path: a refused call (out-of-root,
+     * SecurityError) must surface as an `errors` entry, not silently look
+     * like "nothing to fix".
+     */
+    public function testDiagnoseWorkspaceRefusalBecomesAnErrorRatherThanSilence(): void
+    {
+        $outside = sys_get_temp_dir() . '/mcp-rector-lsp-workspace-outside-' . bin2hex(random_bytes(4));
+        mkdir($outside, 0o700, true);
+
+        try {
+            $result = $this->fakeSource('{"totals":{"changed_files":0,"errors":0}}')->diagnoseWorkspace($outside);
+
+            self::assertSame([], $result['files']);
+            self::assertCount(1, $result['errors']);
+            self::assertStringContainsString('outside the configured working directory', $result['errors'][0]['message']);
+        } finally {
+            @rmdir($outside);
+        }
+    }
 }
