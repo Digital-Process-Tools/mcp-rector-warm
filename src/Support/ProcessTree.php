@@ -54,8 +54,15 @@ final class ProcessTree
         if (\PHP_OS_FAMILY === 'Windows') {
             // /T walks the tree by parent pid, so it must run while the root is
             // still alive -- before the caller's proc_terminate(), never after.
-            // $excludePids has no Windows equivalent here (taskkill /T takes no
-            // per-pid exclusion) -- no caller currently needs it on this branch.
+            // $excludePids is NOT honoured here: taskkill /T takes no per-pid
+            // exclusion, so a caller that IS itself a descendant of $rootPid (the
+            // watchdog is) gets killed along with the rest of the tree on this
+            // branch. Unlike the POSIX path's STOP-then-enumerate freeze loop,
+            // this is not a deadlock risk (taskkill does not suspend anything
+            // mid-scan), only an abrupt exit of a process that was about to call
+            // exit(0) on its own right after this -- harmless in that caller's
+            // one current use, but a real gap if a future caller relies on
+            // surviving its own tree-kill on Windows.
             self::run(['taskkill', '/T', '/F', '/PID', (string) $rootPid]);
 
             return;
