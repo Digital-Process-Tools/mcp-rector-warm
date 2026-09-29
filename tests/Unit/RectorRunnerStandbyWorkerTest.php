@@ -385,6 +385,84 @@ final class RectorRunnerStandbyWorkerTest extends TestCase
     }
 
     /**
+     * Blocking finding from an independent E2E review of this branch: a REAL CLI
+     * -d flag (unlike ini_set()) makes the PHP CLI SAPI fold the override into
+     * BOTH global_value AND local_value from process start, so a diff between
+     * them (the original #125 implementation) never fires for it -- confirmed
+     * empirically (`php -d precision=15 -r "..."` reports global_value ===
+     * local_value === "15"). collectIniOverrideArgs() must be forwarding an
+     * override whose SOURCE is a genuine -d flag on THIS process own command
+     * line, not merely one that happens to diverge locally-from-globally at
+     * runtime (which only ini_set() -- never a real -d flag -- produces). This
+     * spawns a real "php -d precision=N ..." child and reads back what
+     * collectIniOverrideArgs() decides INSIDE that child.
+     */
+    public function testARealCliDFlagIsForwardedNotJustARuntimeIniSetCall(): void
+    {
+        $currentDefault = (string) ini_get('precision');
+        $changed = $currentDefault === '15' ? '17' : '15';
+
+        $script = (string) tempnam(sys_get_temp_dir(), 'ini-override-probe-');
+        file_put_contents(
+            $script,
+            "<?php\n"
+            . 'require ' . var_export(dirname(__DIR__, 2) . '/vendor/autoload.php', true) . ";\n"
+            . '$m = new \ReflectionMethod(\Dpt\McpRectorWarm\RectorRunner::class, "collectIniOverrideArgs");' . "\n"
+            . "\$m->setAccessible(true);\n"
+            . "echo json_encode(\$m->invoke(null));\n",
+        );
+
+        $descriptors = [0 => ['pipe', 'r'], 1 => ['pipe', 'w'], 2 => ['pipe', 'w']];
+        $proc = proc_open([\PHP_BINARY, '-d', "precision={$changed}", $script], $descriptors, $pipes);
+        self::assertIsResource($proc);
+        fclose($pipes[0]);
+        $out = (string) stream_get_contents($pipes[1]);
+        $err = (string) stream_get_contents($pipes[2]);
+        fclose($pipes[1]);
+        fclose($pipes[2]);
+        $code = proc_close($proc);
+        @unlink($script);
+
+        self::assertSame(0, $code, "probe script must exit cleanly: stderr={$err}");
+        $args = json_decode($out, true);
+        self::assertIsArray($args, "probe output must be JSON: {$out}");
+        self::assertContains(
+            "precision={$changed}",
+            $args,
+            'a REAL CLI -d flag on the current process must be forwarded, not just a runtime ini_set() call',
+        );
+    }
+
+    /**
+     * Second blocking finding from the same review: the old `!is_string($global)`
+     * skip incorrectly treated a directive whose true default is not a string
+     * (e.g. null) as "leave it alone", even when its current value plainly
+     * differs and should be forwarded. isIniOverridden() is the extracted pure
+     * decision now covering that case directly, independent of any real ini
+     * state (no baseline directive in THIS php build is guaranteed to have a
+     * null default, so this is exercised at the unit level rather than by
+     * hunting for one).
+     */
+    public function testANullBaselineDefaultDoesNotSuppressForwardingAChangedValue(): void
+    {
+        $method = new \ReflectionMethod(RectorRunner::class, 'isIniOverridden');
+        $method->setAccessible(true);
+
+        self::assertTrue(
+            $method->invoke(null, null, 'something'),
+            'must fire: a null (non-string) default must never read as "matches current"',
+        );
+        self::assertFalse(
+            $method->invoke(null, 'same', 'same'),
+            'must not fire: a string default that matches current must not be forwarded',
+        );
+        self::assertFalse(
+            $method->invoke(null, null, null),
+            'must not fire: nothing to forward when the current value itself is null',
+        );
+    }
+
+    /**
      * Self-review finding: $lastCallWasWarm must not survive across calls when
      * THIS call fails before ever reaching a decision point (boot(),
      * spawnProcWorker(), awaitProcWorkerReady()) -- otherwise it silently

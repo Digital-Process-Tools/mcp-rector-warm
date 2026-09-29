@@ -1066,6 +1066,68 @@ class RectorRunner implements RunnerInterface
      * non-blocking wait on proc_open() pipes do not work on Windows, which is the
      * platform this path exists for, while sockets behave the same everywhere.
      */
+    /** @var array<string, array{global_value: string|null, local_value: string|null}>|null
+     *  Cached across the whole daemon process lifetime -- see loadPristineIniBaseline(). */
+    private static ?array $pristineIniBaseline = null;
+
+    /**
+     * A fresh `php -n` process's own ini_get_all(null, true), memoised for this daemon
+     * process lifetime. -n loads no php.ini and no scanned ini directory -- the ONLY way
+     * to see PHP's true compiled-in defaults, unaffected by anything the daemon was
+     * actually invoked with. Spawned once (this is a real subprocess + PHP interpreter
+     * start, not something to pay on every call) and cached, since it never changes for
+     * the life of the daemon.
+     *
+     * @return array<string, array{global_value: string|null, local_value: string|null}>
+     */
+    private static function loadPristineIniBaseline(): array
+    {
+        if (self::$pristineIniBaseline !== null) {
+            return self::$pristineIniBaseline;
+        }
+        $null = \PHP_OS_FAMILY === 'Windows' ? 'NUL' : '/dev/null';
+        $descriptors = [0 => ['file', $null, 'r'], 1 => ['pipe', 'w'], 2 => ['file', $null, 'w']];
+        $proc = @\proc_open(
+            [\PHP_BINARY, '-n', '-r', 'echo json_encode(ini_get_all(null, true));'],
+            $descriptors,
+            $pipes,
+        );
+        if (!\is_resource($proc)) {
+            return self::$pristineIniBaseline = [];
+        }
+        $out = \stream_get_contents($pipes[1]);
+        \fclose($pipes[1]);
+        \proc_close($proc);
+        $decoded = \is_string($out) ? \json_decode($out, true) : null;
+
+        /** @var array<string, array{global_value: string|null, local_value: string|null}> $decoded */
+        return self::$pristineIniBaseline = \is_array($decoded) ? $decoded : [];
+    }
+
+    /**
+     * Whether $current (this process's active value for one directive) has to be
+     * forwarded as a -d flag: it differs from $default, that directive's TRUE
+     * compiled-in default from loadPristineIniBaseline(). This is the check #125's
+     * original version got wrong (comparing local_value against THIS process's own
+     * global_value): PHP's CLI SAPI folds a real -d flag into BOTH local_value AND
+     * global_value from process start, so the two never diverge for exactly the case
+     * this method exists to catch -- confirmed empirically (`php -d precision=15 -r
+     * '...'` reports global_value === local_value === "15", both stuck at the
+     * override, not the compiled default of "14"). A baseline $default of null (a
+     * directive with no string default at all, or one loadPristineIniBaseline()
+     * could not see -- e.g. one only an extension not loaded under `-n` provides)
+     * must never read as "unchanged": only a STRING default that equals $current
+     * skips forwarding.
+     */
+    private static function isIniOverridden(?string $default, ?string $current): bool
+    {
+        if ($current === null) {
+            return false; // nothing to forward
+        }
+
+        return !(\is_string($default) && $default === $current);
+    }
+
     /**
      * The -d ini overrides given to the daemon at startup, reconstructed for
      * re-passing to a brand-new proc_open() child (#125). Unlike pcntl_fork()
@@ -1074,29 +1136,28 @@ class RectorRunner implements RunnerInterface
      * $_SERVER["argv"] is even populated, so they are simply gone by the time this
      * process can inspect its own argv; there is also no portable way to read back
      * the daemon original command line (no /proc on Windows, the platform this
-     * whole no-pcntl path exists for). ini_get_all(null, true) instead diffs each
-     * directive active value against its php.ini master value: a directive a -d
-     * flag (or, with the identical effect from the point of view of proc_open(), an
-     * early ini_set() such as the daemon entrypoints own memory_limit override --
-     * bin/mcp-rector-warm, bin/rector-warm-lsp, never this file itself -- changed
-     * is exactly the one where the two differ.
+     * whole no-pcntl path exists for).
      *
      * @return list<string>
      */
     private static function collectIniOverrideArgs(): array
     {
+        $baseline = self::loadPristineIniBaseline();
         $args = [];
         foreach (\ini_get_all(null, true) ?: [] as $name => $info) {
             if (!\is_array($info)) {
                 continue;
             }
-            $global = $info['global_value'] ?? null;
-            $local = $info['local_value'] ?? null;
-            if (!\is_string($global) || !\is_string($local) || $global === $local) {
+            $current = $info['local_value'] ?? null;
+            if (!\is_string($current)) {
+                continue;
+            }
+            $default = $baseline[$name]['local_value'] ?? null;
+            if (!self::isIniOverridden(\is_string($default) ? $default : null, $current)) {
                 continue;
             }
             $args[] = '-d';
-            $args[] = $name . '=' . $local;
+            $args[] = $name . '=' . $current;
         }
 
         return $args;
