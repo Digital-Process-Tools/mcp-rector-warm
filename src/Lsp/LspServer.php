@@ -610,7 +610,10 @@ final class LspServer
         $frames = [];
         foreach ($uris as $uri) {
             // #106: a document with an unsaved buffer is re-diagnosed from
-            // that buffer, not from disk -- due now, run by the loop.
+            // that buffer, not from disk -- due now, run by the loop. $uri
+            // here comes from the same $this->buffers map (via $uris just
+            // above), so this is never the disk-vs-client URI mismatch
+            // isBufferDirty() exists for -- plain isset() is correct.
             if (isset($this->buffers[$uri])) {
                 $this->pendingDeadlines[$uri] = microtime(true);
                 continue;
@@ -1191,7 +1194,7 @@ final class LspServer
             // URI that is open but NOT in $this->buffers (never opened,
             // or opened with no didChange since) is not at risk and still
             // gets its fix below.
-            if (isset($this->buffers[$uri])) {
+            if ($this->isBufferDirty($uri)) {
                 $skippedDirtyBuffers[] = $uri;
 
                 continue;
@@ -1407,6 +1410,36 @@ final class LspServer
         }
 
         return 'file://' . implode('/', $segments);
+    }
+
+    /**
+     * #140 self-review finding (independent Explore + oss:auditor review
+     * passes, same finding from both): a plain `isset($this->buffers[$uri])`
+     * would silently miss a dirty buffer whenever $uri -- reconstructed by
+     * pathToUri() from the absolute path diagnoseWorkspace() enumerated off
+     * disk -- differs only in case from the URI the client itself sent on
+     * didChange (the literal string $this->buffers is keyed by). That is
+     * exactly the case-insensitive-filesystem trap isWatchedConfigFile()
+     * already documents and guards against with the same strcasecmp()
+     * technique, on precisely the two platforms (macOS default, Windows)
+     * this whole issue is about -- and a miss here reopens #140 itself: the
+     * disk-derived fix would silently overwrite the very buffer this check
+     * exists to protect. The buffer map is small (open, dirty documents
+     * only), so a linear fallback scan is cheap.
+     */
+    private function isBufferDirty(string $uri): bool
+    {
+        if (isset($this->buffers[$uri])) {
+            return true;
+        }
+
+        foreach (array_keys($this->buffers) as $bufferUri) {
+            if (strcasecmp($bufferUri, $uri) === 0) {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     /**

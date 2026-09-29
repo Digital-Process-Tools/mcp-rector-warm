@@ -2172,4 +2172,67 @@ final class LspServerTest extends TestCase
         self::assertNotNull($result);
         self::assertSame(['skippedDirtyBuffers' => ['file:///proj/A.php']], $result['result']);
     }
+
+    /**
+     * Self-review finding (both the Explore and oss:auditor review passes,
+     * independently): the dirty-buffer skip must not rely on exact string
+     * equality between the URI reconstructed from the on-disk path
+     * (pathToUri($absolutePath), whatever case Rector's own file
+     * enumeration returned) and the URI the client actually sent on
+     * didChange ($this->buffers's own key) -- on a case-insensitive
+     * filesystem (macOS default, Windows) those two can differ only in
+     * case, and a naive `isset()` would silently miss the dirty buffer,
+     * reopening #140 itself. Here the workspace source reports the fix
+     * under an upper-cased path while the client opened and dirtied the
+     * lower-cased one.
+     */
+    public function testExecuteCommandSkipsADirtyBufferEvenWhenUriCasingDiffersFromDisk(): void
+    {
+        $server = new LspServer('1.0.0', self::fakeWorkspaceAndBufferSource([
+            '/proj/A.PHP' => [self::fix(0, 1, "<?php\nclass A {}\n", 'RectorA')],
+        ]));
+        self::initialize($server, [
+            'workspace' => ['applyEdit' => true, 'workspaceEdit' => ['documentChanges' => true]],
+        ]);
+
+        $server->handle([
+            'jsonrpc' => '2.0',
+            'method' => 'textDocument/didOpen',
+            'params' => ['textDocument' => ['uri' => 'file:///proj/A.php', 'version' => 1]],
+        ]);
+        $server->handle([
+            'jsonrpc' => '2.0',
+            'method' => 'textDocument/didChange',
+            'params' => [
+                'textDocument' => ['uri' => 'file:///proj/A.php', 'version' => 2],
+                'contentChanges' => [['text' => "<?php\nclass A { public function unsaved(): void {} }\n"]],
+            ],
+        ]);
+
+        $responses = $server->handle([
+            'jsonrpc' => '2.0',
+            'id' => 23,
+            'method' => 'workspace/executeCommand',
+            'params' => ['command' => 'rector-warm.fixWorkspace'],
+        ]);
+
+        $applyEdit = null;
+        $result = null;
+        foreach ($responses as $frame) {
+            if (($frame['method'] ?? null) === 'workspace/applyEdit') {
+                $applyEdit = $frame;
+            }
+            if (array_key_exists('id', $frame) && $frame['id'] === 23) {
+                $result = $frame;
+            }
+        }
+
+        self::assertNull(
+            $applyEdit,
+            'the only fix in this workspace is for a dirty buffer, reported under a differently-cased '
+            . 'URI -- no workspace/applyEdit must be sent',
+        );
+        self::assertNotNull($result);
+        self::assertSame(['skippedDirtyBuffers' => ['file:///proj/A.PHP']], $result['result']);
+    }
 }
