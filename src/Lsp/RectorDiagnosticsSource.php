@@ -257,8 +257,20 @@ final class RectorDiagnosticsSource implements BufferDiagnosticsSource, Workspac
             // this method returns, so a genuine reuse never finds it
             // present here (see #149's own PR #152 for why that block runs
             // on every exit from `try`, not only the happy path).
-            if (is_dir($tempDirectory) || !@mkdir($tempDirectory, 0o700)) {
+            // Split into two messages rather than one shared "refusing"
+            // sentence (self-review finding): !@mkdir() below can fail for
+            // reasons that have nothing to do with a pre-existing directory
+            // -- a read-only parent, a full disk, a path too long on
+            // Windows -- and folding those into "refusing a pre-existing
+            // temp directory" would tell an operator debugging a genuine
+            // mkdir() failure that an attacker planted something, when
+            // nothing did.
+            if (is_dir($tempDirectory)) {
                 return self::failure(sprintf('rector-warm-lsp: refusing a pre-existing temp directory in %s', $directory));
+            }
+
+            if (!@mkdir($tempDirectory, 0o700)) {
+                return self::failure(sprintf('rector-warm-lsp: could not create a temp directory in %s', $directory));
             }
 
             // #149: the directory-level guard above stops a symlinked or

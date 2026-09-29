@@ -419,8 +419,13 @@ final class RectorDiagnosticsSourceBufferTest extends TestCase
      * trying to narrow its mode afterwards -- which subsumes the
      * different-owner case without needing multi-user test infrastructure.
      * The buffer must not be written into the pre-existing directory at
-     * all, and the pre-existing directory (not the fix's to remove) is left
-     * exactly as planted.
+     * all. Note this does NOT mean the directory survives the call: the
+     * method's own `finally` block removes $tempDirectory on every exit
+     * from `try`, including this refusal's early return, so the empty
+     * directory planted here is typically gone by the time the call
+     * returns (confirmed below via is_dir()) -- it is refused, not
+     * preserved. What matters, and what this test actually asserts, is
+     * that nothing of the buffer's content ever lands inside it first.
      */
     public function testAPreExistingTempDirectoryIsRefusedRatherThanReused(): void
     {
@@ -479,6 +484,48 @@ final class RectorDiagnosticsSourceBufferTest extends TestCase
             self::assertSame($buffer, $seenContent, $marker . ': the temp file must carry this pass\'s own content');
             self::assertSame([], $result['errors'], $marker . ': must not fail');
             self::assertSame(['src', 'src/Sample.php'], $this->projectEntries(), $marker . ': nothing left behind');
+        }
+    }
+
+    /**
+     * #165 self-review finding: nothing in the suite asserted the temp
+     * file's mode, either via the new umask(0o077) narrowing around
+     * fopen() or the pre-existing @chmod($tempPath, 0o600) a few lines
+     * below it -- reverting just the umask narrowing (dropping both
+     * umask() calls, keeping the chmod) would still pass every other test
+     * here. This does not prove the TRANSIENT window between fopen() and
+     * chmod() is closed (a synchronous, single-process test cannot observe
+     * that -- nothing else in this process could read the file in that
+     * gap to begin with), but it does guard the mode invariant itself:
+     * loosening the ambient umask beforehand and reading the mode from
+     * INSIDE the runner closure (the only point at which the temp file
+     * still exists -- diagnoseBuffer()'s own `finally` removes it on every
+     * exit) would catch a regression that widened the umask narrowing, or
+     * dropped the chmod as well, or both. POSIX-only: mode bits are not
+     * meaningful on Windows, and umask()'s effect on a Windows ACL is a
+     * different, non-POSIX question this test does not attempt to answer.
+     */
+    public function testTheTempFileIsCreatedAt0600EvenUnderALooseAmbientUmask(): void
+    {
+        if (PHP_OS_FAMILY === 'Windows') {
+            self::markTestSkipped('POSIX file mode bits are not meaningful on Windows.');
+        }
+
+        $previousUmask = umask(0o000);
+
+        try {
+            $seenMode = null;
+            $result = $this->source(function (string $path) use (&$seenMode): string {
+                clearstatcache(true, $path);
+                $seenMode = fileperms($path) & 0o777;
+
+                return '{"totals":{"changed_files":0,"errors":0}}';
+            })->diagnoseBuffer($this->original, "<?php\n\nclass Sample\n{\n    // unsaved\n}\n");
+
+            self::assertSame([], $result['errors']);
+            self::assertSame(0o600, $seenMode, 'the temp file must be 0600, even under a loose ambient umask');
+        } finally {
+            umask($previousUmask);
         }
     }
 
