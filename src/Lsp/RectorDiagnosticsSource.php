@@ -226,8 +226,12 @@ final class RectorDiagnosticsSource implements BufferDiagnosticsSource, Workspac
         try {
             // #142: a symlink planted at the deterministic `.rector-warm-<pid>`
             // name would have is_dir() follow it -- the write below then
-            // lands through it, and the finally block's unlink/rmdir would
-            // delete through it too. Refused before either happens.
+            // lands through it. Refused before that happens. `$tempDirectory`
+            // is checked again below, right before the `finally` block's own
+            // unlink/rmdir: `is_link($tempDirectory)` here only prevents this
+            // branch from being entered, and does nothing to a `finally` that
+            // runs unconditionally on every exit from `try` -- a re-check is
+            // the only way to keep it out of that block too.
             if (is_link($tempDirectory)) {
                 return self::failure(sprintf('rector-warm-lsp: refusing a symlinked temp directory in %s', $directory));
             }
@@ -249,8 +253,17 @@ final class RectorDiagnosticsSource implements BufferDiagnosticsSource, Workspac
         } catch (\Throwable $e) {
             $result = self::failure($e->getMessage());
         } finally {
-            @unlink($tempPath);
-            @rmdir($tempDirectory);
+            // #142: `$tempDirectory` is an intermediate path component of
+            // `$tempPath`, not its final one, so unlink() follows a symlink
+            // there regardless of the early return above -- that return
+            // only skips the write; it does not skip this block, which runs
+            // on every exit from `try`, including that one. Re-checked here
+            // so a symlinked `$tempDirectory` never reaches unlink/rmdir
+            // either, whether or not the write above ever ran.
+            if (!is_link($tempDirectory)) {
+                @unlink($tempPath);
+                @rmdir($tempDirectory);
+            }
         }
 
         foreach ($result['errors'] ?? [] as $i => $error) {

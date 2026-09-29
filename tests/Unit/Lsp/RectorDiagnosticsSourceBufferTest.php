@@ -236,4 +236,48 @@ final class RectorDiagnosticsSourceBufferTest extends TestCase
             @rmdir($outsideDir);
         }
     }
+
+    /**
+     * #142: a symlink planted at the deterministic `.rector-warm-<pid>` name
+     * beside the original must not have anything written through it, and --
+     * the gap a first attempt at this fix left open -- must not have
+     * anything unlinked through it in the `finally` block either, whether or
+     * not a same-named file already sits at the symlink's target.
+     */
+    public function testABufferForASymlinkedTempDirectoryIsRefusedAndNothingOutsideIsTouched(): void
+    {
+        $externalDir = sys_get_temp_dir() . '/mcp-rector-lsp-external-' . bin2hex(random_bytes(4));
+        mkdir($externalDir, 0o700, true);
+        $externalFile = $externalDir . '/Sample.php';
+        file_put_contents($externalFile, "<?php\n\nclass NotYours\n{\n}\n");
+
+        $symlinkPath = $this->workDir . '/src/.rector-warm-' . getmypid();
+
+        try {
+            self::assertTrue(symlink($externalDir, $symlinkPath), 'could not create the test symlink');
+
+            $called = false;
+            $result = $this->source(function () use (&$called): string {
+                $called = true;
+
+                return '{"totals":{"changed_files":0,"errors":0}}';
+            })->diagnoseBuffer($this->original, "<?php\n\nclass Sample\n{\n    // unsaved\n}\n");
+
+            self::assertFalse($called, 'a symlinked temp directory must be refused before Rector is asked to run');
+            self::assertStringContainsString('symlinked temp directory', $result['errors'][0]['message']);
+            self::assertSame("<?php\n\nclass NotYours\n{\n}\n", file_get_contents($externalFile), 'the finally block must not unlink through the symlink');
+            self::assertFileExists($externalFile);
+            // The symlink itself is refused, not removed -- it is left in
+            // place next to the original, same as any other candidate this
+            // code chooses not to touch. The original file is untouched,
+            // which is the thing this test guards.
+            self::assertSame("<?php\n\nclass Sample\n{\n}\n", file_get_contents($this->original));
+        } finally {
+            // Removed as a link, never recursed into: tearDown()'s
+            // removeTree() is not symlink-safe, and following this link a
+            // second time would be the exact bug under test.
+            @unlink($symlinkPath);
+            $this->removeTree($externalDir);
+        }
+    }
 }
