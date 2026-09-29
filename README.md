@@ -223,10 +223,13 @@ file) around the very first diagnose only -- the one cold-boot call, roughly
 reach the client BEFORE that diagnose runs, not batched together with `end`
 and the diagnostics afterwards (PR #128 review): the server writes each
 frame to the transport the moment it is ready, wired that way from
-`bin/rector-warm-lsp`. If the client's own reply to `create` refuses that
-progress token and is already available by the time this runs (a
-non-blocking peek -- see `StdioLspTransport::tryRead()`), neither `begin`
-nor `end` is sent for it, per the LSP spec. A `$/cancelRequest` for a
+`bin/rector-warm-lsp`. Before committing to `begin`, the server WAITS (up
+to 200ms, `LspServer::CREATE_REPLY_TIMEOUT_SECONDS`, added to the one-time
+cold-boot cost above) for the client's own reply to `create`; only an
+explicit success reply lets `begin`/`end` through -- an explicit refusal,
+the window elapsing with no reply at all, or some other message arriving
+first all skip progress for that round rather than assume it is fine, per
+the LSP spec. A `$/cancelRequest` for a
 `textDocument/codeAction` whose id has not been dispatched yet is answered
 with a "Request cancelled" error rather than run -- protocol-correct, but,
 same as the stale-result discard above, inert in today's shipped binary: a

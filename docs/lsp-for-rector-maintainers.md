@@ -34,15 +34,20 @@ an agent calling a tool:
 - **Cold-boot progress and cancellation.** `window/workDoneProgress` fires
   around the first diagnose only (the cold-boot call), when the client
   declares the capability, with `create`/`begin` written to the transport
-  BEFORE that diagnose runs (not batched with `end` afterwards) and
-  suppressed entirely if the client's own refusal of the progress token is
-  already available via a non-blocking peek (PR #128 review). `$/cancelRequest`
-  for a `textDocument/codeAction` not yet dispatched is answered "Request
-  cancelled" rather than run, but -- same caveat as the stale-result discard
-  above -- that can only fire in a future non-synchronous transport: a
-  conforming client's cancellation for id X always reaches this
-  one-message-at-a-time server after id X's own response was already
-  written (#111).
+  BEFORE that diagnose runs (not batched with `end` afterwards). The server
+  then WAITS up to `LspServer::CREATE_REPLY_TIMEOUT_SECONDS` (0.2s, added
+  latency on that one cold-boot call) for the client's own reply to
+  `create`; only an explicit success proceeds to `begin` -- an explicit
+  refusal, the window elapsing with nothing, or an unrelated message
+  arriving first all skip progress for that round instead (PR #128
+  review, second round -- the first fix here only checked for a reply
+  ALREADY sitting in the pipe, which a real client's millisecond-delayed
+  one never was). `$/cancelRequest` for a `textDocument/codeAction` not
+  yet dispatched is answered "Request cancelled" rather than run, but --
+  same caveat as the stale-result discard above -- that can only fire in a
+  future non-synchronous transport: a conforming client's cancellation for
+  id X always reaches this one-message-at-a-time server after id X's own
+  response was already written (#111).
 
 Editor setup for six clients (Neovim, Helix, Sublime Text, PhpStorm/LSP4IJ,
 plus the generic pattern) is in the README's [Editor

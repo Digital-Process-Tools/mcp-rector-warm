@@ -22,12 +22,16 @@ final class StdioLspTransport
 
     /**
      * @var list<array<string, mixed>> PR #128 E2E review (blocking finding
-     *   2): messages read AHEAD by tryRead()'s non-blocking peek that
-     *   turned out not to be what the caller was looking for, and were
-     *   handed back via pushBack() rather than dropped. read() and
-     *   waitForInput() both drain this FIFO first, so a caller that knows
-     *   nothing about tryRead() (LspLoop's own read loop) still sees a
-     *   pushed-back message exactly like any other, in order.
+     *   2): messages read AHEAD by tryRead() -- a peek when called with
+     *   its default 0.0 timeout, but a genuine, potentially-blocking wait
+     *   when called with a real one (second E2E review round:
+     *   LspServer::isProgressCreateRefused() waits up to
+     *   CREATE_REPLY_TIMEOUT_SECONDS this way) -- that turned out not to
+     *   be what the caller was looking for, and were handed back via
+     *   pushBack() rather than dropped. read() and waitForInput() both
+     *   drain this FIFO first, so a caller that knows nothing about
+     *   tryRead() (LspLoop's own read loop) still sees a pushed-back
+     *   message exactly like any other, in order.
      */
     private array $pending = [];
 

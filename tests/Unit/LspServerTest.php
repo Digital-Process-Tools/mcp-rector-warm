@@ -1422,16 +1422,31 @@ final class LspServerTest extends TestCase
      * $pushBackMessage rather than silently dropped, but this round's
      * create reply is now unresolved (not "assumed fine" the way the
      * first PR #128 fix treated it), so progress is skipped too.
+     *
+     * Third self-review pass (oss:auditor, same round): the fake closure
+     * returns the unrelated message once, then null -- modelling "nothing
+     * else, ever, including the real reply, arrives within the window".
+     * Confirms the RETRY loop still terminates and skips correctly when
+     * the real reply genuinely never comes, not just when it is consumed
+     * by a single call. See the recovery test right below for the case
+     * where the real reply DOES arrive after the unrelated message.
      */
     public function testAnUnrelatedReadAheadMessageIsPushedBackAndProgressIsSkipped(): void
     {
         $pushedBack = [];
         $unrelated = ['jsonrpc' => '2.0', 'method' => 'textDocument/didSave', 'params' => ['textDocument' => ['uri' => 'file:///tmp/Other.php']]];
+        $calls = new class () {
+            public int $count = 0;
+        };
 
         $server = new LspServer(
             '1.0.0',
             self::fakeSource([]),
-            tryReadAhead: static fn (float $timeoutSeconds): array => $unrelated,
+            tryReadAhead: static function (float $timeoutSeconds) use ($unrelated, $calls): ?array {
+                $calls->count++;
+
+                return $calls->count === 1 ? $unrelated : null;
+            },
             pushBackMessage: function (array $message) use (&$pushedBack): void {
                 $pushedBack[] = $message;
             },
@@ -1460,16 +1475,81 @@ final class LspServerTest extends TestCase
     }
 
     /**
-     * PR #128 second E2E review (the blocking finding this round): the
-     * bug was a TIMING gap, not a missing check -- isProgressCreateRefused()
-     * used to call $tryReadAhead with no timeout at all (PHP defaults the
-     * unused parameter to 0.0), so a real client's DELAYED reply was never
-     * actually seen; begin/end fired before it could arrive. This fake
-     * closure models exactly that: it only "sees" the reply if given a
-     * REAL window to wait for it -- called with a timeout shorter than the
-     * delay (the old, unfixed call shape) sees nothing at all. Confirmed
-     * red against commit 75a63eb before this fix (asserted below);
-     * green after.
+     * Third self-review pass (oss:auditor, same PR #128 round): a single
+     * $tryReadAhead call used to consume the WHOLE window on the first
+     * message it saw, even an unrelated one arriving moments before the
+     * real reply -- skipping progress on an otherwise-healthy client that
+     * happened to send something else first. This proves the retry loop
+     * actually recovers: an unrelated message is set aside, and the real
+     * (successful) reply arriving on the VERY NEXT call still lets
+     * progress fire, with the unrelated message still pushed back rather
+     * than lost.
+     */
+    public function testProgressFiresWhenTheRealReplyArrivesAfterAnUnrelatedMessage(): void
+    {
+        $pushedBack = [];
+        $unrelated = ['jsonrpc' => '2.0', 'method' => 'textDocument/didSave', 'params' => ['textDocument' => ['uri' => 'file:///tmp/Other.php']]];
+        $realReply = ['jsonrpc' => '2.0', 'id' => 'rector-warm-lsp/progress-create', 'result' => null];
+        $calls = new class () {
+            public int $count = 0;
+        };
+
+        $server = new LspServer(
+            '1.0.0',
+            self::fakeSource([]),
+            tryReadAhead: static function (float $timeoutSeconds) use ($unrelated, $realReply, $calls): ?array {
+                $calls->count++;
+
+                return $calls->count === 1 ? $unrelated : $realReply;
+            },
+            pushBackMessage: function (array $message) use (&$pushedBack): void {
+                $pushedBack[] = $message;
+            },
+        );
+
+        $server->handle([
+            'jsonrpc' => '2.0',
+            'id' => 1,
+            'method' => 'initialize',
+            'params' => ['capabilities' => ['window' => ['workDoneProgress' => true]]],
+        ]);
+
+        $responses = $server->handle([
+            'jsonrpc' => '2.0',
+            'method' => 'textDocument/didOpen',
+            'params' => ['textDocument' => ['uri' => 'file:///tmp/Sample.php', 'version' => 1]],
+        ]);
+
+        $methods = array_map(static fn (array $frame): ?string => $frame['method'] ?? null, $responses);
+
+        self::assertSame(
+            ['window/workDoneProgress/create', '$/progress', '$/progress', 'textDocument/publishDiagnostics'],
+            $methods,
+        );
+        self::assertSame([$unrelated], $pushedBack);
+    }
+
+    /**
+     * PR #128 second E2E review (the blocking finding this round): a
+     * delayed EXPLICIT ERROR reply must skip progress. This fake closure
+     * only "sees" the reply if given a timeout at least as long as the
+     * delay -- called with one shorter (the old, unfixed call shape,
+     * which passed no timeout at all) it sees nothing.
+     *
+     * oss:auditor self-review correction (same round): this test's red
+     * (against commit 75a63eb)-then-green transition is real, but it is
+     * driven by the OLD "null means proceed" semantics this round also
+     * changed, not by timeout-forwarding specifically -- both an
+     * unforwarded timeout (null, old semantics: proceed) and a forwarded
+     * one (the delayed error, new semantics: skip) happen to produce
+     * DIFFERENT outcomes here only because of that semantics change, so
+     * this test alone cannot tell "timeout forwarded correctly" apart from
+     * "timeout not forwarded, but null now also skips". The sibling
+     * positive control right after this one is what actually pins
+     * timeout-forwarding: an unforwarded timeout there would see null (old
+     * behaviour) and WRONGLY skip a reply that should fire, which is the
+     * one case a forwarding regression cannot hide behind the semantics
+     * change.
      */
     public function testProgressIsSkippedWhenTheDelayedCreateReplyIsAnError(): void
     {

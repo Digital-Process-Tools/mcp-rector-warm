@@ -8,8 +8,12 @@ level ORDER of "written vs. diagnose() called" via a shared instrumentation
 log (a real subprocess gives no such hook mid-call). What this file adds
 that the unit tests cannot: proof that the real binary, talking real
 Content-Length-framed JSON-RPC over real OS pipes, produces the same shape
--- and, for the create-refusal case, that a reply genuinely sitting in the
-kernel's pipe buffer by the time the server checks is honoured for real.
+-- and, for the create-refusal case, that a reply the server genuinely
+WAITS for (up to LspServer::CREATE_REPLY_TIMEOUT_SECONDS -- second E2E
+review round; the first fix here only ever checked whether a reply was
+ALREADY sitting in the pipe buffer, which never actually saw a real,
+millisecond-delayed one) is honoured for real, pipelined in the same write
+as didOpen so it is available well within that window.
 """
 
 from __future__ import annotations

@@ -119,9 +119,10 @@ final class LspServer
          * version reintroduced). isProgressCreateRefused() below now
          * calls this with a real, non-zero window and genuinely waits.
          * Left null in every existing unit test and in any caller that
-         * cannot offer this at all -- degrading safely to "cannot
-         * confirm the client accepted create, so send no progress for
-         * this round" rather than ever risking a hang.
+         * cannot offer this at all -- the ONE exception to "only an
+         * explicit success proceeds" (see isProgressCreateRefused()'s own
+         * docblock): with no way to ask at all, progress fires normally,
+         * exactly as it did before this whole mechanism existed.
          *
          * @var (\Closure(float): (array<string, mixed>|null))|null
          */
@@ -625,11 +626,13 @@ final class LspServer
         if ($reportProgress) {
             $this->emit($this->progressCreate(), $frames);
 
-            // PR #128 E2E review (blocking finding 2): give the client a
-            // (non-blocking) chance to have already refused this progress
-            // token before committing to `begin` -- the LSP spec forbids
-            // sending $/progress for a token the client's own reply to
-            // `create` rejected.
+            // PR #128 E2E review (blocking finding 2, tightened in the
+            // second review round): genuinely WAIT (up to
+            // CREATE_REPLY_TIMEOUT_SECONDS, see isProgressCreateRefused()'s
+            // own docblock) for the client's reply to `create` before
+            // committing to `begin` -- the LSP spec forbids sending
+            // $/progress for a token the client's own reply to `create`
+            // rejected.
             $progressRefused = $this->isProgressCreateRefused();
             if (!$progressRefused) {
                 $this->emit(
@@ -766,18 +769,33 @@ final class LspServer
      * check), so a real client's reply -- which arrives milliseconds
      * later, not instantly -- was never actually seen; begin/end still
      * fired on a token the client went on to refuse. Fixed by genuinely
-     * waiting up to CREATE_REPLY_TIMEOUT_SECONDS via $tryReadAhead (which
-     * now takes that timeout and, in production, is
+     * WAITING up to CREATE_REPLY_TIMEOUT_SECONDS via $tryReadAhead (which
+     * takes that timeout and, in production, is
      * StdioLspTransport::waitForInput() underneath -- the same primitive
      * #106's own debounce timer uses, Windows-safe there too).
      *
+     * Third self-review pass (oss:auditor, same PR #128 round): a single
+     * $tryReadAhead call consumes the WHOLE window on the first message it
+     * sees, even one arriving 1ms in -- an ordinary client sending anything
+     * else (a log notification, another request's reply) shortly after
+     * `didOpen` and before its own `create` reply would have that reply
+     * pushed back and progress skipped, even though the real reply might
+     * have arrived comfortably within the remaining ~199ms. Fixed with a
+     * bounded retry loop: each non-matching message is collected locally
+     * (never re-queued into the transport's own pending FIFO mid-loop --
+     * doing that would have this same call immediately re-read the message
+     * it just set aside, spinning until the deadline instead of genuinely
+     * waiting for anything new) and only pushed back, in original order,
+     * once the loop actually concludes -- either the real reply arrives or
+     * the deadline is exhausted.
+     *
      * Only an EXPLICIT success reply is treated as "not refused" now.
      * Anything else -- an explicit error, the window elapsing with no
-     * reply at all, or a message that turns out not to be this reply --
-     * skips progress for this round: this server can no longer confirm
-     * the client actually accepted the token, and the LSP spec violation
-     * this whole method exists to avoid is exactly what happens if it
-     * guesses "probably fine" instead.
+     * reply at all, or the window being spent on other messages with the
+     * real reply never arriving -- skips progress for this round: this
+     * server can no longer confirm the client actually accepted the
+     * token, and the LSP spec violation this whole method exists to avoid
+     * is exactly what happens if it guesses "probably fine" instead.
      */
     private function isProgressCreateRefused(): bool
     {
@@ -785,30 +803,62 @@ final class LspServer
             return false;
         }
 
-        $message = ($this->tryReadAhead)(self::CREATE_REPLY_TIMEOUT_SECONDS);
-        if ($message === null) {
-            // The window elapsed with no reply at all -- treat as
-            // unresolved, not as success. See this method's own docblock.
-            return true;
-        }
+        $deadline = microtime(true) + self::CREATE_REPLY_TIMEOUT_SECONDS;
+        $setAside = [];
 
-        $isOurCreateReply = array_key_exists('id', $message)
-            && ($message['id'] ?? null) === 'rector-warm-lsp/progress-create'
-            && ($message['method'] ?? null) === null;
+        while (true) {
+            $remaining = $deadline - microtime(true);
+            if ($remaining <= 0.0) {
+                $this->pushBackInOriginalOrder($setAside);
 
-        if (!$isOurCreateReply) {
-            // Not our reply -- something else the client sent while we
-            // were waiting. Hand it back for ordinary dispatch rather
-            // than dropping it, but this round's create reply is still
-            // unresolved, so treat it the same as no reply at all.
-            if ($this->pushBackMessage !== null) {
-                ($this->pushBackMessage)($message);
+                return true;
             }
 
-            return true;
+            $message = ($this->tryReadAhead)($remaining);
+            if ($message === null) {
+                // The window elapsed with no reply at all -- treat as
+                // unresolved, not as success. See this method's own
+                // docblock.
+                $this->pushBackInOriginalOrder($setAside);
+
+                return true;
+            }
+
+            $isOurCreateReply = array_key_exists('id', $message)
+                && ($message['id'] ?? null) === 'rector-warm-lsp/progress-create'
+                && ($message['method'] ?? null) === null;
+
+            if ($isOurCreateReply) {
+                $this->pushBackInOriginalOrder($setAside);
+
+                return array_key_exists('error', $message);
+            }
+
+            // Not our reply -- something else the client sent while we
+            // were waiting. Set aside for now (see this method's own
+            // docblock for why NOT pushed back immediately) and keep
+            // waiting on the remaining budget for the real reply.
+            $setAside[] = $message;
+        }
+    }
+
+    /**
+     * @param list<array<string, mixed>> $messages in the order they were
+     *   originally seen
+     */
+    private function pushBackInOriginalOrder(array $messages): void
+    {
+        if ($this->pushBackMessage === null) {
+            return;
         }
 
-        return array_key_exists('error', $message);
+        // pushBackMessage() prepends (see StdioLspTransport::pushBack()'s
+        // own docblock), so pushing the LAST-seen message first and the
+        // FIRST-seen message last is what leaves them in original,
+        // first-seen-first-dispatched order at the front of the queue.
+        foreach (array_reverse($messages) as $message) {
+            ($this->pushBackMessage)($message);
+        }
     }
 
     /**
