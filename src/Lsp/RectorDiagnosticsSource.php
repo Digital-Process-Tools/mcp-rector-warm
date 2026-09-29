@@ -239,21 +239,39 @@ final class RectorDiagnosticsSource implements BufferDiagnosticsSource, Workspac
                 return self::failure(sprintf('rector-warm-lsp: refusing a symlinked or junctioned temp directory in %s', $directory));
             }
 
-            if (!is_dir($tempDirectory) && !@mkdir($tempDirectory, 0o700) && !is_dir($tempDirectory)) {
-                return self::failure(sprintf('rector-warm-lsp: could not create a temp directory in %s', $directory));
+            // #165: #161's fix reapplied chmod(0700) to $tempDirectory on
+            // every call, including when it already existed -- but chmod()
+            // only succeeds when the calling process owns the target, so
+            // for a directory an attacker planted ahead of time under this
+            // guessable name (matching this server's own live pid, so
+            // TempCopySweeper's startup sweep skips it), the reapply
+            // silently failed (its return value was discarded) and the
+            // guard was a no-op for exactly the case its own comment named.
+            // mkdir() is already atomic and exclusive -- refusing whenever
+            // it does not succeed, rather than tolerating is_dir() ===
+            // true and trying to repair the mode afterwards, closes that
+            // gap without needing to know who owns what is already there.
+            // The legitimate repeat-call case (same buffer, same live pid,
+            // calls handled serially by the LSP) is unaffected: the
+            // `finally` block below always removes $tempDirectory before
+            // this method returns, so a genuine reuse never finds it
+            // present here (see #149's own PR #152 for why that block runs
+            // on every exit from `try`, not only the happy path).
+            // Split into two messages rather than one shared "refusing"
+            // sentence (self-review finding): !@mkdir() below can fail for
+            // reasons that have nothing to do with a pre-existing directory
+            // -- a read-only parent, a full disk, a path too long on
+            // Windows -- and folding those into "refusing a pre-existing
+            // temp directory" would tell an operator debugging a genuine
+            // mkdir() failure that an attacker planted something, when
+            // nothing did.
+            if (is_dir($tempDirectory)) {
+                return self::failure(sprintf('rector-warm-lsp: refusing a pre-existing temp directory in %s', $directory));
             }
 
-            // #161: mkdir()'s 0o700 above only ever applies on the call that
-            // actually creates $tempDirectory -- once it exists (a
-            // not-yet-cleaned-up earlier run of this same pid, or a
-            // directory an attacker planted ahead of time under this
-            // guessable name), is_dir() short-circuits true and mkdir()
-            // never runs, so whatever mode it already had is kept -- wide
-            // enough for another user to read the unsaved buffer this
-            // method is about to write into it. Reapplied unconditionally,
-            // on every call, whether or not this call is the one that
-            // created the directory.
-            @chmod($tempDirectory, 0o700);
+            if (!@mkdir($tempDirectory, 0o700)) {
+                return self::failure(sprintf('rector-warm-lsp: could not create a temp directory in %s', $directory));
+            }
 
             // #149: the directory-level guard above stops a symlinked or
             // junctioned `.rector-warm-<pid>` NAME from being entered, but a
@@ -288,7 +306,22 @@ final class RectorDiagnosticsSource implements BufferDiagnosticsSource, Workspac
             // $tempPath on every exit from this method, so by the time a
             // second call for the same buffer reaches here, nothing is left
             // at that path to collide with.
+            // #165: fopen(..., 'x') below creates the file at the current
+            // umask's default mode (typically 0644 for 0666 & ~0022), and
+            // the chmod() after it only narrows that to 0600 once fopen()
+            // has already returned -- a brief window, even in the
+            // legitimate same-owner case, during which the buffer's
+            // content is group/world-readable before the narrower mode is
+            // applied. Narrowing the umask around the call itself means
+            // the file is created at 0600 (0666 & ~0077) from the instant
+            // it exists, closing that window instead of repairing it
+            // afterwards; restored immediately so it never affects any
+            // other code in this process. chmod() is kept as a second,
+            // redundant layer in case a filesystem or platform does not
+            // honour umask() for some reason this process cannot detect.
+            $previousUmask = umask(0o077);
             $handle = @fopen($tempPath, 'x');
+            umask($previousUmask);
             if ($handle === false) {
                 return self::failure(sprintf('rector-warm-lsp: refusing to write a temp file that already exists in %s', $directory));
             }

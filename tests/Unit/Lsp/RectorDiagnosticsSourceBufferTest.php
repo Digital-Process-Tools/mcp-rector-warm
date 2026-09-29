@@ -313,6 +313,15 @@ final class RectorDiagnosticsSourceBufferTest extends TestCase
      * A symlink planted there, named after the buffer's own basename, must
      * not be written through, and -- the same finally-block gap #142/#144
      * closed for `$tempDirectory` -- must not be unlinked through either.
+     *
+     * #165: since a pre-existing `.rector-warm-<pid>` directory is now
+     * refused outright (see testAPreExistingTempDirectoryIsRefusedRatherThanReused
+     * above), this attack is caught one step earlier than it used to be --
+     * at the directory-level refusal rather than at the leaf-level
+     * isLinkOrJunction($tempPath) check this test originally targeted. The
+     * refusal, and everything it protects (the write never happens, the
+     * symlink is never followed, nothing outside is touched), still holds;
+     * only the specific error message differs.
      */
     public function testABufferForASymlinkedTempFileInARealTempDirectoryIsRefusedAndNothingOutsideIsTouched(): void
     {
@@ -333,8 +342,8 @@ final class RectorDiagnosticsSourceBufferTest extends TestCase
                 return '{"totals":{"changed_files":0,"errors":0}}';
             })->diagnoseBuffer($this->original, "<?php\n\nclass Sample\n{\n    // unsaved\n}\n");
 
-            self::assertFalse($called, 'a symlinked temp file must be refused before Rector is asked to run');
-            self::assertStringContainsString('symlinked or junctioned temp file', $result['errors'][0]['message']);
+            self::assertFalse($called, 'a symlinked temp file inside a pre-existing temp directory must be refused before Rector is asked to run');
+            self::assertStringContainsString('pre-existing temp directory', $result['errors'][0]['message']);
             self::assertSame("<?php\n\nclass NotYours\n{\n}\n", file_get_contents($externalFile), 'the write must not follow the symlink');
             self::assertFileExists($externalFile);
             // The symlink itself is refused, not removed -- the finally
@@ -379,8 +388,12 @@ final class RectorDiagnosticsSourceBufferTest extends TestCase
                 return '{"totals":{"changed_files":0,"errors":0}}';
             })->diagnoseBuffer($this->original, "<?php\n\nclass Sample\n{\n    // unsaved\n}\n");
 
-            self::assertFalse($called, 'a hard-linked temp file must be refused before Rector is asked to run');
-            self::assertStringContainsString('already exists', $result['errors'][0]['message']);
+            // #165: caught one step earlier than it used to be, by the same
+            // directory-level refusal as the symlinked-leaf test above --
+            // see that test's docblock. What matters still holds: the write
+            // never happens and the hard link is never followed.
+            self::assertFalse($called, 'a hard-linked temp file inside a pre-existing temp directory must be refused before Rector is asked to run');
+            self::assertStringContainsString('pre-existing temp directory', $result['errors'][0]['message']);
             self::assertSame("<?php\n\nclass NotYours\n{\n}\n", file_get_contents($externalFile), 'the write must not follow the hard link');
             self::assertFileExists($externalFile);
             self::assertSame("<?php\n\nclass Sample\n{\n}\n", file_get_contents($this->original));
@@ -392,46 +405,58 @@ final class RectorDiagnosticsSourceBufferTest extends TestCase
     }
 
     /**
-     * #161: round-3 release-delta audit finding, the same-finding sibling of
-     * the hard-link test above. mkdir()'s 0o700 in diagnoseBuffer() only
-     * ever applies on the call that actually creates $tempDirectory -- once
-     * it exists (e.g. a directory an attacker planted ahead of time under
-     * this guessable `.rector-warm-<pid>` name), is_dir() short-circuits
-     * true and mkdir() never runs, so whatever mode it already had was kept
-     * -- wide enough for another user to read the buffer this method is
-     * about to write into it. A mode check made from INSIDE the runner
-     * closure, while $tempDirectory still exists, is the only way to see
-     * whether the guard narrows it during the call: the directory is
-     * removed again in diagnoseBuffer()'s own `finally` on success, so
-     * checking after the call would pass vacuously even with no fix at all.
-     * POSIX-only: chmod()'s mode bits are not meaningful on Windows.
+     * #165: round-4 release-delta audit finding, replacing the round-3 fix
+     * this test used to guard. #161's chmod(0700) reapply only succeeds
+     * when the CALLING PROCESS OWNS the target -- for a directory an
+     * attacker plants ahead of time under this guessable
+     * `.rector-warm-<pid>` name (matching this server's own live pid, so
+     * the startup sweep skips it), chmod() on a directory owned by a
+     * DIFFERENT user silently fails and the guard was a no-op for exactly
+     * the case it named. A single-user test process cannot reproduce a
+     * genuinely different owner, so this asserts the stronger property the
+     * fix actually gives: diagnoseBuffer() refuses ANY pre-existing
+     * `.rector-warm-<pid>` directory outright, rather than reusing it and
+     * trying to narrow its mode afterwards -- which subsumes the
+     * different-owner case without needing multi-user test infrastructure.
+     * The buffer must not be written into the pre-existing directory at
+     * all. Note this does NOT mean the directory survives the call: the
+     * method's own `finally` block removes $tempDirectory on every exit
+     * from `try`, including this refusal's early return, so the empty
+     * directory planted here is typically gone by the time the call
+     * returns (confirmed below via is_dir()) -- it is refused, not
+     * preserved. What matters, and what this test actually asserts, is
+     * that nothing of the buffer's content ever lands inside it first.
      */
-    public function testAPreExistingTempDirectoryHasItsModeReappliedOnReuse(): void
+    public function testAPreExistingTempDirectoryIsRefusedRatherThanReused(): void
     {
-        if (PHP_OS_FAMILY === 'Windows') {
-            self::markTestSkipped('POSIX directory mode bits are not meaningful on Windows.');
-        }
-
         $realTempDirectory = $this->workDir . '/src/.rector-warm-' . getmypid();
         mkdir($realTempDirectory, 0o777, true);
-        chmod($realTempDirectory, 0o777);
 
-        $seenMode = null;
-        $result = $this->source(function (string $path) use (&$seenMode): string {
-            // diagnoseBuffer() already called is_dir() on this same path
-            // (in the same PHP process) before chmod() ran -- PHP caches a
-            // path's stat result across calls, and chmod() does not
-            // invalidate that cache for fileperms() itself, so reading it
-            // without clearing first would show the pre-chmod mode even
-            // though the real, on-disk mode already changed.
-            clearstatcache(true, dirname($path));
-            $seenMode = fileperms(dirname($path)) & 0o777;
+        try {
+            $called = false;
+            $result = $this->source(function () use (&$called): string {
+                $called = true;
 
-            return '{"totals":{"changed_files":0,"errors":0}}';
-        })->diagnoseBuffer($this->original, "<?php\n\nclass Sample\n{\n    // unsaved\n}\n");
+                return '{"totals":{"changed_files":0,"errors":0}}';
+            })->diagnoseBuffer($this->original, "<?php\n\nclass Sample\n{\n    // unsaved\n}\n");
 
-        self::assertSame([], $result['errors']);
-        self::assertSame(0o700, $seenMode, 'a reused temp directory must have its mode narrowed to 0700, not keep whatever it had');
+            self::assertFalse($called, 'a pre-existing temp directory must be refused before Rector is asked to run');
+            self::assertStringContainsString('pre-existing temp directory', $result['errors'][0]['message']);
+            self::assertSame("<?php\n\nclass Sample\n{\n}\n", file_get_contents($this->original), 'the original file must be untouched');
+            // The `finally` block below removes $tempDirectory on every
+            // exit from `try`, including this refusal's early return, so
+            // the pre-existing directory is typically gone by now (it was
+            // planted empty here) -- is_dir() is checked first so a
+            // directory already removed is not itself an assertion
+            // failure. Either way, nothing of the buffer's ever landed in
+            // it, which is the property this test guards.
+            self::assertTrue(
+                !is_dir($realTempDirectory) || array_diff(scandir($realTempDirectory), ['.', '..']) === [],
+                'the refusal must not write anything into the pre-existing directory',
+            );
+        } finally {
+            @rmdir($realTempDirectory);
+        }
     }
 
     /**
@@ -459,6 +484,48 @@ final class RectorDiagnosticsSourceBufferTest extends TestCase
             self::assertSame($buffer, $seenContent, $marker . ': the temp file must carry this pass\'s own content');
             self::assertSame([], $result['errors'], $marker . ': must not fail');
             self::assertSame(['src', 'src/Sample.php'], $this->projectEntries(), $marker . ': nothing left behind');
+        }
+    }
+
+    /**
+     * #165 self-review finding: nothing in the suite asserted the temp
+     * file's mode, either via the new umask(0o077) narrowing around
+     * fopen() or the pre-existing @chmod($tempPath, 0o600) a few lines
+     * below it -- reverting just the umask narrowing (dropping both
+     * umask() calls, keeping the chmod) would still pass every other test
+     * here. This does not prove the TRANSIENT window between fopen() and
+     * chmod() is closed (a synchronous, single-process test cannot observe
+     * that -- nothing else in this process could read the file in that
+     * gap to begin with), but it does guard the mode invariant itself:
+     * loosening the ambient umask beforehand and reading the mode from
+     * INSIDE the runner closure (the only point at which the temp file
+     * still exists -- diagnoseBuffer()'s own `finally` removes it on every
+     * exit) would catch a regression that widened the umask narrowing, or
+     * dropped the chmod as well, or both. POSIX-only: mode bits are not
+     * meaningful on Windows, and umask()'s effect on a Windows ACL is a
+     * different, non-POSIX question this test does not attempt to answer.
+     */
+    public function testTheTempFileIsCreatedAt0600EvenUnderALooseAmbientUmask(): void
+    {
+        if (PHP_OS_FAMILY === 'Windows') {
+            self::markTestSkipped('POSIX file mode bits are not meaningful on Windows.');
+        }
+
+        $previousUmask = umask(0o000);
+
+        try {
+            $seenMode = null;
+            $result = $this->source(function (string $path) use (&$seenMode): string {
+                clearstatcache(true, $path);
+                $seenMode = fileperms($path) & 0o777;
+
+                return '{"totals":{"changed_files":0,"errors":0}}';
+            })->diagnoseBuffer($this->original, "<?php\n\nclass Sample\n{\n    // unsaved\n}\n");
+
+            self::assertSame([], $result['errors']);
+            self::assertSame(0o600, $seenMode, 'the temp file must be 0600, even under a loose ambient umask');
+        } finally {
+            umask($previousUmask);
         }
     }
 
