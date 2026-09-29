@@ -52,6 +52,15 @@ class RectorRunner implements RunnerInterface
     /** @var resource|null Persistent duplex socket to the warm-worker child. */
     private $workerSocket = null;
 
+    /** Whether the call most recently ATTEMPTED (not necessarily completed) was
+     *  served by an already-warm container/worker, captured at the moment $warmBoot
+     *  was decided for that call -- before anything the call itself does (a
+     *  --call-timeout kill, a crash) can tear the worker down. Unlike isWarm(),
+     *  which reports whether a warm worker/container exists RIGHT NOW, this
+     *  survives that teardown, so an error payload built after a failed call can
+     *  still report accurately whether THAT call was warm (#126). */
+    private bool $lastCallWasWarm = false;
+
     /** Absolute path of the main config file (--config, or rector.php/rector.dist.php) as
      *  resolved the last time a worker booted; null if none was found. Refreshed in THIS
      *  (never-booting) process by refreshConfigFileState() -- resolving the path and
@@ -142,6 +151,17 @@ class RectorRunner implements RunnerInterface
         return $this->workerPid !== null || $this->procWorker !== null;
     }
 
+    /** Whether the call most recently attempted was served by an already-warm
+     *  worker/container -- see $lastCallWasWarm. Distinct from isWarm(), and the
+     *  one to read from an error payload built AFTER a failed call (#126): a
+     *  --call-timeout kill (or any other failure that discards the worker) makes
+     *  isWarm() say false from that point on regardless of what actually served
+     *  the call, while this stays put. */
+    public function wasLastCallWarm(): bool
+    {
+        return $this->lastCallWasWarm;
+    }
+
     /** @inheritDoc */
     public function getCallTimeoutSeconds(): int
     {
@@ -224,6 +244,13 @@ class RectorRunner implements RunnerInterface
      */
     public function run(array $argv, bool $dryRun = true): array
     {
+        // Reset up front, not merely at each decision point below: a call that
+        // fails BEFORE reaching one (boot(), spawnProcWorker(), or
+        // awaitProcWorkerReady() throwing) must not inherit whatever a PREVIOUS,
+        // unrelated call last decided -- that would misreport exactly the class
+        // of thing #126 itself was filed for, just in the opposite direction
+        // (self-review finding).
+        $this->lastCallWasWarm = false;
         if (!$this->canFork()) {
             // No pcntl (Windows, or #18's disable_functions case): no fork, so no
             // copy-on-write snapshot of a booted container to isolate each call in.
@@ -525,6 +552,7 @@ class RectorRunner implements RunnerInterface
      */
     protected function runForked(array $argv, bool $warmBoot, bool $dryRun): array
     {
+        $this->lastCallWasWarm = $warmBoot;
         \assert($this->workerSocket !== null);
         // #74 follow-up: same missing-flag pattern as the boot handshake frames
         // this file's own encodeHandshakeFrame()/encodeForkResult() guard
@@ -768,6 +796,9 @@ class RectorRunner implements RunnerInterface
      */
     protected function runCold(array $argv, bool $dryRun = true): array
     {
+        // Cold is never warm by definition -- there is no worker to have been
+        // pre-booted before this call started.
+        $this->lastCallWasWarm = false;
         // Both the result (#46) and the child's stdout/stderr (#45) travel through
         // temp files, never through OS pipes. A pipe has a small, fixed OS buffer:
         // reading two of them one after another (the original code) deadlocks the
@@ -1035,6 +1066,121 @@ class RectorRunner implements RunnerInterface
      * non-blocking wait on proc_open() pipes do not work on Windows, which is the
      * platform this path exists for, while sockets behave the same everywhere.
      */
+    /** @var array<string, array{global_value: string|null, local_value: string|null}>|null
+     *  Cached across the whole daemon process lifetime -- see loadPristineIniBaseline(). */
+    private static ?array $pristineIniBaseline = null;
+
+    /**
+     * A fresh `php -n` process's own ini_get_all(null, true), memoised for this daemon
+     * process lifetime. -n loads no php.ini and no scanned ini directory -- the ONLY way
+     * to see PHP's true compiled-in defaults, unaffected by anything the daemon was
+     * actually invoked with. Spawned once (this is a real subprocess + PHP interpreter
+     * start, not something to pay on every call) and cached, since it never changes for
+     * the life of the daemon.
+     *
+     * @return array<string, array{global_value: string|null, local_value: string|null}>
+     */
+    private static function loadPristineIniBaseline(): array
+    {
+        if (self::$pristineIniBaseline !== null) {
+            return self::$pristineIniBaseline;
+        }
+        $null = \PHP_OS_FAMILY === 'Windows' ? 'NUL' : '/dev/null';
+        $descriptors = [0 => ['file', $null, 'r'], 1 => ['pipe', 'w'], 2 => ['file', $null, 'w']];
+        $proc = @\proc_open(
+            [\PHP_BINARY, '-n', '-r', 'echo json_encode(ini_get_all(null, true));'],
+            $descriptors,
+            $pipes,
+        );
+        if (!\is_resource($proc)) {
+            return self::$pristineIniBaseline = [];
+        }
+        $out = \stream_get_contents($pipes[1]);
+        \fclose($pipes[1]);
+        \proc_close($proc);
+        $decoded = \is_string($out) ? \json_decode($out, true) : null;
+
+        /** @var array<string, array{global_value: string|null, local_value: string|null}> $decoded */
+        return self::$pristineIniBaseline = \is_array($decoded) ? $decoded : [];
+    }
+
+    /**
+     * Whether $current (this process's active value for one directive) has to be
+     * forwarded as a -d flag: it differs from $default, that directive's TRUE
+     * compiled-in default from loadPristineIniBaseline(). This is the check #125's
+     * original version got wrong (comparing local_value against THIS process's own
+     * global_value): PHP's CLI SAPI folds a real -d flag into BOTH local_value AND
+     * global_value from process start, so the two never diverge for exactly the case
+     * this method exists to catch -- confirmed empirically (`php -d precision=15 -r
+     * '...'` reports global_value === local_value === "15", both stuck at the
+     * override, not the compiled default of "14"). A baseline $default of null (a
+     * directive with no string default at all, or one loadPristineIniBaseline()
+     * could not see -- e.g. one only an extension not loaded under `-n` provides)
+     * must never read as "unchanged": only a STRING default that equals $current
+     * skips forwarding.
+     */
+    private static function isIniOverridden(?string $default, ?string $current): bool
+    {
+        if ($current === null) {
+            return false; // nothing to forward
+        }
+
+        return !(\is_string($default) && $default === $current);
+    }
+
+    /**
+     * The -d ini overrides given to the daemon at startup, reconstructed for
+     * re-passing to a brand-new proc_open() child (#125). Unlike pcntl_fork()
+     * (this file, the other worker path), which clones the SAME process image --
+     * ini overrides included -- for free, the PHP CLI SAPI consumes -d flags before
+     * $_SERVER["argv"] is even populated, so they are simply gone by the time this
+     * process can inspect its own argv; there is also no portable way to read back
+     * the daemon original command line (no /proc on Windows, the platform this
+     * whole no-pcntl path exists for).
+     *
+     * @return list<string>
+     */
+    private static function collectIniOverrideArgs(): array
+    {
+        $baseline = self::loadPristineIniBaseline();
+        $args = [];
+        foreach (\ini_get_all(null, true) ?: [] as $name => $info) {
+            if (!\is_array($info)) {
+                continue;
+            }
+            $current = $info['local_value'] ?? null;
+            if (!\is_string($current)) {
+                continue;
+            }
+            $default = $baseline[$name]['local_value'] ?? null;
+            if (!self::isIniOverridden(\is_string($default) ? $default : null, $current)) {
+                continue;
+            }
+            $args[] = '-d';
+            $args[] = $name . '=' . self::quoteIniValue($current);
+        }
+
+        return $args;
+    }
+
+    /**
+     * Quote a -d value the way PHP own ini-value parser needs it, not the way a
+     * shell would: -d values go through the identical parser php.ini itself uses,
+     * where an unquoted value ends at the first "reserved" character (confirmed
+     * empirically: an unquoted -d user_agent=Mozilla/5.0 (X11; Linux) silently
+     * truncates to "Mozilla/5.0 " with no forwarding error at all -- caught by an
+     * independent end-to-end review). Wrapping in double quotes disables that
+     * special-character handling entirely, so this always wraps, never only when a
+     * "risky" character is spotted -- a plain value like "15" round-trips through
+     * "15" unchanged too (also confirmed empirically), so there is no plain case
+     * worth special-casing. Backslash is escaped before quote specifically so a
+     * value ending in a backslash cannot swallow the closing quote.
+     */
+    private static function quoteIniValue(string $value): string
+    {
+        return '"' . \str_replace(['\\', '"'], ['\\\\', '\\"'], $value) . '"';
+    }
+
     private function spawnProcWorker(): void
     {
         $server = @\stream_socket_server('tcp://127.0.0.1:0', $errno, $errstr);
@@ -1054,7 +1200,11 @@ class RectorRunner implements RunnerInterface
             1 => ['file', \PHP_OS_FAMILY === 'Windows' ? 'NUL' : '/dev/null', 'w'],
             2 => ['file', $stderrFile, 'w'],
         ];
-        $proc = \proc_open([\PHP_BINARY, \dirname(__DIR__) . '/bin/rector-warm-worker.php'], $descriptors, $pipes);
+        $proc = \proc_open(
+            [\PHP_BINARY, ...self::collectIniOverrideArgs(), \dirname(__DIR__) . '/bin/rector-warm-worker.php'],
+            $descriptors,
+            $pipes,
+        );
         if (!\is_resource($proc)) {
             \fclose($server);
             @\unlink($stderrFile);
@@ -1177,6 +1327,10 @@ class RectorRunner implements RunnerInterface
      */
     private function callProcWorker(array $argv, bool $warmBoot, bool $dryRun): array
     {
+        // Captured here, before anything below (a --call-timeout kill, a closed
+        // connection) can discard $this->procWorker: isWarm() alone cannot tell an
+        // error payload built after such a discard whether THIS call was warm (#126).
+        $this->lastCallWasWarm = $warmBoot;
         \assert($this->procWorker !== null && $this->procWorker['socket'] !== null);
         $socket = $this->procWorker['socket'];
         $payload = (string) \json_encode(

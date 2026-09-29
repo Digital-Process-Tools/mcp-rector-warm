@@ -240,6 +240,334 @@ final class RectorRunnerStandbyWorkerTest extends TestCase
         self::assertLessThan(5.0, $elapsed, "4 silent connections must not stretch a 2s deadline (took {$elapsed}s)");
     }
 
+    /**
+     * #126 part 2: a retired worker (one that already served its call and is
+     * exiting on its own) must remove its own stderr temp file rather than
+     * leaving it for the daemon to reap later -- if the daemon is kill -9d
+     * before that reap ever runs, nothing else would ever unlink it. Nothing
+     * else in this test touches that file: there is no second call (which
+     * would run reapRetiredProcWorkers()), and $runner is still alive (its
+     * own __destruct() has not run), so a disappearance can only be the
+     * worker's own doing.
+     */
+    public function testARetiredWorkerRemovesItsOwnStderrFileWithoutWaitingForTheDaemonToReapIt(): void
+    {
+        $project = $this->makeDependencyProject();
+        $runner = self::noPcntlRunner();
+
+        try {
+            $runner->run(self::argv($project . '/src/Caller.php'));
+
+            $retiredProperty = new \ReflectionProperty(RectorRunner::class, 'retiredProcWorkers');
+            $retiredProperty->setAccessible(true);
+            $retired = $retiredProperty->getValue($runner);
+            self::assertNotEmpty($retired, 'control: the first call must have retired a worker');
+            $proc = $retired[0]['proc'];
+            $stderrFile = $retired[0]['stderr'];
+
+            $deadline = microtime(true) + 15.0;
+            while (proc_get_status($proc)['running'] && microtime(true) < $deadline) {
+                usleep(50_000);
+            }
+            self::assertFalse(proc_get_status($proc)['running'], 'control: the retired worker must actually exit on its own');
+
+            self::assertFileDoesNotExist(
+                $stderrFile,
+                'a retired worker must remove its own stderr file on exit -- if the daemon is killed before it ever reaps this worker, nothing else would (#126)',
+            );
+        } finally {
+            $runner->reboot();
+        }
+    }
+
+    /**
+     * #126 part 1: a call served by an already-warm standby that then times out
+     * must still report it was warm -- isWarm() alone cannot, because the
+     * timeout path discards the worker (discardProcWorker(true)) before the
+     * caller ever asks, so by then isWarm() always says false regardless of
+     * what actually served the call.
+     */
+    public function testATimedOutCallStillReportsItWasServedWarm(): void
+    {
+        $runner = new class(1) extends RectorRunner {
+            protected function canFork(): bool
+            {
+                return false;
+            }
+        };
+
+        $server = stream_socket_server('tcp://127.0.0.1:0', $errno, $errstr);
+        self::assertNotFalse($server);
+        $address = (string) stream_socket_get_name($server, false);
+        $client = @stream_socket_client('tcp://' . $address);
+        self::assertNotFalse($client);
+        $accepted = stream_socket_accept($server, 1);
+        self::assertNotFalse($accepted, 'control: something must actually connect');
+
+        $null = \PHP_OS_FAMILY === 'Windows' ? 'NUL' : '/dev/null';
+        // Stands in for a worker process that is alive but never answers --
+        // forces callProcWorker()'s read to hit the --call-timeout deadline.
+        $proc = proc_open([\PHP_BINARY, '-r', 'sleep(60);'], [0 => ['file', $null, 'r'], 1 => ['file', $null, 'w'], 2 => ['file', $null, 'w']], $pipes);
+        self::assertIsResource($proc);
+        $stderrFile = (string) tempnam(sys_get_temp_dir(), 'wasLastCallWarm-test-');
+
+        $property = new \ReflectionProperty(RectorRunner::class, 'procWorker');
+        $property->setAccessible(true);
+        $property->setValue($runner, [
+            'proc' => $proc,
+            'pid' => (int) proc_get_status($proc)['pid'],
+            'server' => $server,
+            'socket' => $client,
+            'token' => str_repeat('a', 32),
+            'stderr' => $stderrFile,
+            'ready' => true,
+        ]);
+
+        $callProcWorker = new \ReflectionMethod(RectorRunner::class, 'callProcWorker');
+        $callProcWorker->setAccessible(true);
+
+        $threw = null;
+        try {
+            $callProcWorker->invoke($runner, ['rector'], true, true);
+        } catch (\RuntimeException $e) {
+            $threw = $e;
+        } finally {
+            // callProcWorker() itself already discards (and proc_close()s) the
+            // worker on a timeout -- guard against double-closing an already
+            // invalid resource here.
+            @fclose($accepted);
+            if (is_resource($proc)) {
+                proc_terminate($proc, 9);
+                proc_close($proc);
+            }
+            @unlink($stderrFile);
+        }
+
+        self::assertNotNull($threw, 'must fire: nothing ever answers, so the call must time out');
+        self::assertStringContainsString('--call-timeout', $threw->getMessage());
+        self::assertFalse($runner->isWarm(), 'control: the timed-out worker was discarded, so isWarm() now says false');
+        self::assertTrue($runner->wasLastCallWarm(), 'the call WAS served by an already-warm standby before it timed out (#126)');
+    }
+
+    /**
+     * #125: -d flags given to the daemon are lost when it spawns the no-pcntl
+     * standby worker as a brand-new process (proc_open([PHP_BINARY, script])) --
+     * unlike pcntl_fork(), which clones the same process image, ini overrides
+     * included, for free. ini_get_all(null, true)'s local_value diverges from
+     * its global_value for exactly the settings a -d flag (or an early
+     * ini_set(), same effect from proc_open()'s point of view) actually
+     * changed; reconstructing -d flags from that diff is the only portable way
+     * to recover them (there is no reliable, cross-platform way to read back
+     * the original command line on Windows, the platform this whole no-pcntl
+     * path exists for).
+     */
+    public function testIniOverridesActiveOnTheDaemonAreForwardedAsDFlagsToTheStandby(): void
+    {
+        $previous = ini_get('precision');
+        $changed = $previous === '17' ? '15' : '17';
+        ini_set('precision', $changed);
+
+        try {
+            $method = new \ReflectionMethod(RectorRunner::class, 'collectIniOverrideArgs');
+            $method->setAccessible(true);
+            $args = $method->invoke(null);
+
+            self::assertContains('-d', $args);
+            self::assertContains("precision=\"{$changed}\"", $args, 'must fire: a directive changed on the daemon must be forwarded, quoted per PHP\'s own ini-value parser');
+            self::assertStringNotContainsString(
+                'default_mimetype=',
+                implode('|', $args),
+                'must not fire: a directive nobody touched must never be forwarded',
+            );
+        } finally {
+            ini_set('precision', $previous);
+        }
+    }
+
+    /**
+     * Blocking finding from an independent E2E review of this branch: a REAL CLI
+     * -d flag (unlike ini_set()) makes the PHP CLI SAPI fold the override into
+     * BOTH global_value AND local_value from process start, so a diff between
+     * them (the original #125 implementation) never fires for it -- confirmed
+     * empirically (`php -d precision=15 -r "..."` reports global_value ===
+     * local_value === "15"). collectIniOverrideArgs() must be forwarding an
+     * override whose SOURCE is a genuine -d flag on THIS process own command
+     * line, not merely one that happens to diverge locally-from-globally at
+     * runtime (which only ini_set() -- never a real -d flag -- produces). This
+     * spawns a real "php -d precision=N ..." child and reads back what
+     * collectIniOverrideArgs() decides INSIDE that child.
+     */
+    public function testARealCliDFlagIsForwardedNotJustARuntimeIniSetCall(): void
+    {
+        $currentDefault = (string) ini_get('precision');
+        $changed = $currentDefault === '15' ? '17' : '15';
+
+        $script = (string) tempnam(sys_get_temp_dir(), 'ini-override-probe-');
+        file_put_contents(
+            $script,
+            "<?php\n"
+            . 'require ' . var_export(dirname(__DIR__, 2) . '/vendor/autoload.php', true) . ";\n"
+            . '$m = new \ReflectionMethod(\Dpt\McpRectorWarm\RectorRunner::class, "collectIniOverrideArgs");' . "\n"
+            . "\$m->setAccessible(true);\n"
+            . "echo json_encode(\$m->invoke(null));\n",
+        );
+
+        $descriptors = [0 => ['pipe', 'r'], 1 => ['pipe', 'w'], 2 => ['pipe', 'w']];
+        $proc = proc_open([\PHP_BINARY, '-d', "precision={$changed}", $script], $descriptors, $pipes);
+        self::assertIsResource($proc);
+        fclose($pipes[0]);
+        $out = (string) stream_get_contents($pipes[1]);
+        $err = (string) stream_get_contents($pipes[2]);
+        fclose($pipes[1]);
+        fclose($pipes[2]);
+        $code = proc_close($proc);
+        @unlink($script);
+
+        self::assertSame(0, $code, "probe script must exit cleanly: stderr={$err}");
+        $args = json_decode($out, true);
+        self::assertIsArray($args, "probe output must be JSON: {$out}");
+        self::assertContains(
+            "precision=\"{$changed}\"",
+            $args,
+            'a REAL CLI -d flag on the current process must be forwarded (quoted per PHPs own ini-value parser), not just a runtime ini_set() call',
+        );
+    }
+
+    /**
+     * Second blocking finding from the same review: the old `!is_string($global)`
+     * skip incorrectly treated a directive whose true default is not a string
+     * (e.g. null) as "leave it alone", even when its current value plainly
+     * differs and should be forwarded. isIniOverridden() is the extracted pure
+     * decision now covering that case directly, independent of any real ini
+     * state (no baseline directive in THIS php build is guaranteed to have a
+     * null default, so this is exercised at the unit level rather than by
+     * hunting for one).
+     */
+    public function testANullBaselineDefaultDoesNotSuppressForwardingAChangedValue(): void
+    {
+        $method = new \ReflectionMethod(RectorRunner::class, 'isIniOverridden');
+        $method->setAccessible(true);
+
+        self::assertTrue(
+            $method->invoke(null, null, 'something'),
+            'must fire: a null (non-string) default must never read as "matches current"',
+        );
+        self::assertFalse(
+            $method->invoke(null, 'same', 'same'),
+            'must not fire: a string default that matches current must not be forwarded',
+        );
+        self::assertFalse(
+            $method->invoke(null, null, null),
+            'must not fire: nothing to forward when the current value itself is null',
+        );
+    }
+
+    /**
+     * Blocking finding from a second independent E2E review of this branch:
+     * forwarded -d values were not quoted at all, so PHPs OWN ini-value parser
+     * (the identical parser php.ini itself uses) silently truncates at the
+     * first "reserved" character rather than raising a forwarding error. The
+     * schedulers own repro: -d user_agent=Mozilla/5.0 (X11; Linux) truncated
+     * to "Mozilla/5.0 " with a syntax error on the remainder -- confirmed
+     * empirically before this fix. This drives the FULL round trip
+     * end-to-end: set a value containing "(", "=", ";" and a literal quote
+     * together (matching the spirit of the schedulers repro plus an
+     * embedded quote), get the exact -d argument collectIniOverrideArgs()
+     * produces for it, then feed THAT argument to a real php subprocess and
+     * confirm the value comes back byte-for-byte unchanged.
+     */
+    public function testAForwardedValueWithReservedCharactersAndAQuoteSurvivesARealChildProcess(): void
+    {
+        $previous = ini_get('user_agent');
+        $raw = 'Mozilla/5.0 (X11; rv=1.0; note="quoted")';
+        ini_set('user_agent', $raw);
+
+        $userAgentArg = null;
+        try {
+            $method = new \ReflectionMethod(RectorRunner::class, 'collectIniOverrideArgs');
+            $method->setAccessible(true);
+            $args = $method->invoke(null);
+
+            foreach ($args as $i => $arg) {
+                if ($arg === '-d' && isset($args[$i + 1]) && str_starts_with($args[$i + 1], 'user_agent=')) {
+                    $userAgentArg = $args[$i + 1];
+                    break;
+                }
+            }
+        } finally {
+            ini_set('user_agent', $previous);
+        }
+
+        self::assertNotNull($userAgentArg, 'must fire: a runtime-changed user_agent must be forwarded');
+
+        $descriptors = [0 => ['pipe', 'r'], 1 => ['pipe', 'w'], 2 => ['pipe', 'w']];
+        $proc = proc_open(
+            [\PHP_BINARY, '-d', $userAgentArg, '-r', 'echo json_encode(ini_get("user_agent"));'],
+            $descriptors,
+            $pipes,
+        );
+        self::assertIsResource($proc);
+        fclose($pipes[0]);
+        $out = (string) stream_get_contents($pipes[1]);
+        $err = (string) stream_get_contents($pipes[2]);
+        fclose($pipes[1]);
+        fclose($pipes[2]);
+        $code = proc_close($proc);
+
+        self::assertSame(0, $code, "child must exit cleanly: stderr={$err}");
+        self::assertSame(
+            json_encode($raw),
+            $out,
+            'a value containing "(", "=", ";" and a literal quote must survive a real child process unchanged (scheduler repro, #125 follow-up)',
+        );
+    }
+
+    /**
+     * Self-review finding: $lastCallWasWarm must not survive across calls when
+     * THIS call fails before ever reaching a decision point (boot(),
+     * spawnProcWorker(), awaitProcWorkerReady()) -- otherwise it silently
+     * inherits whatever a PREVIOUS, unrelated call last decided, which is
+     * exactly the class of misreport #126 itself was filed for, just in the
+     * opposite direction. canFork() is forced true (regardless of what this
+     * environment actually has) purely to select run()'s pcntl branch; the
+     * overridden boot() below throws before ever touching a real pcntl
+     * function, so this is safe on every platform, including the no-pcntl CI
+     * job and Windows.
+     */
+    public function testACallThatFailsBeforeAnyDecisionDoesNotInheritAPreviousCallsWarmState(): void
+    {
+        $runner = new class extends RectorRunner {
+            protected function canFork(): bool
+            {
+                return true;
+            }
+
+            protected function boot(): void
+            {
+                throw new \RuntimeException('simulated cold-boot failure');
+            }
+        };
+
+        // Simulate a PRIOR, unrelated call that really was warm.
+        $property = new \ReflectionProperty(RectorRunner::class, 'lastCallWasWarm');
+        $property->setAccessible(true);
+        $property->setValue($runner, true);
+
+        $threw = null;
+        try {
+            $runner->run(['rector']);
+        } catch (\RuntimeException $e) {
+            $threw = $e;
+        }
+
+        self::assertNotNull($threw, 'must fire: boot() always throws here, so this call must fail before ever deciding warm/cold');
+        self::assertFalse($runner->isWarm(), 'control: nothing ever booted');
+        self::assertFalse(
+            $runner->wasLastCallWarm(),
+            'a call that fails before reaching a warm/cold decision point must not inherit a PREVIOUS calls warm state (self-review finding)',
+        );
+    }
+
     private static function isAlive(int $pid): bool
     {
         if (\PHP_OS_FAMILY === 'Windows') {
