@@ -286,7 +286,7 @@ final class RectorDiagnosticsSourceBufferTest extends TestCase
             })->diagnoseBuffer($this->original, "<?php\n\nclass Sample\n{\n    // unsaved\n}\n");
 
             self::assertFalse($called, 'a symlinked temp directory must be refused before Rector is asked to run');
-            self::assertStringContainsString('symlinked temp directory', $result['errors'][0]['message']);
+            self::assertStringContainsString('symlinked or junctioned temp directory', $result['errors'][0]['message']);
             self::assertSame("<?php\n\nclass NotYours\n{\n}\n", file_get_contents($externalFile), 'the finally block must not unlink through the symlink');
             self::assertFileExists($externalFile);
             // The symlink itself is refused, not removed -- it is left in
@@ -337,7 +337,7 @@ final class RectorDiagnosticsSourceBufferTest extends TestCase
             })->diagnoseBuffer($this->original, "<?php\n\nclass Sample\n{\n    // unsaved\n}\n");
 
             self::assertFalse($called, 'a junctioned temp directory must be refused before Rector is asked to run');
-            self::assertStringContainsString('symlinked temp directory', $result['errors'][0]['message']);
+            self::assertStringContainsString('symlinked or junctioned temp directory', $result['errors'][0]['message']);
             self::assertSame("<?php\n\nclass NotYours\n{\n}\n", file_get_contents($externalFile), 'the finally block must not unlink through the junction');
             self::assertFileExists($externalFile);
             self::assertSame("<?php\n\nclass Sample\n{\n}\n", file_get_contents($this->original));

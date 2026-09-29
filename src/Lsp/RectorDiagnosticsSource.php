@@ -236,7 +236,7 @@ final class RectorDiagnosticsSource implements BufferDiagnosticsSource, Workspac
             // isLinkOrJunction() widens is_link() to also catch a junction,
             // which is_link() does not reliably detect (#144).
             if (TempCopySweeper::isLinkOrJunction($tempDirectory)) {
-                return self::failure(sprintf('rector-warm-lsp: refusing a symlinked temp directory in %s', $directory));
+                return self::failure(sprintf('rector-warm-lsp: refusing a symlinked or junctioned temp directory in %s', $directory));
             }
 
             if (!is_dir($tempDirectory) && !@mkdir($tempDirectory, 0o700) && !is_dir($tempDirectory)) {
