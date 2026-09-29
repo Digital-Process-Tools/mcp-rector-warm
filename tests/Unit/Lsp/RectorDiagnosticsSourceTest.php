@@ -199,11 +199,39 @@ final class RectorDiagnosticsSourceTest extends TestCase
         self::assertSame(['RectorA'], $result['files'][$this->workDir . DIRECTORY_SEPARATOR . 'A.php'][0]['rectors']);
     }
 
+    /**
+     * Portable pin for the json_encode() fix above: forces a literal
+     * backslash into the fixture path regardless of what this host's own
+     * sys_get_temp_dir() happens to return, so the "raw concatenation into
+     * a JSON string literal produces invalid JSON" class of bug is
+     * reproducible on any platform, not only observable on Windows CI.
+     */
+    public function testDiagnoseWorkspaceParsesAFileDiffsEntryContainingABackslash(): void
+    {
+        $absolute = $this->workDir . '/forced\Windows\Style\Sample.php';
+        $output = '{"totals":{"changed_files":1,"errors":0},"file_diffs":['
+            . '{"file":' . json_encode($absolute) . ',"diff":"--- Original\n+++ New\n@@ -1,1 +1,1 @@\n-old\n+new\n",'
+            . '"applied_rectors":["SomeRector"],"changes":[]}'
+            . ']}';
+
+        $result = $this->fakeSource($output)->diagnoseWorkspace($this->workDir);
+
+        self::assertSame([], $result['errors']);
+        self::assertArrayHasKey($absolute, $result['files']);
+    }
+
     public function testDiagnoseWorkspaceKeepsAnAlreadyAbsoluteFilePathAsIs(): void
     {
+        // CI fix (PR #137, windows-latest legs): $absolute is built from
+        // sys_get_temp_dir(), which returns a backslash path on Windows --
+        // raw string concatenation into a JSON literal (this test's own
+        // first version) embeds those backslashes UNESCAPED, producing
+        // invalid JSON ("Invalid \escape") that extractReport() cannot
+        // parse. json_encode() escapes it correctly, the same way Rector's
+        // real `--output-format=json` output would.
         $absolute = $this->workDir . '/Sample.php';
         $output = '{"totals":{"changed_files":1,"errors":0},"file_diffs":['
-            . '{"file":"' . $absolute . '","diff":"--- Original\n+++ New\n@@ -1,1 +1,1 @@\n-old\n+new\n",'
+            . '{"file":' . json_encode($absolute) . ',"diff":"--- Original\n+++ New\n@@ -1,1 +1,1 @@\n-old\n+new\n",'
             . '"applied_rectors":["SomeRector"],"changes":[]}'
             . ']}';
 
