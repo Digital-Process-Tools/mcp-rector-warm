@@ -192,8 +192,8 @@ false` (a non-dry-run call writes files), `destructiveHint: true`,
 
 `bin/rector-warm-lsp` (#53) is a second entry point on the same warm core as
 the MCP server, speaking [LSP](https://microsoft.github.io/language-server-protocol/)
-over stdio instead of MCP -- for editors that want Rector diagnostics on save
-rather than an agent calling a tool. Same `--working-dir` flag as
+over stdio instead of MCP -- for editors that want Rector diagnostics as you
+type and on save, rather than an agent calling a tool. Same `--working-dir` flag as
 `bin/mcp-rector-warm`; `--config` works the same passive way (left in
 `$_SERVER['argv']` for `RectorConfigsResolver` to pick up).
 
@@ -234,6 +234,71 @@ conforming client only cancels an id it already sent a request for, and this
 server answers one message at a time, so that cancellation always arrives
 after the request's own response was already written (#111).
 
+**Unsaved buffers (#106).** The server declares full text sync
+(`textDocumentSync.change: 1`), so it diagnoses what you are typing, not only
+what is saved. After each `didChange` it waits for 500 ms of quiet, then runs
+Rector on the buffer: the text is written to a temp copy **inside the
+project**, in a hidden `.rector-warm-<pid>/` directory next to the original
+and under the original's file name, so autoload, `rector.php` and the
+working-directory containment apply exactly as for the saved file. The
+server also passes the original path along, and the worker asks Rector's own
+`Skipper` about it: a `withSkip()` entry that matches the original (exact
+path, relative path, a glob, or a rule skipped for that path) is applied to
+the copy too. The copy and its directory are deleted when the run ends,
+including when Rector reports an error. A server killed outright
+(`kill -9`) cannot do that, so each server removes, at startup, any
+`.rector-warm-<pid>` directory whose pid is no longer running. The startup
+walk goes 8 levels deep and skips `vendor/`, `node_modules/` and VCS
+directories. Before each run, the server also removes such directories next
+to the file it is diagnosing. A directory whose pid is still running belongs
+to another server and is kept. Diagnostics and quick fixes come back on the
+original URI, and error messages name the original path. The result is the
+one a cold `vendor/bin/rector process --dry-run` gives on a file with the
+same content at the same path.
+
+`rector.php` and `composer.lock` are configuration, not code Rector
+refactors, so their unsaved buffers are not diagnosed. They take effect when
+saved. A file-watcher event for a path inside a `.rector-warm-<pid>/`
+directory is the server's own temp copy and is ignored.
+
+Every result carries the document `version` it was computed for. A result is
+published only if that version is still the latest: a change that arrives
+while Rector runs on the previous version supersedes it, and the loop reads
+that change before it publishes. Code actions are offered only while the
+buffer is still at the version their diagnostics describe. For a client that
+declares `workspace.workspaceEdit.documentChanges`, each edit also names that
+version, so the client rejects it if the buffer has moved on. `didSave`
+diagnoses the saved file and cancels a pending buffer run; `didClose` drops
+the buffer.
+
+Limits of the buffer mode:
+
+- Applying the original path's skips relies on two private lists in
+  Rector's skip resolvers. Their names are the same from Rector 2.4.0 to the
+  locked 2.6.7 (checked in Rector's source). On 2.4 to 2.5.1, which have no
+  `Skipper::matchSkip()`, rule-scoped skips are checked through
+  `shouldSkipElementAndFilePath()` instead (reasoned from the source, not
+  run). If a future Rector renames those lists, the buffer is diagnosed
+  without those skips rather than failing; the notice goes to stderr only
+  when the call runs cold, since the forked worker has no stderr.
+- An exact-path `withSkip()` entry for a file that has **never been saved to
+  disk** does not apply to its unsaved buffer: Rector drops non-glob skip
+  paths that do not exist. Once the file is saved, the skip applies, as it
+  does for a cold run.
+- `didOpen` still reads the file from disk. A buffer that is already
+  modified when it is opened is diagnosed from its first change.
+- Only `file:` URIs are diagnosed. An `untitled:` buffer has no project
+  path, so it gets no diagnostics.
+- The debounce reads stdin with a timeout. On Linux and macOS that is
+  `stream_select`. `select()` on Windows works only on sockets, so there the
+  server polls instead: every 5 ms it checks PHP's read buffer and the bytes
+  waiting in the pipe. The windows-latest CI leg runs the E2E test in which a
+  change sent while Rector runs supersedes that run, and it passes there. If
+  a pipe could not report waiting bytes, the debounce would still fire on
+  time, and the only loss would be that superseding.
+- Editors, watchers and `git status` can see the temp directory while a run
+  is in progress.
+
 On `initialized` the server also asks the client (via
 `client/registerCapability`) to watch `rector.php` and `composer.lock` and
 report changes through `workspace/didChangeWatchedFiles`. When one of those
@@ -251,8 +316,7 @@ requires; with any other client the config is still reloaded on the next
 `didSave` (the warm worker compares a content hash of the config on every
 call), just not pushed to documents the editor does not re-save (#105).
 
-Out of v1 scope: unsaved buffers (Rector reads from disk), workspace-wide
-scans, and `workspace/configuration`.
+Out of scope: workspace-wide scans and `workspace/configuration`.
 
 For the architecture, the design decisions behind it, correctness (the warm
 == cold oracle) and current benchmark numbers -- written for someone

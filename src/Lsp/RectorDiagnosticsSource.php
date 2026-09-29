@@ -12,16 +12,26 @@ use Mcp\Schema\Result\CallToolResult;
  * MCP tool uses (dry-run), on the single file the LSP asks about, and turns
  * its `file_diffs` entry into fixes via RectorDiffParser.
  */
-final class RectorDiagnosticsSource implements DiagnosticsSource
+final class RectorDiagnosticsSource implements BufferDiagnosticsSource
 {
     public function __construct(private readonly RectorTool $tool)
     {
     }
 
+    /** #106: the hidden per-server directory an unsaved buffer's temp copy lives in */
+    public const TEMP_DIRECTORY_PREFIX = '.rector-warm-';
+
     public function diagnose(string $absolutePath): array
     {
-        $result = $this->tool->process($absolutePath, true);
+        return $this->interpret($this->tool->process($absolutePath, true), $absolutePath);
+    }
 
+    /**
+     * @param array<string, mixed>|CallToolResult $result
+     * @return array{fixes: list<array<string, mixed>>, errors: list<array{message: string, line: int}>}
+     */
+    private function interpret(array|CallToolResult $result, string $absolutePath): array
+    {
         if ($result instanceof CallToolResult) {
             $error = is_array($result->structuredContent) ? ($result->structuredContent['error'] ?? null) : null;
             $message = is_string($error) && $error !== '' ? $error : 'unknown error';
@@ -69,6 +79,123 @@ final class RectorDiagnosticsSource implements DiagnosticsSource
             ),
             'errors' => $errors,
         ];
+    }
+
+    /**
+     * #106: Rector only reads files, so an unsaved buffer is written to a
+     * temp copy and Rector runs on that. Where the copy lives is what keeps
+     * the result equal to a cold run on the original:
+     *
+     * - inside the project (a hidden `.rector-warm-<pid>` directory in the
+     *   original's own directory), so autoload, rector.php discovery and
+     *   RectorTool's path containment all apply exactly as for the original;
+     * - under the original's own basename, so globs on the file name keep
+     *   matching it;
+     * - with the ORIGINAL path passed alongside (RectorTool::
+     *   processBufferCopy()), so the worker applies every `withSkip()` entry
+     *   that matches the original -- exact path, relative path, a glob on
+     *   its parent directories, a rule skipped for it -- to the copy too
+     *   (RectorRunner::applySkipsOfOriginalPath()).
+     *
+     * The copy (and its directory) is removed in a `finally`, so a Rector
+     * error, a refused call or a throwing runner leaves nothing behind. A
+     * server killed outright (kill -9) cannot run that `finally`; its
+     * leftover is removed by TempCopySweeper, at the next server's startup
+     * and before any run in the same directory.
+     */
+    public function diagnoseBuffer(string $absolutePath, string $content): array
+    {
+        $directory = dirname($absolutePath);
+        $realDirectory = realpath($directory);
+        $cwd = realpath(getcwd() ?: '.');
+
+        // Checked BEFORE anything is written: RectorTool refuses an
+        // out-of-root path too, but only after the temp copy would already
+        // exist outside the project.
+        if ($realDirectory === false || $cwd === false || !self::isWithinRoot($realDirectory, $cwd)) {
+            return self::failure('rector_process: path is outside the configured working directory.');
+        }
+
+        $tempDirectory = $directory . DIRECTORY_SEPARATOR . self::tempDirectoryName();
+        $tempPath = $tempDirectory . DIRECTORY_SEPARATOR . basename($absolutePath);
+
+        // A server killed mid-run (kill -9) never reached its `finally`; its
+        // leftover next to this file goes now, whatever the startup sweep's
+        // depth limit or skipped directories let through.
+        TempCopySweeper::sweepDirectory($directory);
+
+        try {
+            if (!is_dir($tempDirectory) && !@mkdir($tempDirectory, 0o700) && !is_dir($tempDirectory)) {
+                return self::failure(sprintf('rector-warm-lsp: could not create a temp directory in %s', $directory));
+            }
+
+            if (@file_put_contents($tempPath, $content) !== strlen($content)) {
+                return self::failure(sprintf('rector-warm-lsp: could not write the unsaved buffer to a temp file in %s', $directory));
+            }
+
+            // #106: Rector matches `withSkip()` against the path it
+            // processes; processBufferCopy() has the worker apply the
+            // ORIGINAL path's skips to the copy (RectorRunner::
+            // applySkipsOfOriginalPath()), so exact-path, relative, glob and
+            // rule-scoped skips behave as on the saved file.
+            $result = $this->interpret($this->tool->processBufferCopy($tempPath, $absolutePath), $tempPath);
+        } catch (\Throwable $e) {
+            $result = self::failure($e->getMessage());
+        } finally {
+            @unlink($tempPath);
+            @rmdir($tempDirectory);
+        }
+
+        foreach ($result['errors'] ?? [] as $i => $error) {
+            $result['errors'][$i]['message'] = self::withoutTempDirectory($error['message']);
+        }
+
+        return $result;
+    }
+
+    private static function tempDirectoryName(): string
+    {
+        return self::TEMP_DIRECTORY_PREFIX . getmypid();
+    }
+
+    /**
+     * Rector's messages name the file it processed -- the temp copy, in
+     * absolute or project-relative form. Dropping the temp directory segment
+     * turns either form back into the original's path.
+     */
+    private static function withoutTempDirectory(string $message): string
+    {
+        $segment = self::tempDirectoryName();
+
+        return str_replace(['/' . $segment . '/', '\\' . $segment . '\\'], ['/', '\\'], $message);
+    }
+
+    /**
+     * @return array{fixes: list<never>, errors: list<array{message: string, line: int}>}
+     */
+    private static function failure(string $message): array
+    {
+        return ['fixes' => [], 'errors' => [['message' => $message, 'line' => 0]]];
+    }
+
+    /**
+     * Same rule as RectorTool's own containment check (#99: case-insensitive
+     * on Windows, where realpath() does not normalise case).
+     */
+    private static function isWithinRoot(string $real, string $root): bool
+    {
+        $caseInsensitive = PHP_OS_FAMILY === 'Windows';
+        $root = rtrim($root, '/\\');
+
+        if ($caseInsensitive ? strcasecmp($real, $root) === 0 : $real === $root) {
+            return true;
+        }
+
+        $prefix = $root . DIRECTORY_SEPARATOR;
+
+        return $caseInsensitive
+            ? strncasecmp($real, $prefix, strlen($prefix)) === 0
+            : str_starts_with($real, $prefix);
     }
 
     /**

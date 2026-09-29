@@ -117,42 +117,27 @@ final class StdioLspTransportTest extends TestCase
     }
 
     /**
-     * PR #128 E2E review (blocking finding 2): tryRead() must return the
-     * message when one is already fully available -- otherwise the
-     * create-refusal peek in LspServer could never see a reply that really
-     * is sitting there. A connected socket pair (php://memory is NOT
-     * select()-able, see the ValueError test below) gives a real,
-     * poll-able stream in-process.
+     * PR #128 E2E review (blocking finding 2), second self-review pass:
+     * tryRead() now delegates to waitForInput() (see its own docblock for
+     * why -- the windows-latest hang this replaces), which already
+     * degrades a stream stream_select() cannot poll at all (ValueError,
+     * observed for php://memory -- this class's own stand-in for STDIN in
+     * every test here) to `pollForInput()`'s fstat()-based check instead of
+     * propagating the exception. A plain php://memory stream is therefore
+     * enough for every case below -- no real socket pair needed (the
+     * earlier STREAM_PF_UNIX-based version of these tests is what CI's
+     * no-pcntl leg refused outright: that build disables
+     * stream_socket_pair() via disable_functions, which makes the
+     * function call itself fatal, not merely return false).
      */
-    /**
-     * oss:auditor self-review finding (PR #128 second pass): `STREAM_PF_UNIX`
-     * socket pairs have a documented history of being unreliable/unavailable
-     * on some Windows PHP builds. Skipping LOUDLY when the capability itself
-     * is missing -- not assuming by OS name, same discipline
-     * RectorRunnerTest already uses for posix_kill/pcntl_fork -- means a
-     * platform where this genuinely does not work reports "cannot confirm",
-     * never a silently-vacuous pass or a hard failure unrelated to what
-     * these tests exist to check.
-     *
-     * @return array{0: resource, 1: resource}
-     */
-    private function pollableSocketPair(): array
-    {
-        $pair = @stream_socket_pair(STREAM_PF_UNIX, STREAM_SOCK_STREAM, STREAM_IPPROTO_IP);
-        if ($pair === false) {
-            self::markTestSkipped('stream_socket_pair(STREAM_PF_UNIX, ...) unavailable in this environment');
-        }
-
-        return $pair;
-    }
-
     public function testTryReadReturnsAMessageThatIsAlreadyWaiting(): void
     {
-        [$readEnd, $writeEnd] = $this->pollableSocketPair();
         $body = '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}';
-        fwrite($writeEnd, "Content-Length: " . strlen($body) . "\r\n\r\n" . $body);
+        $in = fopen('php://memory', 'r+');
+        fwrite($in, "Content-Length: " . strlen($body) . "\r\n\r\n" . $body);
+        rewind($in);
 
-        $transport = new StdioLspTransport($readEnd, fopen('php://memory', 'w'));
+        $transport = new StdioLspTransport($in, fopen('php://memory', 'w'));
 
         self::assertSame(
             ['jsonrpc' => '2.0', 'id' => 1, 'method' => 'initialize', 'params' => []],
@@ -169,23 +154,30 @@ final class StdioLspTransportTest extends TestCase
      */
     public function testTryReadReturnsNullWhenNothingIsWaiting(): void
     {
-        [$readEnd, ] = $this->pollableSocketPair();
-
-        $transport = new StdioLspTransport($readEnd, fopen('php://memory', 'w'));
+        $transport = new StdioLspTransport(fopen('php://memory', 'r'), fopen('php://memory', 'w'));
 
         self::assertNull($transport->tryRead());
     }
 
     /**
-     * A stream stream_select() cannot poll at all (documented: PHP throws
-     * ValueError for this rather than returning false) must degrade to
-     * "nothing waiting", never propagate the exception -- the safe
-     * direction per tryRead()'s own docblock.
+     * A message pushed back (tryRead() peeked it, but it was not what the
+     * caller wanted) must be the very next thing read() returns -- before
+     * whatever is still sitting on the real stream underneath.
      */
-    public function testTryReadReturnsNullRatherThanThrowingForAnUnpollableStream(): void
+    public function testPushBackIsReadBeforeTheUnderlyingStream(): void
     {
-        $transport = new StdioLspTransport(fopen('php://memory', 'r'), fopen('php://memory', 'w'));
+        $body = '{"jsonrpc":"2.0","method":"textDocument/didSave","params":{}}';
+        $in = fopen('php://memory', 'r+');
+        fwrite($in, "Content-Length: " . strlen($body) . "\r\n\r\n" . $body);
+        rewind($in);
 
-        self::assertNull($transport->tryRead());
+        $transport = new StdioLspTransport($in, fopen('php://memory', 'w'));
+        $transport->pushBack(['jsonrpc' => '2.0', 'method' => 'pushedBack']);
+
+        self::assertSame(['jsonrpc' => '2.0', 'method' => 'pushedBack'], $transport->read());
+        self::assertSame(
+            ['jsonrpc' => '2.0', 'method' => 'textDocument/didSave', 'params' => []],
+            $transport->read(),
+        );
     }
 }

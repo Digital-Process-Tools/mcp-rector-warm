@@ -1282,7 +1282,7 @@ final class LspServerTest extends TestCase
             $log->entries[] = 'wrote:' . ($frame['method'] ?? '?');
         };
 
-        $server = new LspServer('1.0.0', $diagnostics, $frameWriter);
+        $server = new LspServer('1.0.0', $diagnostics, frameWriter: $frameWriter);
 
         $server->handle([
             'jsonrpc' => '2.0',
@@ -1316,8 +1316,7 @@ final class LspServerTest extends TestCase
         $server = new LspServer(
             '1.0.0',
             self::fakeSource([]),
-            null,
-            static fn (): array => [
+            tryReadAhead: static fn (): array => [
                 'jsonrpc' => '2.0',
                 'id' => 'rector-warm-lsp/progress-create',
                 'error' => ['code' => -32800, 'message' => 'client declined this progress token'],
@@ -1357,8 +1356,7 @@ final class LspServerTest extends TestCase
         $server = new LspServer(
             '1.0.0',
             self::fakeSource([]),
-            null,
-            static fn (): ?array => null,
+            tryReadAhead: static fn (): ?array => null,
         );
 
         $server->handle([
@@ -1396,9 +1394,8 @@ final class LspServerTest extends TestCase
         $server = new LspServer(
             '1.0.0',
             self::fakeSource([]),
-            null,
-            static fn (): array => $unrelated,
-            function (array $message) use (&$pushedBack): void {
+            tryReadAhead: static fn (): array => $unrelated,
+            pushBackMessage: function (array $message) use (&$pushedBack): void {
                 $pushedBack[] = $message;
             },
         );

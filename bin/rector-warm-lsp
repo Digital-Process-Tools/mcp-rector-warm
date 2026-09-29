@@ -20,9 +20,11 @@ foreach ([
     }
 }
 
+use Dpt\McpRectorWarm\Lsp\LspLoop;
 use Dpt\McpRectorWarm\Lsp\LspServer;
 use Dpt\McpRectorWarm\Lsp\RectorDiagnosticsSource;
 use Dpt\McpRectorWarm\Lsp\StdioLspTransport;
+use Dpt\McpRectorWarm\Lsp\TempCopySweeper;
 use Dpt\McpRectorWarm\RectorTool;
 use Dpt\McpRectorWarm\Support\ServerVersion;
 
@@ -47,16 +49,12 @@ if ($workingDir !== null) {
     chdir($workingDir);
 }
 
+// #106: a server killed mid-run (kill -9) left its unsaved-buffer temp
+// copy behind; remove any whose owning server is gone.
+TempCopySweeper::sweepTree(getcwd() ?: '.');
+
 $transport = new StdioLspTransport(STDIN, STDOUT);
 $diagnostics = new RectorDiagnosticsSource(new RectorTool());
-
-// PR #128 E2E review: a small FIFO of messages read AHEAD of the main loop
-// below by LspServer's own non-blocking peek (blocking finding 2), so a
-// message that turns out NOT to be the reply it was looking for is handed
-// back for ordinary dispatch on the very next iteration rather than lost.
-// Shared by reference between the two closures and the main loop's own
-// read below.
-$pending = [];
 
 $server = new LspServer(
     ServerVersion::resolve(),
@@ -69,35 +67,23 @@ $server = new LspServer(
         // call, rather than after it.
         $transport->write($frame);
     },
-    tryReadAhead: static function () use ($transport, &$pending): ?array {
-        if ($pending !== []) {
-            return array_shift($pending);
-        }
-
+    // PR #128 E2E review (blocking finding 2): $transport itself now owns
+    // the read-ahead/push-back FIFO (StdioLspTransport::tryRead()/
+    // pushBack()), so LspLoop's own read() calls -- which know nothing
+    // about this mechanism -- see a pushed-back message exactly like any
+    // other, with no separate queue to wire through here.
+    tryReadAhead: static function () use ($transport): ?array {
         return $transport->tryRead();
     },
-    pushBackMessage: static function (array $message) use (&$pending): void {
-        array_unshift($pending, $message);
+    pushBackMessage: static function (array $message) use ($transport): void {
+        $transport->pushBack($message);
     },
 );
 
-while (true) {
-    try {
-        $message = $pending !== [] ? array_shift($pending) : $transport->read();
-    } catch (\RuntimeException $e) {
-        fwrite(STDERR, "rector-warm-lsp: {$e->getMessage()}\n");
-        exit(1);
-    }
-
-    if ($message === null) {
-        exit($server->isShuttingDown() ? 0 : 1);
-    }
-
-    if (($message['method'] ?? null) === 'exit') {
-        exit($server->isShuttingDown() ? 0 : 1);
-    }
-
-    foreach ($server->handle($message) as $response) {
-        $transport->write($response);
-    }
-}
+// #106: the loop lives in LspLoop so the debounce (a read with a timeout)
+// and the drain-before-publish ordering are unit-tested. PR #128's own
+// $pending FIFO now lives inside StdioLspTransport itself (read()/
+// waitForInput() both drain it first), so LspLoop's own read() calls see a
+// pushed-back message exactly like any other -- nothing here needs to know
+// about it.
+exit((new LspLoop($transport, $server))->run());

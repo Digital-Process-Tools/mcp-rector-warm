@@ -21,6 +21,17 @@ final class StdioLspTransport
     private $out;
 
     /**
+     * @var list<array<string, mixed>> PR #128 E2E review (blocking finding
+     *   2): messages read AHEAD by tryRead()'s non-blocking peek that
+     *   turned out not to be what the caller was looking for, and were
+     *   handed back via pushBack() rather than dropped. read() and
+     *   waitForInput() both drain this FIFO first, so a caller that knows
+     *   nothing about tryRead() (LspLoop's own read loop) still sees a
+     *   pushed-back message exactly like any other, in order.
+     */
+    private array $pending = [];
+
+    /**
      * @param resource $in
      * @param resource $out
      */
@@ -38,6 +49,10 @@ final class StdioLspTransport
      */
     public function read(): ?array
     {
+        if ($this->pending !== []) {
+            return array_shift($this->pending);
+        }
+
         $headerLine = fgets($this->in);
         if ($headerLine === false) {
             return null;
@@ -76,6 +91,108 @@ final class StdioLspTransport
         return $decoded;
     }
 
+    /**
+     * #106: whether a message can be read without blocking, waiting up to
+     * $timeoutSeconds for one to arrive -- the synchronous loop's debounce
+     * timer. stream_select() also reports a stream whose next frame already
+     * sits in PHP's own read buffer (read() pulls whole chunks through
+     * fgets()), not only one with bytes pending in the kernel, so a second
+     * frame that arrived in the same write as the first is not missed. EOF
+     * counts as readable: the following read() returns null.
+     *
+     * Windows: select() there only works on sockets (used as-is for a
+     * socket), and for a pipe PHP
+     * either fails or reports the handle as always ready -- the second would
+     * make the loop block in read() and never fire the debounce. So on
+     * Windows this polls instead: PHP's own read buffer
+     * (`unread_bytes`), then the bytes waiting in the pipe (fstat()'s size,
+     * which Windows fills from PeekNamedPipe for a pipe), every 5 ms until
+     * the timeout. If neither can see pending input, the debounce still
+     * fires on time and a message that arrived meanwhile is read right
+     * after, so the only loss is superseding a run in flight.
+     */
+    public function waitForInput(float $timeoutSeconds): bool
+    {
+        // PR #128 E2E review: a message already read ahead and pushed back
+        // (see $pending's own docblock) counts as waiting -- LspLoop's
+        // debounce must not block for the full timeout when the very next
+        // read() would return instantly anyway.
+        if ($this->pending !== []) {
+            return true;
+        }
+
+        $timeoutSeconds = max(0.0, $timeoutSeconds);
+
+        if ($this->hasBufferedInput()) {
+            return true;
+        }
+
+        if (PHP_OS_FAMILY === 'Windows' && !$this->isSocket()) {
+            return $this->pollForInput($timeoutSeconds);
+        }
+
+        $seconds = (int) floor($timeoutSeconds);
+        $microseconds = min(999_999, (int) round(($timeoutSeconds - $seconds) * 1_000_000));
+
+        $read = [$this->in];
+        $write = null;
+        $except = null;
+
+        try {
+            // PR #128 self-review: stream_select() throws ValueError
+            // instead of returning false for a stream it cannot poll at
+            // all (observed for php://memory, this class's own test
+            // doubles for STDIN) -- `@` does not suppress a thrown
+            // exception, only a warning, so this used to propagate
+            // uncaught. Same fallback as the false case: poll instead.
+            $ready = @stream_select($read, $write, $except, $seconds, $microseconds);
+        } catch (\ValueError) {
+            return $this->pollForInput($timeoutSeconds);
+        }
+
+        if ($ready === false) {
+            return $this->pollForInput($timeoutSeconds);
+        }
+
+        return $ready > 0;
+    }
+
+    /** Windows' select() does handle sockets; only pipes and files need polling. */
+    private function isSocket(): bool
+    {
+        return str_contains(strtolower((string) (stream_get_meta_data($this->in)['stream_type'] ?? '')), 'socket');
+    }
+
+    private function hasBufferedInput(): bool
+    {
+        $meta = stream_get_meta_data($this->in);
+
+        return ($meta['unread_bytes'] ?? 0) > 0;
+    }
+
+    private function pollForInput(float $timeoutSeconds): bool
+    {
+        $deadline = microtime(true) + $timeoutSeconds;
+
+        while (true) {
+            if ($this->hasBufferedInput()) {
+                return true;
+            }
+
+            $stat = @fstat($this->in);
+            if (is_array($stat) && ($stat['size'] ?? 0) > 0) {
+                return true;
+            }
+
+            $remaining = $deadline - microtime(true);
+            if ($remaining <= 0.0) {
+                return false;
+            }
+
+            usleep((int) min(5_000, max(1, $remaining * 1_000_000)));
+        }
+    }
+
     public function write(array $message): void
     {
         $body = json_encode($message, JSON_UNESCAPED_SLASHES);
@@ -105,49 +222,34 @@ final class StdioLspTransport
 
     /**
      * PR #128 E2E review (blocking finding 2): a non-blocking peek --
-     * returns the next message ONLY if it is already fully available
-     * without waiting, null otherwise. `stream_select()` with a 0/0
-     * timeout is a poll: it returns immediately, so this never blocks on
-     * "nothing sent yet". It CAN still block briefly on `read()`'s own
-     * fgets/fread once select() says the stream is readable but only part
-     * of the frame has arrived so far -- an accepted, bounded trade-off for
-     * a local stdio pipe (not a network socket), same discipline read()
-     * already applies to its own short-read case above.
+     * returns the next message ONLY if it is already available without
+     * waiting, null otherwise.
      *
-     * Cross-platform note (reasoned, not observed -- no Windows box
-     * available): `stream_select()` is documented to work reliably for
-     * pipes/files only on POSIX; on Windows it is reliable for sockets but
-     * not for arbitrary file-backed streams like an inherited STDIN pipe.
-     * Degrading to "nothing waiting" is the SAFE direction on failure --
-     * `@` suppresses the platform warning, and both `false` (error) and
-     * `0` (nothing ready) return null here, never block, never throw. The
-     * one consequence of that degradation is that the create-refusal check
-     * this method exists for simply never fires on that platform -- not a
-     * hang, not a crash, just the enhancement not helping there.
+     * Self-review correction (second E2E pass, PR #128): this used to run
+     * its own `stream_select()` call with a bare 0/0 timeout, independent
+     * of `waitForInput()` -- and on windows-latest CI that call was
+     * OBSERVED to hang (job #109299103869: a `read_frame()` timeout waiting
+     * for `$/progress` begin, not merely the "reasoned, not observed"
+     * degradation this docblock originally claimed). `waitForInput()`
+     * already solves exactly this problem for #106's own debounce timer,
+     * including the Windows case (a non-socket, file-backed STDIN pipe
+     * polls via `PeekNamedPipe`/`fstat()` there instead of `select()`), so
+     * this delegates to it rather than duplicating a narrower, broken
+     * version of the same logic.
      */
     public function tryRead(): ?array
     {
-        $read = [$this->in];
-        $write = null;
-        $except = null;
+        return $this->waitForInput(0.0) ? $this->read() : null;
+    }
 
-        try {
-            // `@` covers the platform WARNING case (documented above).
-            // PHP 8's stream_select() throws a ValueError instead of
-            // warning for a stream it cannot poll at all -- observed for
-            // php://memory (this repo's own test doubles for STDIN, see
-            // StdioLspTransportTest) -- which `@` does not suppress. Same
-            // safe direction either way: cannot tell, so assume nothing
-            // is waiting.
-            $ready = @stream_select($read, $write, $except, 0, 0);
-        } catch (\ValueError) {
-            return null;
-        }
-
-        if ($ready === false || $ready === 0) {
-            return null;
-        }
-
-        return $this->read();
+    /**
+     * Companion to tryRead(): a message read ahead that turned out not to
+     * be what the caller was looking for, handed back for ordinary
+     * dispatch on the very next read()/waitForInput() call rather than
+     * dropped. See $pending's own docblock.
+     */
+    public function pushBack(array $message): void
+    {
+        array_unshift($this->pending, $message);
     }
 }

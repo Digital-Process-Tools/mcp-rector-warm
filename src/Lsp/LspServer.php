@@ -8,9 +8,16 @@ namespace Dpt\McpRectorWarm\Lsp;
  * v1 (#53): the handshake from #52's prototype, plus diagnostics
  * (didOpen/didSave -> publishDiagnostics), didClose (clears them), and
  * textDocument/codeAction (a WorkspaceEdit per hunk, plus a whole-file
- * action), all built on RectorDiffParser + a DiagnosticsSource. Rector reads
- * from disk, so text sync stays `None`: an unsaved buffer's edits are never
- * seen (out of v1 scope, same as the issue's "unsaved buffers" exclusion).
+ * action), all built on RectorDiffParser + a DiagnosticsSource.
+ *
+ * #106: unsaved buffers. With a BufferDiagnosticsSource the server declares
+ * full text sync (`change: 1`); didChange stores the buffer text and its
+ * version and schedules a diagnosis $debounceSeconds after the LAST change.
+ * handle() never runs that diagnosis itself -- the loop (LspLoop) asks
+ * nextDiagnosticsDeadline(), calls runDueDiagnostics() when it passes, then
+ * takeReadyDiagnostics(), which publishes a result only if its version is
+ * still the document's latest. didOpen and didSave still diagnose from
+ * disk; didSave and didClose drop the buffer.
  */
 final class LspServer
 {
@@ -37,6 +44,24 @@ final class LspServer
      *   per-message, not per-protocol, and a client is free to use either.
      */
     private array $cancelledRequestIds = [];
+
+    /** #106: client declared `workspace.workspaceEdit.documentChanges` */
+    private bool $canUseDocumentChanges = false;
+
+    /** @var array<string, string> #106: URI -> unsaved buffer text (full sync) */
+    private array $buffers = [];
+
+    /** @var array<string, float> #106: URI -> when its debounced diagnosis is due */
+    private array $pendingDeadlines = [];
+
+    /**
+     * @var array<string, array{version: int|null, result: array<string, mixed>}>
+     *   #106: URI -> a computed buffer diagnosis not yet published
+     */
+    private array $readyResults = [];
+
+    /** @var array<string, int|null> #106: URI -> the version its $fixesByUri were computed for */
+    private array $fixesVersions = [];
 
     /** @var array<string, int> URI -> the version this server last diagnosed */
     private array $documentVersions = [];
@@ -76,6 +101,7 @@ final class LspServer
     public function __construct(
         private readonly string $serverVersion,
         private readonly ?DiagnosticsSource $diagnostics = null,
+        private readonly float $debounceSeconds = 0.5,
         private readonly ?\Closure $frameWriter = null,
         /**
          * PR #128 E2E review (blocking finding 2): a non-blocking,
@@ -150,14 +176,15 @@ final class LspServer
             $capabilities = is_array($params) ? ($params['capabilities'] ?? null) : null;
             $this->canWatchFiles = self::clientSupportsDynamicWatchedFiles($capabilities);
             $this->canReportProgress = self::clientSupportsWorkDoneProgress($capabilities);
+            $this->canUseDocumentChanges = self::clientSupportsDocumentChanges($capabilities);
 
             return [$this->result($id, [
                 'capabilities' => [
-                    // Disk-based: no textDocument/didChange handling, so
-                    // `change` stays None (0) -- see the class docblock.
+                    // #106: Full (1) when the source can diagnose an unsaved
+                    // buffer, None (0) otherwise -- see the class docblock.
                     'textDocumentSync' => [
                         'openClose' => true,
-                        'change' => 0,
+                        'change' => $this->diagnostics instanceof BufferDiagnosticsSource ? 1 : 0,
                         'save' => ['includeText' => false],
                     ],
                     'codeActionProvider' => true,
@@ -187,6 +214,10 @@ final class LspServer
 
         if ($method === 'textDocument/didOpen') {
             return $this->diagnoseDocument(is_array($params) ? ($params['textDocument'] ?? []) : []);
+        }
+
+        if ($method === 'textDocument/didChange') {
+            return $this->changeDocument(is_array($params) ? $params : []);
         }
 
         if ($method === 'textDocument/didSave') {
@@ -250,6 +281,119 @@ final class LspServer
     public function isShuttingDown(): bool
     {
         return $this->shuttingDown;
+    }
+
+    /**
+     * #106: the earliest moment a debounced buffer diagnosis is due, as a
+     * microtime(true) timestamp, or null when none is pending -- the loop
+     * blocks on its read only when this is null.
+     */
+    public function nextDiagnosticsDeadline(): ?float
+    {
+        return $this->pendingDeadlines === [] ? null : min($this->pendingDeadlines);
+    }
+
+    /**
+     * #106: run every buffer diagnosis whose debounce has elapsed by $now.
+     * Results are held, not returned: the loop first handles whatever input
+     * arrived while Rector ran, then calls takeReadyDiagnostics().
+     */
+    public function runDueDiagnostics(float $now): void
+    {
+        if (!$this->diagnostics instanceof BufferDiagnosticsSource) {
+            $this->pendingDeadlines = [];
+
+            return;
+        }
+
+        foreach ($this->pendingDeadlines as $uri => $deadline) {
+            if ($deadline > $now || !isset($this->buffers[$uri])) {
+                continue;
+            }
+
+            unset($this->pendingDeadlines[$uri]);
+            $version = $this->documentVersions[$uri] ?? null;
+            $result = $this->diagnostics->diagnoseBuffer(self::uriToPath($uri), $this->buffers[$uri]);
+
+            $this->readyResults[$uri] = ['version' => $version, 'result' => $result];
+        }
+    }
+
+    /**
+     * #106: publishDiagnostics for every held result whose version is still
+     * the document's latest. A result for version N after version N+1
+     * arrived is dropped here (changeDocument() also drops it eagerly); a
+     * document closed meanwhile has no version left and is dropped too.
+     *
+     * @return list<array<string, mixed>>
+     */
+    public function takeReadyDiagnostics(): array
+    {
+        $frames = [];
+        foreach ($this->readyResults as $uri => $ready) {
+            if (!array_key_exists($uri, $this->documentVersions) || $this->documentVersions[$uri] !== $ready['version']) {
+                continue;
+            }
+
+            $frames[] = $this->publishResult($uri, $ready['result'], $ready['version'], true);
+        }
+        $this->readyResults = [];
+
+        return $frames;
+    }
+
+    /**
+     * #106: full sync only -- each change carries the whole text, and the
+     * last one wins. A client that ignores `change: 1` and sends ranged
+     * (incremental) changes cannot be followed; its buffer is dropped rather
+     * than diagnosed from a wrong reconstruction.
+     *
+     * @param array<string, mixed> $params
+     * @return list<array<string, mixed>>
+     */
+    private function changeDocument(array $params): array
+    {
+        $textDocument = is_array($params['textDocument'] ?? null) ? $params['textDocument'] : [];
+        $uri = $textDocument['uri'] ?? null;
+        if (!is_string($uri) || !$this->diagnostics instanceof BufferDiagnosticsSource) {
+            return [];
+        }
+
+        $version = $textDocument['version'] ?? null;
+        $this->documentVersions[$uri] = is_int($version) ? $version : (($this->documentVersions[$uri] ?? 0) + 1);
+        unset($this->readyResults[$uri]);
+
+        $changes = is_array($params['contentChanges'] ?? null) ? $params['contentChanges'] : [];
+        $last = $changes === [] ? null : $changes[array_key_last($changes)];
+        $isFullText = is_array($last) && is_string($last['text'] ?? null) && !array_key_exists('range', $last);
+
+        // Only a file: URI has a directory in the project to put the temp
+        // copy in; an `untitled:` buffer has no path Rector could resolve.
+        // rector.php and composer.lock are configuration, not source Rector
+        // refactors: they are reloaded from disk on save (and through the
+        // watcher), never diagnosed as buffers.
+        if (!$isFullText || strncasecmp($uri, 'file:', 5) !== 0 || self::isWatchedConfigFile($uri)) {
+            unset($this->buffers[$uri], $this->pendingDeadlines[$uri]);
+
+            return [];
+        }
+
+        $this->buffers[$uri] = $last['text'];
+        $this->pendingDeadlines[$uri] = microtime(true) + $this->debounceSeconds;
+
+        return [];
+    }
+
+    private static function clientSupportsDocumentChanges(mixed $capabilities): bool
+    {
+        if (!is_array($capabilities)) {
+            return false;
+        }
+
+        $workspace = $capabilities['workspace'] ?? null;
+        $edit = is_array($workspace) ? ($workspace['workspaceEdit'] ?? null) : null;
+
+        return is_array($edit) && ($edit['documentChanges'] ?? false) === true;
     }
 
     private static function clientSupportsDynamicWatchedFiles(mixed $capabilities): bool
@@ -351,8 +495,46 @@ final class LspServer
         // re-appending its own URI and reversing $activityOrder for NEXT
         // time, which would otherwise silently undo this fix on any second
         // config change with no real didOpen/didSave in between.
+        //
+        // #106 rebase fix: activityOrder is only touched by didOpen/didSave
+        // (diagnoseDocument with touchActivity: true) -- a document that has
+        // ONLY ever received a didChange (buffer edit, no open/save yet)
+        // has a documentVersions entry but never lands in activityOrder.
+        // Appending the documentVersions keys not already covered keeps
+        // such a buffer-only document from being silently skipped here
+        // (it would otherwise never get requeued on a config change).
+        //
+        // Self-review finding: changeDocument() writes documentVersions[$uri]
+        // BEFORE it checks whether the change is buffer-eligible at all --
+        // an untitled: URI, an incremental (ranged) change, or a change to
+        // rector.php/composer.lock itself leaves a documentVersions entry
+        // with no buffer and no activityOrder entry either. Left in the
+        // union above, such a URI would fall through to diagnoseDocument()
+        // (no buffers[$uri] to catch it) and get spuriously "diagnosed" as
+        // though it were a real, resolvable source file. Restricting the
+        // union to a file: URI that is not itself a watched config file
+        // matches exactly the eligibility changeDocument() already applies
+        // before it ever writes to $this->buffers.
+        $uris = array_reverse($this->activityOrder);
+        foreach (array_keys($this->documentVersions) as $uri) {
+            if (in_array($uri, $uris, true)) {
+                continue;
+            }
+            if (strncasecmp($uri, 'file:', 5) !== 0 || self::isWatchedConfigFile($uri)) {
+                continue;
+            }
+            $uris[] = $uri;
+        }
+
         $frames = [];
-        foreach (array_reverse($this->activityOrder) as $uri) {
+        foreach ($uris as $uri) {
+            // #106: a document with an unsaved buffer is re-diagnosed from
+            // that buffer, not from disk -- due now, run by the loop.
+            if (isset($this->buffers[$uri])) {
+                $this->pendingDeadlines[$uri] = microtime(true);
+                continue;
+            }
+
             $frames = array_merge($frames, $this->diagnoseDocument([
                 'uri' => $uri,
                 'version' => $this->documentVersions[$uri] ?? 0,
@@ -364,8 +546,17 @@ final class LspServer
 
     private static function isWatchedConfigFile(string $uri): bool
     {
-        $path = self::uriToPath($uri);
-        $basename = basename(str_replace('\\', '/', $path));
+        $path = str_replace('\\', '/', self::uriToPath($uri));
+
+        // #106: a `.rector-warm-<pid>` directory holds this server's own
+        // temp copy of a buffer. An event for a rector.php in there is not a
+        // config change -- treating it as one re-queued every buffer, whose
+        // runs wrote new temp copies, and so on (the reload loop).
+        if (str_contains($path, '/' . RectorDiagnosticsSource::TEMP_DIRECTORY_PREFIX)) {
+            return false;
+        }
+
+        $basename = basename($path);
 
         // oss:auditor self-review finding: a case-SENSITIVE compare here
         // silently misses a differently-cased URI on a case-insensitive
@@ -403,6 +594,10 @@ final class LspServer
         if ($touchActivity) {
             $this->touchActivity($uri);
         }
+
+        // #106: didOpen/didSave diagnose what is on disk, which after a save
+        // IS the buffer -- any pending or held buffer run is superseded.
+        unset($this->buffers[$uri], $this->pendingDeadlines[$uri], $this->readyResults[$uri]);
 
         $path = self::uriToPath($uri);
 
@@ -459,8 +654,24 @@ final class LspServer
             return [];
         }
 
+        $this->emit($this->publishResult($uri, $result, $version, false), $frames);
+
+        return $frames;
+    }
+
+    /**
+     * Turns a DiagnosticsSource result into a publishDiagnostics frame, and
+     * remembers its fixes -- with the version they were computed for (#106),
+     * so codeAction never offers them against a newer buffer.
+     *
+     * @param array<string, mixed> $result
+     * @return array<string, mixed>
+     */
+    private function publishResult(string $uri, array $result, mixed $version, bool $withVersion): array
+    {
         $fixes = $result['fixes'] ?? [];
         $this->fixesByUri[$uri] = $fixes;
+        $this->fixesVersions[$uri] = is_int($version) ? $version : null;
 
         $diagnostics = [];
         foreach ($fixes as $i => $fix) {
@@ -490,9 +701,7 @@ final class LspServer
             ];
         }
 
-        $this->emit($this->publishDiagnostics($uri, $diagnostics), $frames);
-
-        return $frames;
+        return $this->publishDiagnostics($uri, $diagnostics, $withVersion && is_int($version) ? $version : null);
     }
 
     /** #111: server-initiated `window/workDoneProgress/create`, before the first `$/progress`. */
@@ -582,7 +791,14 @@ final class LspServer
             return [];
         }
 
-        unset($this->fixesByUri[$uri], $this->documentVersions[$uri]);
+        unset(
+            $this->fixesByUri[$uri],
+            $this->fixesVersions[$uri],
+            $this->documentVersions[$uri],
+            $this->buffers[$uri],
+            $this->pendingDeadlines[$uri],
+            $this->readyResults[$uri],
+        );
         $this->removeFromActivityOrder($uri);
 
         return [$this->publishDiagnostics($uri, [])];
@@ -621,6 +837,15 @@ final class LspServer
             return $this->result($id, []);
         }
 
+        // #106: these fixes' ranges index into the text of the version they
+        // were computed for. Once the buffer has moved on, applying them
+        // would edit the wrong lines -- offer nothing until the new version
+        // has been diagnosed.
+        $fixesVersion = $this->fixesVersions[$uri] ?? null;
+        if ($fixesVersion !== ($this->documentVersions[$uri] ?? null)) {
+            return $this->result($id, []);
+        }
+
         $actions = [];
         foreach ($fixes as $fix) {
             if ($range !== null && !self::rangesOverlap($range, $fix['range'])) {
@@ -630,32 +855,60 @@ final class LspServer
             $actions[] = [
                 'title' => 'Apply Rector: ' . self::fixLabel($fix['rectors']),
                 'kind' => 'quickfix',
-                'edit' => ['changes' => [$uri => [['range' => $fix['range'], 'newText' => $fix['newText']]]]],
+                'edit' => $this->workspaceEdit($uri, $fixesVersion, [['range' => $fix['range'], 'newText' => $fix['newText']]]),
             ];
         }
 
         $actions[] = [
             'title' => 'Apply all Rector fixes',
             'kind' => 'source.fixAll.rector',
-            'edit' => ['changes' => [$uri => array_map(
+            'edit' => $this->workspaceEdit($uri, $fixesVersion, array_map(
                 static fn (array $fix): array => ['range' => $fix['range'], 'newText' => $fix['newText']],
                 $fixes,
-            )]],
+            )),
         ];
 
         return $this->result($id, $actions);
     }
 
     /**
+     * #106: when the client supports `documentChanges`, the edit names the
+     * document version its ranges were computed for, so a client that
+     * applies it after the buffer changed rejects it instead of editing the
+     * wrong lines. Otherwise the plain `changes` map, as before.
+     *
+     * @param list<array<string, mixed>> $edits
+     * @return array<string, mixed>
+     */
+    private function workspaceEdit(string $uri, ?int $version, array $edits): array
+    {
+        if ($this->canUseDocumentChanges) {
+            return ['documentChanges' => [[
+                'textDocument' => ['uri' => $uri, 'version' => $version],
+                'edits' => $edits,
+            ]]];
+        }
+
+        return ['changes' => [$uri => $edits]];
+    }
+
+    /**
      * @param list<array<string, mixed>> $diagnostics
      * @return array<string, mixed>
      */
-    private function publishDiagnostics(string $uri, array $diagnostics): array
+    private function publishDiagnostics(string $uri, array $diagnostics, ?int $version = null): array
     {
+        $params = ['uri' => $uri];
+        if ($version !== null) {
+            // #106: a buffer diagnosis says which version it describes.
+            $params['version'] = $version;
+        }
+        $params['diagnostics'] = $diagnostics;
+
         return [
             'jsonrpc' => '2.0',
             'method' => 'textDocument/publishDiagnostics',
-            'params' => ['uri' => $uri, 'diagnostics' => $diagnostics],
+            'params' => $params,
         ];
     }
 

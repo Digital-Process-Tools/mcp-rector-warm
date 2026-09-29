@@ -590,9 +590,328 @@ def test_watched_config_change_re_diagnoses_the_most_recently_active_document_fi
         stop_server(proc)
 
 
+# --- #106: diagnostics on unsaved buffers (didChange, full sync, debounced) --
+
+FIXABLE_BUFFER_FOR_CLEAN = """<?php
+
+declare(strict_types=1);
+
+final class Clean
+{
+    public function isEmpty(array $items): bool
+    {
+        if (count($items) === 0) {
+            return true;
+        }
+
+        return false;
+    }
+}
+"""
+
+
+def did_change(server, uri: str, version: int, text: str) -> None:
+    server.stdin.write(frame({
+        "jsonrpc": "2.0",
+        "method": "textDocument/didChange",
+        "params": {
+            "textDocument": {"uri": uri, "version": version},
+            "contentChanges": [{"text": text}],
+        },
+    }))
+    server.stdin.flush()
+
+
+def temp_leftovers(project: Path) -> list[str]:
+    return sorted(str(p.relative_to(project)) for p in project.rglob("*") if "rector-warm" in p.name)
+
+
+def cold_apply(project: Path, relative: str, content: str) -> str:
+    """The oracle: a cold, non-dry-run rector on a fresh copy of the fixture
+    with `content` written at `relative` -- same content, same path."""
+    cold = project.parent / "cold-buffer"
+    if cold.exists():
+        shutil.rmtree(cold)
+    copy_fixture(cold)
+    (cold / relative).write_text(content)
+    done = subprocess.run(
+        [php_binary(), str(REPO / "vendor" / "bin" / "rector"), "process",
+         "--config=rector.php", "--no-progress-bar", "--", relative],
+        cwd=cold, capture_output=True, text=True, timeout=120,
+    )
+    assert done.returncode == 0, done.stderr
+    return (cold / relative).read_text()
+
+
+def cold_dry_run_report(project: Path, relative: str, content: str) -> dict:
+    cold = project.parent / "cold-dry"
+    if cold.exists():
+        shutil.rmtree(cold)
+    copy_fixture(cold)
+    (cold / relative).write_text(content)
+    done = subprocess.run(
+        [php_binary(), str(REPO / "vendor" / "bin" / "rector"), "process", "--dry-run",
+         "--config=rector.php", "--no-progress-bar", "--output-format=json", "--", relative],
+        cwd=cold, capture_output=True, text=True, timeout=120,
+    )
+    return json.loads(done.stdout[done.stdout.index("{"):])
+
+
+def test_initialize_advertises_full_sync(project):
+    proc = subprocess.Popen(
+        [php_binary(), str(BIN), f"--working-dir={project}"],
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+    )
+    try:
+        proc.stdin.write(frame({
+            "jsonrpc": "2.0", "id": 1, "method": "initialize",
+            "params": {"processId": None, "rootUri": None, "capabilities": {}},
+        }))
+        proc.stdin.flush()
+        reply = read_frame(proc.stdout)
+        assert reply["result"]["capabilities"]["textDocumentSync"]["change"] == 1
+    finally:
+        stop_server(proc)
+
+
 def _pid_is_alive(pid: int) -> bool:
     try:
         os.kill(pid, 0)
     except ProcessLookupError:
         return False
     return True
+
+
+def test_did_change_with_fixable_content_publishes_without_a_save_and_matches_cold(server, project):
+    # Must fire: Clean.php is clean on disk; only the unsaved buffer is
+    # fixable. No didSave is ever sent.
+    path = project / "src" / "Clean.php"
+    uri = path.as_uri()
+    on_disk = path.read_text()
+    assert did_open(server, uri)["params"]["diagnostics"] == []
+
+    did_change(server, uri, 2, FIXABLE_BUFFER_FOR_CLEAN)
+    notification = read_frame(server.stdout)
+
+    assert notification["method"] == "textDocument/publishDiagnostics"
+    assert notification["params"]["uri"] == uri
+    assert notification["params"]["version"] == 2
+    diagnostics = notification["params"]["diagnostics"]
+    assert len(diagnostics) == 1
+    assert "SimplifyIfReturnBoolRector" in diagnostics[0]["message"]
+
+    # Oracle, dry-run form: cold rector on a file with the same content at
+    # the same path reports the same rule and one changed file.
+    report = cold_dry_run_report(project, "src/Clean.php", FIXABLE_BUFFER_FOR_CLEAN)
+    assert report["totals"]["changed_files"] == 1
+    assert any("SimplifyIfReturnBoolRector" in r for r in report["file_diffs"][0]["applied_rectors"])
+
+    # Oracle, applied form: the buffer's own fix-all edit gives the exact
+    # bytes a cold rector apply gives on that content at that path.
+    server.stdin.write(frame({
+        "jsonrpc": "2.0", "id": 3, "method": "textDocument/codeAction",
+        "params": {"textDocument": {"uri": uri}, "range": diagnostics[0]["range"],
+                   "context": {"diagnostics": diagnostics}},
+    }))
+    server.stdin.flush()
+    actions = read_frame(server.stdout)["result"]
+    fix_all = next(a for a in actions if a["title"] == "Apply all Rector fixes")
+    applied = FIXABLE_BUFFER_FOR_CLEAN
+    for edit in sorted(fix_all["edit"]["changes"][uri], key=lambda e: e["range"]["start"]["line"], reverse=True):
+        applied = apply_edit(applied, edit)
+    assert applied == cold_apply(project, "src/Clean.php", FIXABLE_BUFFER_FOR_CLEAN)
+
+    # The file on disk was never touched, and no temp file is left behind.
+    assert path.read_text() == on_disk
+    assert temp_leftovers(project) == []
+
+
+def test_a_buffer_changed_back_to_clean_content_publishes_an_empty_list(server, project):
+    path = project / "src" / "Clean.php"
+    uri = path.as_uri()
+    did_open(server, uri)
+
+    did_change(server, uri, 2, FIXABLE_BUFFER_FOR_CLEAN)
+    assert len(read_frame(server.stdout)["params"]["diagnostics"]) == 1
+
+    did_change(server, uri, 3, path.read_text())
+    notification = read_frame(server.stdout)
+
+    assert notification["params"]["version"] == 3
+    assert notification["params"]["diagnostics"] == []
+    assert temp_leftovers(project) == []
+
+
+def test_a_syntax_error_buffer_publishes_the_error_and_leaves_no_temp_file(server, project):
+    path = project / "src" / "Clean.php"
+    uri = path.as_uri()
+    did_open(server, uri)
+
+    did_change(server, uri, 2, "<?php\n\nfinal class Clean\n{\n    public function (\n")
+    notification = read_frame(server.stdout)
+
+    diagnostics = notification["params"]["diagnostics"]
+    assert len(diagnostics) >= 1
+    assert all(d["severity"] == 1 for d in diagnostics)
+    assert all("rector-warm" not in d["message"] for d in diagnostics)
+    assert temp_leftovers(project) == []
+
+
+def test_a_result_for_version_n_is_not_published_once_n_plus_1_arrived(server, project):
+    # Must not fire. No didOpen first, so the version-2 run is the one that
+    # boots Rector's container -- well over a second, every platform. Version
+    # 3 is sent while it is in flight; the server must drain it before
+    # publishing, so the first publish is version 3's, never version 2's.
+    # Positive control: version 3's (clean) result IS published.
+    path = project / "src" / "Clean.php"
+    uri = path.as_uri()
+
+    did_change(server, uri, 2, FIXABLE_BUFFER_FOR_CLEAN)
+    time.sleep(0.8)
+    did_change(server, uri, 3, path.read_text())
+
+    notification = read_frame(server.stdout)
+    assert notification["method"] == "textDocument/publishDiagnostics"
+    assert notification["params"]["version"] == 3, notification
+    assert notification["params"]["diagnostics"] == []
+    assert temp_leftovers(project) == []
+
+
+# --- #106 follow-up: independent E2E findings (reload loop, skips, leftovers) --
+
+WATCHING_CLIENT = {"workspace": {"didChangeWatchedFiles": {"dynamicRegistration": True}}}
+
+
+def start_watching_server(project: Path):
+    """A server whose client declared file watching, with its
+    registerCapability request answered, as a real editor would."""
+    proc = start_server(project, WATCHING_CLIENT)
+    request = read_frame(proc.stdout)
+    assert request["method"] == "client/registerCapability"
+    proc.stdin.write(frame({"jsonrpc": "2.0", "id": request["id"], "result": None}))
+    proc.stdin.flush()
+    return proc
+
+
+def watched_change(server, uri: str) -> None:
+    server.stdin.write(frame({
+        "jsonrpc": "2.0",
+        "method": "workspace/didChangeWatchedFiles",
+        "params": {"changes": [{"uri": uri, "type": 2}]},
+    }))
+    server.stdin.flush()
+
+
+def test_an_unsaved_rector_php_is_not_diagnosed(project):
+    # Must not fire: rector.php's buffer used to be diagnosed through a temp
+    # copy at <root>/.rector-warm-<pid>/rector.php, which the client's own
+    # **/rector.php watcher reported back as a config change -- the reload
+    # loop. The rector.php change is sent FIRST, so if it were diagnosed its
+    # publish would arrive first. Positive control: Clean.php's publish does.
+    proc = start_watching_server(project)
+    try:
+        rector = project / "rector.php"
+        did_change(proc, rector.as_uri(), 2, rector.read_bytes().decode("utf-8") + "\n// unsaved\n")
+        clean_uri = (project / "src" / "Clean.php").as_uri()
+        did_change(proc, clean_uri, 2, FIXABLE_BUFFER_FOR_CLEAN)
+
+        first = read_frame(proc.stdout)
+        assert first["params"]["uri"] == clean_uri, first
+        assert temp_leftovers(project) == []
+    finally:
+        stop_server(proc)
+
+
+def test_a_watched_event_for_a_temp_copy_does_not_rediagnose(project):
+    # Must not fire: an event for <root>/.rector-warm-<pid>/rector.php is the
+    # server's own temp file, not a config change. If it re-queued the open
+    # Clean.php buffer, Clean's publish (due at once) would arrive before
+    # Fixable's (due after the 500 ms debounce). Positive control: the real
+    # rector.php event does re-queue Clean.php.
+    proc = start_watching_server(project)
+    try:
+        clean_uri = (project / "src" / "Clean.php").as_uri()
+        fixable_uri = (project / "src" / "Fixable.php").as_uri()
+        did_change(proc, clean_uri, 2, FIXABLE_BUFFER_FOR_CLEAN)
+        assert read_frame(proc.stdout)["params"]["uri"] == clean_uri
+
+        watched_change(proc, (project / ".rector-warm-99999" / "rector.php").as_uri())
+        did_change(proc, fixable_uri, 2, (project / "src" / "Fixable.php").read_bytes().decode("utf-8"))
+        assert read_frame(proc.stdout)["params"]["uri"] == fixable_uri
+
+        watched_change(proc, (project / "rector.php").as_uri())
+        assert read_frame(proc.stdout)["params"]["uri"] == clean_uri
+    finally:
+        stop_server(proc)
+
+
+SKIP_FORMS = {
+    "exact path": ("__DIR__ . '/src/Fixable.php'", 0),
+    "relative path": ("'src/Fixable.php'", 0),
+    "parent-dir glob": ("'*/src/Fixable.php'", 0),
+    "rule-scoped exact path": (
+        "\\Rector\\CodeQuality\\Rector\\If_\\SimplifyIfReturnBoolRector::class => [__DIR__ . '/src/Fixable.php']",
+        0,
+    ),
+    "control: unrelated glob": ("'*/Other.php'", 1),
+    "control: no skip": (None, 1),
+}
+
+
+@pytest.mark.parametrize("form", list(SKIP_FORMS))
+def test_unsaved_diagnostics_honour_the_original_paths_skips(project, form):
+    # Unsaved == saved == cold, for each withSkip() form that names the
+    # ORIGINAL path, with two controls that must still report the fix.
+    skip, expected = SKIP_FORMS[form]
+    config = project / "rector.php"
+    text = config.read_bytes().decode("utf-8")
+    if skip is not None:
+        text = text.replace(
+            "->withPreparedSets(codeQuality: true);",
+            f"->withPreparedSets(codeQuality: true)\n    ->withSkip([{skip}]);",
+        )
+    config.write_bytes(text.encode("utf-8"))
+
+    path = project / "src" / "Fixable.php"
+    content = path.read_bytes().decode("utf-8")
+    uri = path.as_uri()
+    proc = start_server(project, {})
+    try:
+        saved = len(did_open(proc, uri)["params"]["diagnostics"])
+        did_change(proc, uri, 2, content)
+        unsaved = len(read_frame(proc.stdout)["params"]["diagnostics"])
+    finally:
+        stop_server(proc)
+
+    cold = subprocess.run(
+        [php_binary(), str(REPO / "vendor" / "bin" / "rector"), "process", "--dry-run",
+         "--config=rector.php", "--no-progress-bar", "--output-format=json", "--", "src/Fixable.php"],
+        cwd=project, capture_output=True, text=True, timeout=120,
+    )
+    cold_changed = json.loads(cold.stdout[cold.stdout.index("{"):])["totals"]["changed_files"]
+
+    assert (unsaved, saved, cold_changed) == (expected, expected, expected)
+    assert temp_leftovers(project) == []
+
+
+def test_startup_removes_a_dead_servers_temp_dir_and_keeps_a_live_ones(project):
+    # A server killed mid-run (kill -9) never reaches its `finally`. The next
+    # server sweeps .rector-warm-<pid> dirs whose pid is gone; one whose pid
+    # is alive (here: this pytest process, standing in for another editor's
+    # server) is kept.
+    exited = subprocess.Popen([sys.executable, "-c", "pass"])
+    exited.wait()
+    dead = project / "src" / f".rector-warm-{exited.pid}"
+    live = project / "src" / f".rector-warm-{os.getpid()}"
+    for directory in (dead, live):
+        directory.mkdir()
+        (directory / "Clean.php").write_bytes(b"<?php\n")
+
+    proc = start_server(project, {})
+    try:
+        # Any reply proves startup finished: initialize was answered.
+        assert did_open(proc, (project / "src" / "Clean.php").as_uri())["method"] == "textDocument/publishDiagnostics"
+        assert not dead.exists()
+        assert live.exists()
+    finally:
+        stop_server(proc)
