@@ -833,7 +833,25 @@ final class RectorRunnerStandbyWorkerTest extends TestCase
             // src/RectorRunner.php:1554 comment) is a fatal error before the
             // fallback ever runs, not a graceful skip (self-review finding).
             if (\PHP_OS_FAMILY === 'Windows') {
-                \Dpt\McpRectorWarm\Support\ProcessTree::killTree($daemonPid);
+                // Deliberately NOT ProcessTree::killTree($daemonPid): its Windows
+                // branch runs `taskkill /T /F`, which kills the daemon's WHOLE
+                // process tree -- including the worker -- synchronously, before
+                // this call even returns (ProcessTree.php's own doc comment on
+                // that branch names this exact gap). That would kill the worker
+                // as a side effect of "killing the daemon", not via the watchdog
+                // this test exists to exercise, making the positive control right
+                // below vacuously true for the wrong reason (CI finding on
+                // windows-latest/8.3). `taskkill /F /PID` with no `/T` kills only
+                // the named pid, leaving the worker (and its watchdog) alive for
+                // the watchdog to notice the daemon's death and act on.
+                $null = 'NUL';
+                $killer = proc_open(
+                    ['taskkill', '/F', '/PID', (string) $daemonPid],
+                    [0 => ['file', $null, 'r'], 1 => ['file', $null, 'w'], 2 => ['file', $null, 'w']],
+                    $killerPipes,
+                );
+                self::assertIsResource($killer, 'must be able to spawn taskkill to kill the driver ("daemon") alone');
+                self::assertSame(0, proc_close($killer), 'taskkill /F /PID <daemonPid> (no /T) must succeed');
             } else {
                 self::assertTrue(posix_kill($daemonPid, \SIGKILL), 'must be able to kill -9 the driver ("daemon")');
             }
