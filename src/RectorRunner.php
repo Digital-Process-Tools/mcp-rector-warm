@@ -410,6 +410,13 @@ class RectorRunner implements RunnerInterface
         }
         [$parentSocket, $childSocket] = $sockets;
 
+        // #127: this process's OWN pid, taken before the fork, so the worker
+        // it is about to fork can recognise when THIS daemon is gone (a
+        // kill -9 closes no fd the worker is waiting on mid-call -- see
+        // forkAndExecute()'s orphan check) rather than only when it happens
+        // to be idle between calls (where EOF on $socket already covers it).
+        $daemonPid = \getmypid();
+
         $pid = \pcntl_fork();
         if ($pid === -1) {
             \fclose($parentSocket);
@@ -419,7 +426,7 @@ class RectorRunner implements RunnerInterface
 
         if ($pid === 0) {
             \fclose($parentSocket);
-            $this->serveWorker($childSocket);
+            $this->serveWorker($childSocket, $daemonPid !== false ? $daemonPid : null);
             // serveWorker() always exit()s; this line is unreachable.
         }
 
@@ -490,8 +497,12 @@ class RectorRunner implements RunnerInterface
      * closes the connection (reboot(), or the daemon exiting). Never returns.
      *
      * @param resource $socket
+     * @param int|null $daemonPid #127: this worker's parent daemon's pid, taken
+     *   BEFORE the fork in boot() -- threaded through to forkAndExecute() so its
+     *   wait loop can notice the daemon dying mid-call, not only between calls
+     *   (where EOF on $socket, below, already covers it).
      */
-    private function serveWorker($socket): void
+    private function serveWorker($socket, ?int $daemonPid = null): void
     {
         try {
             $this->bootInPlace();
@@ -523,7 +534,7 @@ class RectorRunner implements RunnerInterface
             // killed", never toward "silently unkillable" (#72).
             $dryRun = !\is_array($request) || ($request['dry_run'] ?? true) === true;
             try {
-                $result = $this->forkAndExecute($argv, $warmBoot, $dryRun);
+                $result = $this->forkAndExecute($argv, $warmBoot, $dryRun, $daemonPid);
             } catch (\Throwable $e) {
                 $result = ['error' => $e->getMessage(), 'error_class' => $e::class];
             }
@@ -634,9 +645,19 @@ class RectorRunner implements RunnerInterface
      * @param bool $dryRun #72 correction: the wait-loop deadline below applies
      *   ONLY when $dryRun is true -- a dryRun:false call must never have its
      *   grandchild killed by --call-timeout, so no deadline is computed for it.
+     * @param int|null $daemonPid #127: this worker's own parent daemon's pid
+     *   (boot()'s pre-fork getmypid(), threaded through serveWorker()). Polled
+     *   in the wait loop below so a daemon killed while THIS call is in
+     *   flight is noticed within roughly ORPHAN_POLL_SECONDS, the same
+     *   mechanism serveProcessWorker() already uses while idle -- rather than
+     *   this worker only learning the daemon is gone once the grandchild
+     *   itself finally returns (its own deadline, or never, when
+     *   $callTimeoutSeconds is 0/$dryRun is false) and this loop falls
+     *   through to the next readFrame($socket), which is the first place EOF
+     *   on the DAEMON socket would otherwise be noticed.
      * @return array{exit_code: int, output: string, warm_boot: bool}
      */
-    private function forkAndExecute(array $argv, bool $warmBoot, bool $dryRun): array
+    private function forkAndExecute(array $argv, bool $warmBoot, bool $dryRun, ?int $daemonPid = null): array
     {
         $sockets = \stream_socket_pair(\STREAM_PF_UNIX, \STREAM_SOCK_STREAM, \STREAM_IPPROTO_IP);
         if ($sockets === false) {
@@ -717,10 +738,24 @@ class RectorRunner implements RunnerInterface
         // whatever default_socket_timeout already governs, unchanged from before
         // #58.
         $deadline = $dryRun ? $this->callDeadlineNs() : null;
-        if ($deadline !== null) {
-            \stream_set_timeout($parentSocket, 1);
-        }
+        // #127: a 1s per-read timeout now runs UNCONDITIONALLY, not only when a
+        // deadline is armed -- this loop must wake up periodically to poll
+        // $daemonPid below even when $deadline is null ($callTimeoutSeconds ==
+        // 0, or $dryRun false), which was previously the exact combination
+        // under which this loop never woke up at all until the grandchild
+        // itself returned. This does not change the deadline check's own
+        // granularity (still 1s -- see the deadline-grace-gap jit-context
+        // rule before touching either number in this file).
+        \stream_set_timeout($parentSocket, 1);
         $raw = '';
+        // #127: throttle the actual liveness check to roughly
+        // ORPHAN_POLL_SECONDS, same rationale as serveProcessWorker()'s idle
+        // poll (a posix_getppid() call is cheap, but the Windows
+        // ProcessTree::isAlive() fallback spawns `tasklist`) -- the 1s
+        // stream timeout above only needs to be shorter than this so the
+        // deadline check keeps its own 1s granularity; the orphan check
+        // itself does not need to run every single tick.
+        $nextOrphanCheckNs = \hrtime(true);
         while (!\feof($parentSocket)) {
             $chunk = \fread($parentSocket, 65536);
             if ($chunk === false || $chunk === '') {
@@ -739,6 +774,28 @@ class RectorRunner implements RunnerInterface
                             "rector call exceeded {$this->callTimeoutSeconds}s (--call-timeout); "
                             . 'the analysis was killed',
                         );
+                    }
+                    if ($daemonPid !== null && \hrtime(true) >= $nextOrphanCheckNs) {
+                        // Same POSIX/Windows split as serveProcessWorker()'s own
+                        // orphan check: a dead daemon's children (this worker,
+                        // and the grandchild it just forked) are reparented at
+                        // once, while the daemon itself can linger as a zombie
+                        // its own parent has not reaped yet -- and a zombie
+                        // still answers kill(pid, 0), so posix_getppid() is the
+                        // reliable signal where it exists.
+                        $orphaned = \function_exists('posix_getppid')
+                            ? \posix_getppid() !== $daemonPid
+                            : ProcessTree::isAlive($daemonPid) === false;
+                        if ($orphaned) {
+                            $this->killAndReap($pid);
+                            \fclose($parentSocket);
+
+                            throw new \RuntimeException(
+                                'the daemon that started this warm worker is gone; '
+                                . 'the in-flight analysis was killed (#127)',
+                            );
+                        }
+                        $nextOrphanCheckNs = \hrtime(true) + self::ORPHAN_POLL_SECONDS * 1_000_000_000;
                     }
                     continue;
                 }
@@ -1169,15 +1226,33 @@ class RectorRunner implements RunnerInterface
      * where an unquoted value ends at the first "reserved" character (confirmed
      * empirically: an unquoted -d user_agent=Mozilla/5.0 (X11; Linux) silently
      * truncates to "Mozilla/5.0 " with no forwarding error at all -- caught by an
-     * independent end-to-end review). Wrapping in double quotes disables that
-     * special-character handling entirely, so this always wraps, never only when a
-     * "risky" character is spotted -- a plain value like "15" round-trips through
-     * "15" unchanged too (also confirmed empirically), so there is no plain case
-     * worth special-casing. Backslash is escaped before quote specifically so a
-     * value ending in a backslash cannot swallow the closing quote.
+     * independent end-to-end review). Wrapping disables that special-character
+     * handling entirely, so this always wraps, never only when a "risky"
+     * character is spotted.
+     *
+     * Single-quoted raw INI (name='value') is preferred whenever the value has
+     * no single quote in it: unlike a double-quoted INI string, a single-quoted
+     * one is never subject to `${OTHER_DIRECTIVE}`-style interpolation by PHP's
+     * own ini parser, and it has no escape processing at all, so a value ending
+     * in a backslash (or containing one anywhere) round-trips unchanged with no
+     * escaping needed. That is exactly what a forwarded literal value needs: an
+     * independent E2E review of #129 found that a literal `${VAR}` inside a
+     * forwarded double-quoted value gets silently expanded by the standby
+     * worker's own INI parser rather than passed through as the literal
+     * four-character sequence it was in the parent daemon (#130).
+     *
+     * A value containing a literal single quote cannot use that form (there is
+     * no escape for it inside single quotes), so it falls back to the original
+     * double-quoted + backslash/quote-escaped form. Backslash is escaped before
+     * quote in that fallback specifically so a value ending in a backslash
+     * cannot swallow the closing quote.
      */
     private static function quoteIniValue(string $value): string
     {
+        if (!\str_contains($value, "'")) {
+            return "'" . $value . "'";
+        }
+
         return '"' . \str_replace(['\\', '"'], ['\\\\', '\\"'], $value) . '"';
     }
 

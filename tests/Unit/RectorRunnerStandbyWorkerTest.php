@@ -373,7 +373,7 @@ final class RectorRunnerStandbyWorkerTest extends TestCase
             $args = $method->invoke(null);
 
             self::assertContains('-d', $args);
-            self::assertContains("precision=\"{$changed}\"", $args, 'must fire: a directive changed on the daemon must be forwarded, quoted per PHP\'s own ini-value parser');
+            self::assertContains("precision='{$changed}'", $args, 'must fire: a directive changed on the daemon must be forwarded, single-quoted raw INI per #130 since a plain number has no single quote in it');
             self::assertStringNotContainsString(
                 'default_mimetype=',
                 implode('|', $args),
@@ -427,9 +427,9 @@ final class RectorRunnerStandbyWorkerTest extends TestCase
         $args = json_decode($out, true);
         self::assertIsArray($args, "probe output must be JSON: {$out}");
         self::assertContains(
-            "precision=\"{$changed}\"",
+            "precision='{$changed}'",
             $args,
-            'a REAL CLI -d flag on the current process must be forwarded (quoted per PHPs own ini-value parser), not just a runtime ini_set() call',
+            'a REAL CLI -d flag on the current process must be forwarded (single-quoted raw INI per #130, since a plain number has no single quote in it), not just a runtime ini_set() call',
         );
     }
 
@@ -519,6 +519,130 @@ final class RectorRunnerStandbyWorkerTest extends TestCase
             json_encode($raw),
             $out,
             'a value containing "(", "=", ";" and a literal quote must survive a real child process unchanged (scheduler repro, #125 follow-up)',
+        );
+    }
+
+    /**
+     * Shared helper for the #130 round-trip cases below: forwards $raw via
+     * ini_set('user_agent', ...), reads back the -d argument
+     * collectIniOverrideArgs() produces for it, feeds that argument to a real
+     * php subprocess, and returns what THAT process's ini_get('user_agent')
+     * reports. Mirrors testAForwardedValueWithReservedCharactersAndAQuoteSurvivesARealChildProcess's
+     * round trip exactly, factored out so each #130 case states only its own
+     * value and assertion.
+     */
+    private static function roundTripUserAgentThroughARealChildProcess(string $raw): string
+    {
+        $previous = ini_get('user_agent');
+        ini_set('user_agent', $raw);
+
+        $userAgentArg = null;
+        try {
+            $method = new \ReflectionMethod(RectorRunner::class, 'collectIniOverrideArgs');
+            $method->setAccessible(true);
+            $args = $method->invoke(null);
+
+            foreach ($args as $i => $arg) {
+                if ($arg === '-d' && isset($args[$i + 1]) && str_starts_with($args[$i + 1], 'user_agent=')) {
+                    $userAgentArg = $args[$i + 1];
+                    break;
+                }
+            }
+        } finally {
+            ini_set('user_agent', $previous);
+        }
+
+        self::assertNotNull($userAgentArg, 'must fire: a runtime-changed user_agent must be forwarded');
+
+        $descriptors = [0 => ['pipe', 'r'], 1 => ['pipe', 'w'], 2 => ['pipe', 'w']];
+        $proc = proc_open(
+            [\PHP_BINARY, '-d', $userAgentArg, '-r', 'echo json_encode(ini_get("user_agent"));'],
+            $descriptors,
+            $pipes,
+        );
+        self::assertIsResource($proc);
+        fclose($pipes[0]);
+        $out = (string) stream_get_contents($pipes[1]);
+        $err = (string) stream_get_contents($pipes[2]);
+        fclose($pipes[1]);
+        fclose($pipes[2]);
+        $code = proc_close($proc);
+
+        self::assertSame(0, $code, "child must exit cleanly: stderr={$err}");
+
+        $decoded = json_decode($out, true);
+        self::assertIsString($decoded, "child output must decode to a string: {$out}");
+
+        return $decoded;
+    }
+
+    /**
+     * #130: an independent E2E review of #129 found that a literal `${VAR}`
+     * inside a forwarded double-quoted -d value gets silently expanded by the
+     * standby worker's own INI parser -- so a value containing that exact
+     * four/five-character sequence must still come back byte-for-byte, not
+     * with `${nosuchdirective}` replaced by something else (typically empty).
+     */
+    public function testAForwardedValueContainingLiteralDollarBraceSurvivesARealChildProcess(): void
+    {
+        $raw = 'literal ${nosuchdirective} here';
+
+        self::assertSame(
+            $raw,
+            self::roundTripUserAgentThroughARealChildProcess($raw),
+            'a literal ${VAR}-shaped sequence must survive a real child process unchanged, not be interpolated by the ini parser (#130)',
+        );
+    }
+
+    /**
+     * #130: single-quoted raw INI has no escape processing at all, so a value
+     * containing a backslash anywhere (not just trailing) must round-trip with
+     * the backslash itself unchanged -- no doubling, no stripping.
+     */
+    public function testAForwardedValueContainingABackslashSurvivesARealChildProcess(): void
+    {
+        $raw = 'C:\\Users\\test\\rector.php';
+
+        self::assertSame(
+            $raw,
+            self::roundTripUserAgentThroughARealChildProcess($raw),
+            'a value containing a backslash must survive a real child process unchanged (#130)',
+        );
+    }
+
+    /**
+     * #130: the double-quoted fallback escapes a trailing backslash specifically
+     * so it cannot swallow the closing quote; the single-quoted form taken by
+     * this same value must not need that escaping and must still round-trip the
+     * literal trailing backslash unchanged (the Windows-path shape named in the
+     * issue).
+     */
+    public function testAForwardedValueEndingInATrailingBackslashSurvivesARealChildProcess(): void
+    {
+        $raw = 'C:\\Users\\test\\';
+
+        self::assertSame(
+            $raw,
+            self::roundTripUserAgentThroughARealChildProcess($raw),
+            'a value ending in a trailing backslash must survive a real child process unchanged (#130)',
+        );
+    }
+
+    /**
+     * #130: a value containing a literal single quote cannot use the new
+     * single-quoted raw form (no escape exists for it there), so it must still
+     * fall back to the original double-quoted + escaped form and round-trip
+     * unchanged -- this is the pre-existing #125 coverage, re-asserted here so
+     * the #130 fallback branch itself is directly exercised too.
+     */
+    public function testAForwardedValueContainingASingleQuoteFallsBackToDoubleQuotedFormAndSurvives(): void
+    {
+        $raw = "it's a literal quote";
+
+        self::assertSame(
+            $raw,
+            self::roundTripUserAgentThroughARealChildProcess($raw),
+            'a value containing a single quote must fall back to double-quoted+escaped form and still survive unchanged (#130)',
         );
     }
 

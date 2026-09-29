@@ -1490,6 +1490,144 @@ final class RectorRunnerTest extends TestCase
             'a non-UTF-8 bootstrap path must not turn a successful boot into a reported failure: got ' . var_export($encoded, true),
         );
     }
+
+    /**
+     * #127: a kill -9 of the DAEMON (this instance's own process, from the
+     * worker's point of view) while a call is in flight must be noticed by the
+     * worker within roughly ORPHAN_POLL_SECONDS, not only once the in-flight
+     * grandchild eventually finishes (its own deadline, or -- as reproduced
+     * here with $callTimeoutSeconds=0 -- never). The daemon here is a REAL
+     * subprocess (not this test process, which cannot safely kill -9 itself):
+     * a small driver script boots a worker via boot() (a real pcntl_fork()),
+     * reports the worker's own pid, then starts a call whose execute()
+     * override sleeps -- simulating an in-flight analysis -- before this test
+     * SIGKILLs the driver ("daemon") process and polls how long the reported
+     * worker pid keeps answering kill(pid, 0).
+     */
+    public function testWarmWorkerExitsPromptlyWhenItsDaemonIsKilledMidCall(): void
+    {
+        if (!\function_exists('posix_kill') || !\function_exists('pcntl_fork')) {
+            self::markTestSkipped('posix_kill/pcntl_fork unavailable in this environment');
+        }
+
+        $tmp = sys_get_temp_dir() . '/rector-runner-127-daemon-kill-test-' . bin2hex(random_bytes(8));
+        mkdir($tmp);
+        file_put_contents(
+            $tmp . '/rector.php',
+            "<?php\n\ndeclare(strict_types=1);\n\nuse Rector\\Config\\RectorConfig;\n\nreturn RectorConfig::configure();\n",
+        );
+
+        $projectRoot = dirname(__DIR__, 2);
+        $driverScript = $tmp . '/driver.php';
+        file_put_contents(
+            $driverScript,
+            "<?php\n"
+            . "declare(strict_types=1);\n"
+            . 'require ' . var_export($projectRoot . '/vendor/autoload.php', true) . ";\n"
+            . 'chdir(' . var_export($tmp, true) . ");\n"
+            . "\$_SERVER['argv'] = ['rector'];\n"
+            . "\$runner = new class(0) extends \\Dpt\\McpRectorWarm\\RectorRunner {\n"
+            . "    protected function execute(array \$argv, bool \$warmBoot): array\n"
+            . "    {\n"
+            . "        if ((\$argv[1] ?? null) === 'wedge') {\n"
+            . "            sleep(10);\n"
+            . "        }\n\n"
+            . "        return ['exit_code' => 0, 'output' => '', 'warm_boot' => \$warmBoot];\n"
+            . "    }\n\n"
+            . "    public function bootPublic(): void\n"
+            . "    {\n"
+            . "        \$this->boot();\n"
+            . "    }\n"
+            . "};\n"
+            . "\$runner->bootPublic();\n"
+            . "\$ref = new \\ReflectionProperty(\\Dpt\\McpRectorWarm\\RectorRunner::class, 'workerPid');\n"
+            . "\$ref->setAccessible(true);\n"
+            . "echo 'WORKER_PID=' . \$ref->getValue(\$runner) . \"\\n\";\n"
+            . "fflush(STDOUT);\n"
+            . "\$runner->run(['rector', 'wedge'], true);\n",
+        );
+
+        $descriptors = [0 => ['pipe', 'r'], 1 => ['pipe', 'w'], 2 => ['pipe', 'w']];
+        $proc = proc_open([\PHP_BINARY, $driverScript], $descriptors, $pipes);
+        self::assertIsResource($proc, 'must be able to spawn the driver ("daemon") subprocess');
+        fclose($pipes[0]);
+
+        try {
+            // Read the single "WORKER_PID=<n>" line the driver prints right
+            // after boot() -- before it starts the 10s-sleeping call.
+            $deadline = microtime(true) + 15.0;
+            $workerPid = null;
+            $buffer = '';
+            while ($workerPid === null && microtime(true) < $deadline) {
+                $line = fgets($pipes[1]);
+                if ($line === false) {
+                    break;
+                }
+                $buffer .= $line;
+                if (preg_match('/WORKER_PID=(\d+)/', $line, $m) === 1) {
+                    $workerPid = (int) $m[1];
+                }
+            }
+            self::assertNotNull($workerPid, "driver never reported a worker pid; stdout so far: {$buffer}");
+            self::assertTrue(
+                posix_kill($workerPid, 0),
+                'must fire: the reported worker pid must genuinely be alive right after boot()',
+            );
+
+            $status = proc_get_status($proc);
+            self::assertIsArray($status);
+            $daemonPid = (int) $status['pid'];
+
+            // Give the driver a brief moment to actually enter the sleep(10)
+            // call (send the request frame, worker forks the grandchild)
+            // before killing it -- this is what makes it "mid-call", not
+            // merely "right after boot".
+            usleep(300_000);
+
+            self::assertTrue(posix_kill($daemonPid, \SIGKILL), 'must be able to kill -9 the driver ("daemon")');
+
+            // Positive control for the poll itself: the worker pid must still
+            // exist at least once right after the kill -- otherwise a broken
+            // poll (or a pid reused instantly) would pass this test for free
+            // by finding "no process" from the very first check.
+            self::assertTrue(
+                posix_kill($workerPid, 0),
+                'must fire: the worker must still exist immediately after the kill -- otherwise the poll below is vacuous',
+            );
+
+            $pollDeadline = microtime(true) + 8.0;
+            $stillAlive = true;
+            while (microtime(true) < $pollDeadline) {
+                if (!posix_kill($workerPid, 0)) {
+                    $stillAlive = false;
+                    break;
+                }
+                usleep(100_000);
+            }
+            $elapsed = 8.0 - max(0.0, $pollDeadline - microtime(true));
+
+            self::assertFalse(
+                $stillAlive,
+                "the warm worker must exit once its daemon is killed -9 mid-call, within a few seconds -- "
+                . 'still alive after 8s (#127)',
+            );
+            self::assertLessThan(
+                5.0,
+                $elapsed,
+                "the warm worker took {$elapsed}s to exit after its daemon was killed -9 mid-call -- "
+                . 'expected roughly ORPHAN_POLL_SECONDS, not tens of seconds (#127)',
+            );
+        } finally {
+            @posix_kill($workerPid ?? 0, \SIGKILL);
+            fclose($pipes[1]);
+            fclose($pipes[2]);
+            @proc_terminate($proc, 9);
+            proc_close($proc);
+            unlink($driverScript);
+            unlink($tmp . '/rector.php');
+            rmdir($tmp);
+        }
+    }
 }
 
 /**
