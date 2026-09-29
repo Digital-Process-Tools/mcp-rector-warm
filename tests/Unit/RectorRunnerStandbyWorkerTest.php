@@ -373,7 +373,7 @@ final class RectorRunnerStandbyWorkerTest extends TestCase
             $args = $method->invoke(null);
 
             self::assertContains('-d', $args);
-            self::assertContains("precision={$changed}", $args, 'must fire: a directive changed on the daemon must be forwarded');
+            self::assertContains("precision=\"{$changed}\"", $args, 'must fire: a directive changed on the daemon must be forwarded, quoted per PHP\'s own ini-value parser');
             self::assertStringNotContainsString(
                 'default_mimetype=',
                 implode('|', $args),
@@ -427,9 +427,9 @@ final class RectorRunnerStandbyWorkerTest extends TestCase
         $args = json_decode($out, true);
         self::assertIsArray($args, "probe output must be JSON: {$out}");
         self::assertContains(
-            "precision={$changed}",
+            "precision=\"{$changed}\"",
             $args,
-            'a REAL CLI -d flag on the current process must be forwarded, not just a runtime ini_set() call',
+            'a REAL CLI -d flag on the current process must be forwarded (quoted per PHPs own ini-value parser), not just a runtime ini_set() call',
         );
     }
 
@@ -459,6 +459,66 @@ final class RectorRunnerStandbyWorkerTest extends TestCase
         self::assertFalse(
             $method->invoke(null, null, null),
             'must not fire: nothing to forward when the current value itself is null',
+        );
+    }
+
+    /**
+     * Blocking finding from a second independent E2E review of this branch:
+     * forwarded -d values were not quoted at all, so PHPs OWN ini-value parser
+     * (the identical parser php.ini itself uses) silently truncates at the
+     * first "reserved" character rather than raising a forwarding error. The
+     * schedulers own repro: -d user_agent=Mozilla/5.0 (X11; Linux) truncated
+     * to "Mozilla/5.0 " with a syntax error on the remainder -- confirmed
+     * empirically before this fix. This drives the FULL round trip
+     * end-to-end: set a value containing "(", "=", ";" and a literal quote
+     * together (matching the spirit of the schedulers repro plus an
+     * embedded quote), get the exact -d argument collectIniOverrideArgs()
+     * produces for it, then feed THAT argument to a real php subprocess and
+     * confirm the value comes back byte-for-byte unchanged.
+     */
+    public function testAForwardedValueWithReservedCharactersAndAQuoteSurvivesARealChildProcess(): void
+    {
+        $previous = ini_get('user_agent');
+        $raw = 'Mozilla/5.0 (X11; rv=1.0; note="quoted")';
+        ini_set('user_agent', $raw);
+
+        $userAgentArg = null;
+        try {
+            $method = new \ReflectionMethod(RectorRunner::class, 'collectIniOverrideArgs');
+            $method->setAccessible(true);
+            $args = $method->invoke(null);
+
+            foreach ($args as $i => $arg) {
+                if ($arg === '-d' && isset($args[$i + 1]) && str_starts_with($args[$i + 1], 'user_agent=')) {
+                    $userAgentArg = $args[$i + 1];
+                    break;
+                }
+            }
+        } finally {
+            ini_set('user_agent', $previous);
+        }
+
+        self::assertNotNull($userAgentArg, 'must fire: a runtime-changed user_agent must be forwarded');
+
+        $descriptors = [0 => ['pipe', 'r'], 1 => ['pipe', 'w'], 2 => ['pipe', 'w']];
+        $proc = proc_open(
+            [\PHP_BINARY, '-d', $userAgentArg, '-r', 'echo json_encode(ini_get("user_agent"));'],
+            $descriptors,
+            $pipes,
+        );
+        self::assertIsResource($proc);
+        fclose($pipes[0]);
+        $out = (string) stream_get_contents($pipes[1]);
+        $err = (string) stream_get_contents($pipes[2]);
+        fclose($pipes[1]);
+        fclose($pipes[2]);
+        $code = proc_close($proc);
+
+        self::assertSame(0, $code, "child must exit cleanly: stderr={$err}");
+        self::assertSame(
+            json_encode($raw),
+            $out,
+            'a value containing "(", "=", ";" and a literal quote must survive a real child process unchanged (scheduler repro, #125 follow-up)',
         );
     }
 

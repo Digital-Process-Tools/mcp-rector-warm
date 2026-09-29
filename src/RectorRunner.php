@@ -1157,10 +1157,28 @@ class RectorRunner implements RunnerInterface
                 continue;
             }
             $args[] = '-d';
-            $args[] = $name . '=' . $current;
+            $args[] = $name . '=' . self::quoteIniValue($current);
         }
 
         return $args;
+    }
+
+    /**
+     * Quote a -d value the way PHP own ini-value parser needs it, not the way a
+     * shell would: -d values go through the identical parser php.ini itself uses,
+     * where an unquoted value ends at the first "reserved" character (confirmed
+     * empirically: an unquoted -d user_agent=Mozilla/5.0 (X11; Linux) silently
+     * truncates to "Mozilla/5.0 " with no forwarding error at all -- caught by an
+     * independent end-to-end review). Wrapping in double quotes disables that
+     * special-character handling entirely, so this always wraps, never only when a
+     * "risky" character is spotted -- a plain value like "15" round-trips through
+     * "15" unchanged too (also confirmed empirically), so there is no plain case
+     * worth special-casing. Backslash is escaped before quote specifically so a
+     * value ending in a backslash cannot swallow the closing quote.
+     */
+    private static function quoteIniValue(string $value): string
+    {
+        return '"' . \str_replace(['\\', '"'], ['\\\\', '\\"'], $value) . '"';
     }
 
     private function spawnProcWorker(): void
