@@ -363,8 +363,23 @@ final class LspServer
         // re-appending its own URI and reversing $activityOrder for NEXT
         // time, which would otherwise silently undo this fix on any second
         // config change with no real didOpen/didSave in between.
+        //
+        // #106 rebase fix: activityOrder is only touched by didOpen/didSave
+        // (diagnoseDocument with touchActivity: true) -- a document that has
+        // ONLY ever received a didChange (buffer edit, no open/save yet)
+        // has a documentVersions entry but never lands in activityOrder.
+        // Appending the documentVersions keys not already covered keeps
+        // such a buffer-only document from being silently skipped here
+        // (it would otherwise never get requeued on a config change).
+        $uris = array_reverse($this->activityOrder);
+        foreach (array_keys($this->documentVersions) as $uri) {
+            if (!in_array($uri, $uris, true)) {
+                $uris[] = $uri;
+            }
+        }
+
         $frames = [];
-        foreach (array_reverse($this->activityOrder) as $uri) {
+        foreach ($uris as $uri) {
             // #106: a document with an unsaved buffer is re-diagnosed from
             // that buffer, not from disk -- due now, run by the loop.
             if (isset($this->buffers[$uri])) {
