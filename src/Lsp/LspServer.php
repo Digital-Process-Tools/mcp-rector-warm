@@ -321,7 +321,37 @@ final class LspServer
 
             unset($this->pendingDeadlines[$uri]);
             $version = $this->documentVersions[$uri] ?? null;
-            $result = $this->diagnostics->diagnoseBuffer(self::uriToPath($uri), $this->buffers[$uri]);
+            $path = self::uriToPath($uri);
+
+            // #131: parity with diagnoseDocument()'s #111 cold-boot progress
+            // and $hasBootedOnce bookkeeping -- a client that sends
+            // textDocument/didChange without ever having sent didOpen for
+            // this document reaches ONLY this path, and its debounced run
+            // is just as much a "first diagnose" as diagnoseDocument()'s
+            // own. Decided once per URI actually diagnosed here (never for
+            // an iteration skipped by the guard above), so begin/end either
+            // both fire or neither does, exactly like diagnoseDocument().
+            $reportProgress = $this->canReportProgress && !$this->hasBootedOnce;
+            $this->hasBootedOnce = true;
+
+            $frames = [];
+            $progressRefused = false;
+            if ($reportProgress) {
+                $this->emit($this->progressCreate(), $frames);
+                $progressRefused = $this->isProgressCreateRefused();
+                if (!$progressRefused) {
+                    $this->emit(
+                        $this->progressBegin('Rector: warming up', 'Rector: analysing ' . basename(str_replace('\\', '/', $path))),
+                        $frames,
+                    );
+                }
+            }
+
+            $result = $this->diagnostics->diagnoseBuffer($path, $this->buffers[$uri]);
+
+            if ($reportProgress && !$progressRefused) {
+                $this->emit($this->progressEnd(), $frames);
+            }
 
             $this->readyResults[$uri] = ['version' => $version, 'result' => $result];
         }
