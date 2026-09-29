@@ -1124,10 +1124,14 @@ final class LspServerTest extends TestCase
     }
 
     /**
-     * Positive control for the test above: without the client declaring
-     * `window.workDoneProgress`, nothing progress-shaped may be sent -- a
-     * silent no-op here must never be indistinguishable from "the feature
-     * ran and chose to say nothing".
+     * Self-review correction (Explore pass): this is a companion/negative
+     * case, not a "positive control" -- it asserts the ABSENCE of an
+     * effect under conditions where the effect was never expected to fire,
+     * so it would pass unchanged even with the whole #111 feature deleted.
+     * It still earns its place alongside the test above: together they
+     * pin BOTH branches of the capability check, so a future edit that
+     * makes progress fire unconditionally (dropping the capability gate
+     * entirely) is caught here rather than only by the positive case.
      */
     public function testNoProgressIsSentWhenClientLacksTheCapability(): void
     {

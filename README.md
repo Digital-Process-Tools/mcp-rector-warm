@@ -219,9 +219,13 @@ loop (nothing can race it there today), kept as defense-in-depth for a future
 async/pipelined transport. When the client declares `window.workDoneProgress`,
 the server reports it ("Rector: warming up" / "Rector: analysing" plus the
 file) around the very first diagnose only -- the one cold-boot call, roughly
-1.3-1.8s -- since every later call is already warm; a `$/cancelRequest` for a
-`textDocument/codeAction` whose id has not been dispatched yet is honoured
-with a "Request cancelled" error instead of running it (#111).
+1.3-1.8s -- since every later call is already warm. A `$/cancelRequest` for a
+`textDocument/codeAction` whose id has not been dispatched yet is answered
+with a "Request cancelled" error rather than run -- protocol-correct, but,
+same as the stale-result discard above, inert in today's shipped binary: a
+conforming client only cancels an id it already sent a request for, and this
+server answers one message at a time, so that cancellation always arrives
+after the request's own response was already written (#111).
 
 On `initialized` the server also asks the client (via
 `client/registerCapability`) to watch `rector.php` and `composer.lock` and

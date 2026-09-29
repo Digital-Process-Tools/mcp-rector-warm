@@ -140,10 +140,20 @@ final class LspServer
 
         if ($method === 'textDocument/codeAction') {
             // #111: honour a $/cancelRequest received for this exact id
-            // before it was dispatched -- the read loop handles one message
-            // at a time (see the class docblock), so this can only ever
-            // fire for a request whose cancelRequest notification the
-            // client happened to get onto the wire first.
+            // before it was dispatched. Self-review correction (Explore
+            // pass): a conforming client only ever sends $/cancelRequest
+            // for an id it already used on an outgoing request, and
+            // bin/rector-warm-lsp's main loop reads and fully handles one
+            // message at a time (see diagnoseDocument()'s stale-result
+            // comment below) -- so a real editor's cancelRequest for
+            // codeAction id X always arrives AFTER that request's response
+            // was already written, never before. This branch is therefore
+            // unreachable in the shipped binary today, exactly like the
+            // stale-version-discard branch it sits next to; kept as
+            // defense-in-depth (protocol-correct now) for whenever this
+            // loop stops being strictly synchronous, and exercised in
+            // LspServerTest only via a directly-reordered handle() call
+            // that no real client produces.
             if ($id !== null && isset($this->cancelledRequestIds[self::idKey($id)])) {
                 unset($this->cancelledRequestIds[self::idKey($id)]);
 
