@@ -347,7 +347,7 @@ final class LspServer
         $frames = [];
         if ($reportProgress) {
             $frames[] = $this->progressCreate();
-            $frames[] = $this->progressBegin('Rector: warming up', 'Rector: analysing ' . basename($path));
+            $frames[] = $this->progressBegin('Rector: warming up', 'Rector: analysing ' . basename(str_replace('\\', '/', $path)));
         }
 
         $result = $this->diagnostics->diagnose($path);

@@ -1094,6 +1094,36 @@ final class LspServerTest extends TestCase
     }
 
     /**
+     * Self-review finding (oss:auditor pass): the progress message built
+     * `basename($path)` directly, but a UNC uri (#99) makes `uriToPath()`
+     * return a backslash-joined `\\host\share\...` path, and PHP's
+     * `basename()` only treats `\` as a separator on native Windows --
+     * on macOS/Linux this returned the WHOLE path, not the filename.
+     * `isWatchedConfigFile()` already normalizes with
+     * `str_replace('\\', '/', $path)` before its own `basename()` call for
+     * exactly this reason; the progress message now does the same.
+     */
+    public function testProgressMessageShowsOnlyTheFilenameForAUncPath(): void
+    {
+        $server = new LspServer('1.0.0', self::fakeSource([]));
+
+        $server->handle([
+            'jsonrpc' => '2.0',
+            'id' => 1,
+            'method' => 'initialize',
+            'params' => ['capabilities' => ['window' => ['workDoneProgress' => true]]],
+        ]);
+
+        $responses = $server->handle([
+            'jsonrpc' => '2.0',
+            'method' => 'textDocument/didOpen',
+            'params' => ['textDocument' => ['uri' => 'file://myserver/share/Sample.php', 'version' => 1]],
+        ]);
+
+        self::assertSame('Rector: analysing Sample.php', $responses[1]['params']['value']['message']);
+    }
+
+    /**
      * Positive control for the test above: without the client declaring
      * `window.workDoneProgress`, nothing progress-shaped may be sent -- a
      * silent no-op here must never be indistinguishable from "the feature
