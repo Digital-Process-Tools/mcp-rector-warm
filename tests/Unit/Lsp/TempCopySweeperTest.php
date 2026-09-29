@@ -174,4 +174,64 @@ final class TempCopySweeperTest extends TestCase
             self::removeTree($externalRoot);
         }
     }
+
+    /**
+     * #144: an NTFS junction (`mklink /J`) is a distinct Windows
+     * reparse-point type from the symlink #142's guards above were proven
+     * against -- `mklink /J` needs no elevated privilege, unlike `mklink
+     * /D`. PHP's is_link() is documented reliable for POSIX and Windows
+     * symlinks; its behaviour on a junction is the open question this
+     * guards. Windows-only: there is no junction concept to create
+     * elsewhere.
+     */
+    public function testSweepDirectoryDoesNotFollowAJunctionedCandidateOnWindows(): void
+    {
+        if (PHP_OS_FAMILY !== 'Windows') {
+            self::markTestSkipped('NTFS junctions only exist on Windows.');
+        }
+
+        $externalRoot = sys_get_temp_dir() . '/mcp-rector-sweep-external-' . bin2hex(random_bytes(4));
+        mkdir($externalRoot, 0o700, true);
+        $externalFile = $externalRoot . '/Outside.txt';
+        file_put_contents($externalFile, "not part of the workspace\n");
+
+        $pid = self::deadPid();
+        $junctionPath = $this->root . '/vendor/pkg/.rector-warm-' . $pid;
+        mkdir(dirname($junctionPath), 0o700, true);
+        self::createJunction($externalRoot, $junctionPath);
+
+        // Positive control, same run: a real stale directory (no junction
+        // involved) is still removed -- proves the guard didn't just start
+        // refusing every candidate.
+        $realStale = $this->plant('vendor/pkg2/.rector-warm-' . $pid);
+
+        try {
+            TempCopySweeper::sweepDirectory($this->root . '/vendor/pkg');
+            TempCopySweeper::sweepDirectory($this->root . '/vendor/pkg2');
+
+            self::assertFileExists($externalFile, 'a junctioned candidate must not have its target swept');
+            self::assertDirectoryDoesNotExist($realStale, 'a real stale directory (no junction) must still be removed');
+        } finally {
+            // Removed as a link, never recursed into (following it a second
+            // time would be the exact bug under test), and before its target
+            // is removed: rmdir() removes a junction without touching its
+            // target, same as it does for a directory symlink on Windows.
+            self::removeLink($junctionPath);
+            self::removeTree($externalRoot);
+        }
+    }
+
+    /**
+     * `mklink /J` needs no elevated privilege, unlike `mklink /D`. Uses
+     * cmd.exe's mklink directly -- PHP's symlink() cannot create a
+     * junction, and link() creates a hardlink, a different reparse type
+     * again.
+     */
+    private static function createJunction(string $target, string $link): void
+    {
+        $output = [];
+        $exitCode = 0;
+        exec(sprintf('mklink /J %s %s 2>&1', escapeshellarg($link), escapeshellarg($target)), $output, $exitCode);
+        self::assertSame(0, $exitCode, 'could not create the test junction: ' . implode("\n", $output));
+    }
 }
