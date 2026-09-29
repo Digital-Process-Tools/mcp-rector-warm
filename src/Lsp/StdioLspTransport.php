@@ -76,6 +76,89 @@ final class StdioLspTransport
         return $decoded;
     }
 
+    /**
+     * #106: whether a message can be read without blocking, waiting up to
+     * $timeoutSeconds for one to arrive -- the synchronous loop's debounce
+     * timer. stream_select() also reports a stream whose next frame already
+     * sits in PHP's own read buffer (read() pulls whole chunks through
+     * fgets()), not only one with bytes pending in the kernel, so a second
+     * frame that arrived in the same write as the first is not missed. EOF
+     * counts as readable: the following read() returns null.
+     *
+     * Windows: select() there only works on sockets (used as-is for a
+     * socket), and for a pipe PHP
+     * either fails or reports the handle as always ready -- the second would
+     * make the loop block in read() and never fire the debounce. So on
+     * Windows this polls instead: PHP's own read buffer
+     * (`unread_bytes`), then the bytes waiting in the pipe (fstat()'s size,
+     * which Windows fills from PeekNamedPipe for a pipe), every 5 ms until
+     * the timeout. If neither can see pending input, the debounce still
+     * fires on time and a message that arrived meanwhile is read right
+     * after, so the only loss is superseding a run in flight.
+     */
+    public function waitForInput(float $timeoutSeconds): bool
+    {
+        $timeoutSeconds = max(0.0, $timeoutSeconds);
+
+        if ($this->hasBufferedInput()) {
+            return true;
+        }
+
+        if (PHP_OS_FAMILY === 'Windows' && !$this->isSocket()) {
+            return $this->pollForInput($timeoutSeconds);
+        }
+
+        $seconds = (int) floor($timeoutSeconds);
+        $microseconds = min(999_999, (int) round(($timeoutSeconds - $seconds) * 1_000_000));
+
+        $read = [$this->in];
+        $write = null;
+        $except = null;
+        $ready = @stream_select($read, $write, $except, $seconds, $microseconds);
+
+        if ($ready === false) {
+            return $this->pollForInput($timeoutSeconds);
+        }
+
+        return $ready > 0;
+    }
+
+    /** Windows' select() does handle sockets; only pipes and files need polling. */
+    private function isSocket(): bool
+    {
+        return str_contains(strtolower((string) (stream_get_meta_data($this->in)['stream_type'] ?? '')), 'socket');
+    }
+
+    private function hasBufferedInput(): bool
+    {
+        $meta = stream_get_meta_data($this->in);
+
+        return ($meta['unread_bytes'] ?? 0) > 0;
+    }
+
+    private function pollForInput(float $timeoutSeconds): bool
+    {
+        $deadline = microtime(true) + $timeoutSeconds;
+
+        while (true) {
+            if ($this->hasBufferedInput()) {
+                return true;
+            }
+
+            $stat = @fstat($this->in);
+            if (is_array($stat) && ($stat['size'] ?? 0) > 0) {
+                return true;
+            }
+
+            $remaining = $deadline - microtime(true);
+            if ($remaining <= 0.0) {
+                return false;
+            }
+
+            usleep((int) min(5_000, max(1, $remaining * 1_000_000)));
+        }
+    }
+
     public function write(array $message): void
     {
         $body = json_encode($message, JSON_UNESCAPED_SLASHES);
