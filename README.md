@@ -336,6 +336,14 @@ unrecognised command name gets the standard "Method not found" shape too. A
 workspace with nothing to fix still answers the request, just with no
 `workspace/applyEdit` sent.
 
+The fix itself is computed from disk, so a file the server knows has an
+unsaved (dirty) buffer -- a `textDocument/didChange` the editor has not yet
+saved -- is skipped rather than fixed: applying a disk-derived edit there
+would silently discard the unsaved edits (#140). The command's own result
+lists any skipped URIs under `skippedDirtyBuffers` so the client can tell
+this happened, rather than the fix silently going nowhere. A file that is
+open but not dirty is unaffected and still gets fixed.
+
 Out of scope: `workspace/configuration` and multi-root workspaces (#107).
 
 For the architecture, the design decisions behind it, correctness (the warm

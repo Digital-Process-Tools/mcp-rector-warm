@@ -1070,6 +1070,17 @@ final class LspServer
      * fix silently undelivered, which is exactly the failure mode the
      * issue calls out.
      *
+     * #140: the fix itself is computed from disk (via `diagnoseWorkspace()`
+     * -- there is no per-URI buffer override on this path), so a file the
+     * client has an unsaved (dirty) buffer for is skipped rather than
+     * fixed: applying a disk-derived edit there would silently discard the
+     * unsaved edits, and there is no tracked buffer version to put on the
+     * `OptionalVersionedTextDocumentIdentifier` that would let the client
+     * detect the mismatch itself. Skipped URIs are reported back in the
+     * command's own result (`skippedDirtyBuffers`), never silently
+     * dropped. A file that is open but not dirty is unaffected and still
+     * gets its fix.
+     *
      * @param array<string, mixed> $params
      * @return list<array<string, mixed>>
      */
@@ -1169,8 +1180,23 @@ final class LspServer
 
         $documentChanges = [];
         $changes = [];
+        $skippedDirtyBuffers = [];
         foreach ($outcome['files'] as $absolutePath => $fixes) {
             $uri = self::pathToUri($absolutePath);
+
+            // #140: an unsaved (dirty) buffer for this URI means the fix
+            // just computed from disk no longer matches what the client
+            // has open -- applying it would silently discard the unsaved
+            // edits. Skip it and report it, rather than overwrite it. A
+            // URI that is open but NOT in $this->buffers (never opened,
+            // or opened with no didChange since) is not at risk and still
+            // gets its fix below.
+            if (isset($this->buffers[$uri])) {
+                $skippedDirtyBuffers[] = $uri;
+
+                continue;
+            }
+
             $edits = array_map(
                 static fn (array $fix): array => ['range' => $fix['range'], 'newText' => $fix['newText']],
                 $fixes,
@@ -1182,13 +1208,24 @@ final class LspServer
                     // fix (this never goes through codeAction's per-URI
                     // $fixesVersions) -- null is the documented "not
                     // tracked" value for an OptionalVersionedTextDocument
-                    // Identifier.
+                    // Identifier. Safe here: the skip above already
+                    // removed every URI this server knows has unsaved
+                    // buffer content, which is the only case "version":
+                    // null could silently clobber.
                     'textDocument' => ['uri' => $uri, 'version' => null],
                     'edits' => $edits,
                 ];
             } else {
                 $changes[$uri] = $edits;
             }
+        }
+
+        $resultPayload = $skippedDirtyBuffers === [] ? null : ['skippedDirtyBuffers' => $skippedDirtyBuffers];
+
+        if ($documentChanges === [] && $changes === []) {
+            $frames[] = $this->result($id, $resultPayload);
+
+            return $frames;
         }
 
         $this->emit([
@@ -1203,7 +1240,7 @@ final class LspServer
             ],
         ], $frames);
 
-        $frames[] = $this->result($id, null);
+        $frames[] = $this->result($id, $resultPayload);
 
         return $frames;
     }
