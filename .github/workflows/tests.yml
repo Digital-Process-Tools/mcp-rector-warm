@@ -213,12 +213,12 @@ jobs:
           E2E_PYTHON: python
         run: tests/E2E/run.sh
 
-  # #109: the README's editor snippets rot silently unless something runs
+  # #109: docs/lsp.md's editor snippets rot silently unless something runs
   # them for real -- #94 found the native Neovim `vim.lsp.config` snippet
   # broken on every Neovim that HAS vim.lsp.config, and nothing before this
-  # job noticed. Extracts the snippet straight out of README.md (marker
+  # job noticed. Extracts the snippet straight out of docs/lsp.md (marker
   # comments, tests/E2E/nvim/extract_snippet.py) rather than a frozen copy,
-  # so a future edit to the README is exactly what this job re-runs against.
+  # so a future edit to docs/lsp.md is exactly what this job re-runs against.
   # ubuntu only, per the issue's own "macOS if cheap" -- kept to the pinned
   # minimum version plus whatever Neovim's own `stable` tap currently ships,
   # not a full OS x version cross product.

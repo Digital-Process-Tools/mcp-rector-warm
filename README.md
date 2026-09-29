@@ -4,41 +4,59 @@
 
 # mcp-rector-warm
 
-> **Stop paying [Rector](https://getrector.com/)'s cold-start tax on every edit.**
-> A warm-process [MCP](https://modelcontextprotocol.io/) server that keeps the [Rector](https://github.com/rectorphp/rector) container hot. ~9× faster per call. Works with every MCP client.
+> **[Rector](https://getrector.com/) is great. Its cold start is not.**
+> Every `rector process` rebuilds its container before a single rule fires: **7 seconds per file** on a real production codebase.
+> Keep Rector warm, and every call after the first takes **0.68s**. Same output as cold. **~10× faster.**
+
+Two ways in, one warm engine:
+
+- an **[MCP server](#rector-in-your-ai-agent)** that gives your AI agent a fast Rector;
+- a **[language server](#rector-in-your-editor)** that puts Rector's fixes in your editor.
 
 [![Tests](https://github.com/Digital-Process-Tools/mcp-rector-warm/actions/workflows/tests.yml/badge.svg)](https://github.com/Digital-Process-Tools/mcp-rector-warm/actions/workflows/tests.yml)
 [![Packagist](https://img.shields.io/packagist/v/dpt/mcp-rector-warm.svg)](https://packagist.org/packages/dpt/mcp-rector-warm)
 [![PHP](https://img.shields.io/badge/php-8.2%2B-blue)](https://www.php.net/)
 [![License](https://img.shields.io/badge/license-Community-brightgreen)](LICENSE)
 
-[Why](#why) • [Install](#install) • [Use it](#use-it) • [Benchmark](#benchmark) • [Compatibility](#compatibility) • [How it works](#how-it-works) • [FAQ](#faq)
+[Who it's for](#who-its-for) • [Get started](#get-started) • [AI agent](#rector-in-your-ai-agent) • [Editor](#rector-in-your-editor) • [Validation loop](#rector-in-your-validation-loop) • [Numbers](#the-numbers) • [Docs](#documentation)
 
 ---
 
-## Why
+## Who it's for
 
-[Rector](https://getrector.com/) is one of the most useful tools in modern PHP — automated refactoring, type fixes, version upgrades. It is also one of the slowest to **start**.
+| You… | You get | Use |
+|------|---------|-----|
+| let an **AI agent** refactor PHP | Rector as a tool your agent calls after every edit | [MCP server](#rector-in-your-ai-agent) |
+| want **Rector in your editor** | Rector's fixes flagged as you type, one click to apply | [Language server](#rector-in-your-editor) |
+| run Rector in a **validation loop** | A warm Rector you call file by file, without paying the boot each time | [MCP server](#rector-in-your-validation-loop) |
 
-Every `rector process foo.php` pays the same toll: autoloader bootstrap, [DI container](https://github.com/rectorphp/rector/blob/main/src/DependencyInjection) build, ruleset compile. **~3-5 seconds before a single rule fires.** For agents and validators that run Rector after every edit, that cold-start cost dominates wall time.
+Both ship in one package. Run one, or both side by side.
 
-`mcp-rector-warm` keeps a warm Rector container ready across calls. **First call pays the boot once. Every subsequent call reuses it** -- the container itself always lives in a forked worker, never in the long-lived daemon process (#31), so re-editing `rector.php` between calls can never crash the server.
+## Same answers. Just faster.
 
-## Install
+- **~10× faster per call.** 0.68s warm against 7.02s cold, at the median.
+- **Identical output.** All 20 benchmark files gave the same answer warm and cold. CI runs every end-to-end scenario through both and compares. Nothing to re-check.
+- **One-time boot.** The first call costs about one cold run (~6.4s), once per session. An idle server costs nothing.
+- **Edit `rector.php` freely.** Config changes apply on the next call. No restart.
+
+## Get started
 
 ```bash
 composer global require dpt/mcp-rector-warm
 ```
 
-Makes `mcp-rector-warm` available on `$PATH`.
+That's the install. PHP 8.2+, Rector ^2.4 comes along as a normal Composer dependency. Now pick where Rector should run.
 
-Requires PHP 8.2+. Pulls Rector ^2.4 as a real Composer dep (no phar gymnastics).
+## Rector in your AI agent
 
-## Use it
+**For:** anyone who lets Claude, Copilot agent mode, Cursor, Cline or another agent refactor PHP.
 
-### Claude Desktop
+- **Your agent runs Rector after every edit**, without waiting 7 seconds each time.
+- **Preview first.** The agent sees the diff; files change only when it asks to write.
+- **Stays inside your project.** Paths outside the working directory are refused.
+- **Any MCP client.** Claude Desktop, VS Code, Cursor, Cline, Continue, Zed.
 
-Edit `~/Library/Application Support/Claude/claude_desktop_config.json` (macOS) or `%APPDATA%\Claude\claude_desktop_config.json` (Windows):
+Add it to Claude Desktop (`~/Library/Application Support/Claude/claude_desktop_config.json` on macOS, `%APPDATA%\Claude\claude_desktop_config.json` on Windows):
 
 ```json
 {
@@ -54,504 +72,73 @@ Edit `~/Library/Application Support/Claude/claude_desktop_config.json` (macOS) o
 }
 ```
 
-Restart Claude. Ask: *"Run Rector on src/Foo.php"*.
+Restart Claude and ask: *"Run Rector on src/Foo.php"*. Done.
 
-### VS Code (Copilot chat / agent mode)
+**[Full setup →](docs/mcp.md)** VS Code and other clients, the `rector_process` tool, timeouts.
 
-VS Code 1.102+ runs MCP servers natively. Add `.vscode/mcp.json` to the project:
+## Rector in your editor
 
-```json
-{
-  "servers": {
-    "rector": {
-      "type": "stdio",
-      "command": "${workspaceFolder}/vendor/bin/mcp-rector-warm",
-      "args": [
-        "--working-dir=${workspaceFolder}",
-        "--config=${workspaceFolder}/rector.php"
-      ]
-    }
-  }
-}
+**For:** PHP developers who want Rector's suggestions where they write code, not in a terminal afterwards.
+
+- **Fixes appear as you type**, on unsaved edits too, not only on save.
+- **One click to apply** one rule, the whole file, or the whole project, without touching files that have unsaved changes.
+- **A broken file never looks clean.** A syntax error or a bad config shows up as an error.
+- **Change `rector.php`, see it at once.** Open files re-check when the config changes.
+
+Point your editor's LSP client at:
+
+```bash
+rector-warm-lsp --working-dir=/path/to/project
 ```
 
-With `composer global require`, use `"command": "mcp-rector-warm"` instead. If Composer's `vendor-dir` is not `vendor/`, adjust the path.
+for PHP files, with `composer.json` / `rector.php` as root markers.
 
-This gives Rector to chat and agent mode. It does **not** run Rector on save or underline code in the editor. That needs a language server -- see [Language server](#language-server) below.
+**[Full setup →](docs/lsp.md#editor-setup)** copy-paste configs for Neovim and Helix (tested), Sublime Text and PhpStorm.
 
-### Cline / Continue / Cursor / Zed / any MCP client
+## Rector in your validation loop
 
-Same `command` + `args` shape. The server speaks plain MCP over stdio — no client-specific glue.
+**For:** teams and tools that run Rector after every generated change, as a check.
 
-### Standalone
+- **Start once, call per file.** No boot on each check after the first.
+- **Plain MCP over stdio.** Drive it from any MCP client library (Python, Node, Go…).
+- **Failures are real errors.** A bad path, a missing config or a Rector exception comes back as an error, never as a silent pass.
 
 ```bash
 mcp-rector-warm --working-dir=/path/to/project --config=/path/to/project/rector.php
 ```
 
-Reads MCP JSON-RPC on stdin, writes responses on stdout.
+**[Full setup →](docs/mcp.md)**
 
-## Options
+## The numbers
 
-| Flag | Default | Meaning |
-|------|---------|---------|
-| `--working-dir=PATH` | current directory | `chdir()`s here before anything else runs; `rector_process` refuses any path outside it. |
-| `--config=PATH` | Rector's own resolution (`rector.php`/`rector.dist.php` in `--working-dir`) | Passed straight through to Rector; not parsed by mcp-rector-warm itself. |
-| `--call-timeout=SECONDS` | `600` | Hard per-call deadline, independent of PHP's `default_socket_timeout` ([#32](https://github.com/Digital-Process-Tools/mcp-rector-warm/issues/32)), for a `dryRun: true` (analysis-only) call: a call still working past `default_socket_timeout` keeps going, but one that outruns `--call-timeout` is killed and reported as an error instead of blocking the caller forever ([#58](https://github.com/Digital-Process-Tools/mcp-rector-warm/issues/58)). `0` disables it. Measured on a real project: 0.3-2.4s per warm call, ~10s for the first (container-building) call — 600s never cuts off real work. **This deadline never applies to a `dryRun: false` (write) call** ([#72](https://github.com/Digital-Process-Tools/mcp-rector-warm/issues/72)): the kill is an unconditional SIGKILL with no grace for an in-flight file write, and Rector writes each changed file by truncating it and then writing the new content, so a kill landing mid-write would leave that file truncated with no backup. Rather than risk that, a write call is simply never bound by `--call-timeout` at all — trade-off: a genuinely wedged write call can now hang indefinitely, in exchange for never truncating a file it is writing. This is a real change from v0.5.0, not a return to "the pre-#58 status quo": before #58 introduced any deadline, a wedged write still timed out the socket read after PHP's `default_socket_timeout` (~60s) and the daemon reported it as a closed connection while continuing to serve other calls. At this release a wedged write blocks the single-threaded warm daemon indefinitely -- every later call from any client hangs too, not just the wedged one, until the daemon is restarted. |
+**~10× faster per call.** The first call boots Rector once, costing about the same as one cold run (6.4s). Every call after that takes 0.68s (median) instead of 7.0s cold.
 
-## Benchmark
+| Setup | median | p95 |
+|-------|--------|-----|
+| Cold `rector process`, every call | 7.02s | 9.00s |
+| Warm, first call (one-time boot, once per session) | 6.4s | |
+| **Warm, every later call** | **0.68s** | **2.40s** |
 
-Measured with `tools/warm-vs-cold.py` on a real private production codebase (PHP 8.2.0, Apple Silicon, v0.5.0 at `4902c3d`): 20 files sampled across the tree, each run once through one warm server session and once through a fresh `rector process --dry-run`, cold runs serial so neither side shares CPU with the other.
+20 files from a real production codebase: **144s cold, 30s warm** including the one-time boot. All 20 warm answers matched the cold ones.
 
-| Setup | median | p95 | Notes |
-|-------|--------|-----|-------|
-| Cold `rector process`, one file | 7.02s | 9.00s | autoloader + container + ruleset each time |
-| **mcp-rector-warm, later calls** | **0.68s** | **2.40s** | container reused |
-| mcp-rector-warm, start + handshake | 0.1s | | the container is not built yet |
-| mcp-rector-warm, first call | 6.4s | | builds the container: costs about one cold run, paid **once** per session |
+**[Method, caveats, reproduce it on your project →](docs/benchmark.md)**
 
-**~10× faster per call at the median.** 20 files: **144s cold → 30s warm**, first call included. All 20 warm answers matched the cold ones.
-
-The start and first-call rows come from a separate probe: 3 fresh sessions, each starting with the same small file, which takes 5.9-7.3s cold. The first call took 6.37-6.42s each time, and a second, different file then took 0.28-0.31s. The server builds the container on the first call, not at start, so an idle server costs nothing. The first call costs about the same as running Rector once without the server.
-
-Numbers vary with project size and rule set. The win is the cold-start amortization, not magic. Reproduce on your own project:
+## Install
 
 ```bash
-python3 tools/warm-vs-cold.py --project /path/to/project --files 'src/**/*.php' --limit 20 --jobs 1 --out /tmp/wvc
+composer global require dpt/mcp-rector-warm
 ```
 
-The script needs the Python MCP client from `tests/E2E/requirements.txt`, and writes the timings to `report.md` in `--out`.
-
-## Compatibility
-
-| Client | Status |
-|--------|--------|
-| Claude Desktop | ✅ stdio MCP |
-| VS Code (Copilot chat / agent mode) | ✅ stdio MCP, `.vscode/mcp.json` |
-| Cline (VS Code) | ✅ stdio MCP |
-| Continue (VS Code / JetBrains) | ✅ stdio MCP |
-| Cursor | ✅ stdio MCP |
-| Zed | ✅ stdio MCP |
-| Custom (Python/Node/Go MCP clients) | ✅ standard protocol |
-
-Any client that speaks MCP stdio works. No custom protocol.
-
-## Tools exposed
-
-### `rector_process`
-
-Run Rector on a path.
-
-| Argument | Type | Default | Description |
-|----------|------|---------|-------------|
-| `path` | string | required | Absolute path to file or directory under the working dir |
-| `dryRun` | bool | `true` | Preview changes only. `false` writes them. `--call-timeout` never applies to a `dryRun: false` call ([#72](https://github.com/Digital-Process-Tools/mcp-rector-warm/issues/72)) — see the `--call-timeout` row above for the trade-off. |
-
-Returns:
-
-```json
-{
-  "exit_code": 0,
-  "output": "...",
-  "warm_boot": true
-}
-```
-
-`warm_boot: true` ⇒ container reused. `false` ⇒ first call (cold boot just finished).
-Without pcntl (Windows), `true` means the call was served by a worker process booted
-before it arrived -- see [Windows and other PHP builds without pcntl](#windows-and-other-php-builds-without-pcntl).
-
-**Failure is reported as an MCP tool error.** A rejected path (outside the
-working dir), a nonexistent path, a project with no `rector.php` and no
-`--config` given at startup, or an exception raised inside Rector itself all
-come back as a tool result with `isError: true`, so an MCP host can see the
-failure and surface it instead of treating a broken call as a success. The
-structured details survive in `structuredContent`:
-
-```json
-{
-  "exit_code": -1,
-  "output": "",
-  "warm_boot": false,
-  "error": "rector_process: path is outside the configured working directory.",
-  "error_class": "SecurityError",
-  "trace": ""
-}
-```
-
-A missing config reports `error_class: "RuntimeException"` with a message naming
-`--config` and `rector.php`. The daemon does not restart itself: add a
-`rector.php` and call again, and it boots normally, since a failed boot never
-marks the container warm.
-
-The tool also declares its behavior via MCP tool annotations: `readOnlyHint:
-false` (a non-dry-run call writes files), `destructiveHint: true`,
-`idempotentHint: false`, `openWorldHint: false`.
-
-## Language server
-
-`bin/rector-warm-lsp` (#53) is a second entry point on the same warm core as
-the MCP server, speaking [LSP](https://microsoft.github.io/language-server-protocol/)
-over stdio instead of MCP -- for editors that want Rector diagnostics as you
-type and on save, rather than an agent calling a tool. Same `--working-dir` flag as
-`bin/mcp-rector-warm`; `--config` works the same passive way (left in
-`$_SERVER['argv']` for `RectorConfigsResolver` to pick up).
-
-On `didOpen`/`didSave` it runs `rector_process` with `dryRun: true` on that
-file and publishes one diagnostic per changed hunk (severity Information,
-`source: "rector"`, message = the rule name(s) attributed to that hunk, or
-`"Rector fix"` when none could be pinned to it specifically), narrowed to the
-lines the hunk actually changes rather than the surrounding diff context, and
-attributed to the hunk closest to where the rule reported its change. A hunk
-with no real change at all (observed for a CRLF-only difference) is skipped
-rather than published as a no-op fix. A failed call -- a syntax error, an
-out-of-root path, or any other Rector/tool-level error -- is published too,
-as an Error-severity diagnostic with no quickfix behind it, so a broken file
-is never indistinguishable from a clean one (#90, #91).
-`textDocument/codeAction` over a diagnostic offers `Apply Rector: <rule>` (or
-`Apply Rector: Rector fix` for the same no-rule-pinned case) -- a
-`WorkspaceEdit` built straight from Rector's own unified diff, no full-file
-read needed -- plus a whole-file "Apply all Rector fixes" action. `didClose`
-clears a file's diagnostics. Results are pinned to the document version that
-requested them, so a stale one is discarded if a newer `didSave` for the same
-document finishes first -- inert in the current strictly-synchronous stdio
-loop (nothing can race it there today), kept as defense-in-depth for a future
-async/pipelined transport. When the client declares `window.workDoneProgress`,
-the server reports it ("Rector: warming up" / "Rector: analysing" plus the
-file) around the very first diagnose only -- the one cold-boot call, roughly
-1.3-1.8s -- since every later call is already warm. `create` and `begin`
-reach the client BEFORE that diagnose runs, not batched together with `end`
-and the diagnostics afterwards (PR #128 review): the server writes each
-frame to the transport the moment it is ready, wired that way from
-`bin/rector-warm-lsp`. Before committing to `begin`, the server WAITS (up
-to 200ms, `LspServer::CREATE_REPLY_TIMEOUT_SECONDS`, added to the one-time
-cold-boot cost above) for the client's own reply to `create`; only an
-explicit success reply lets `begin`/`end` through -- an explicit refusal,
-the window elapsing with no reply at all, or some other message arriving
-first all skip progress for that round rather than assume it is fine, per
-the LSP spec. A `$/cancelRequest` for a
-`textDocument/codeAction` whose id has not been dispatched yet is answered
-with a "Request cancelled" error rather than run -- protocol-correct, but,
-same as the stale-result discard above, inert in today's shipped binary: a
-conforming client only cancels an id it already sent a request for, and this
-server answers one message at a time, so that cancellation always arrives
-after the request's own response was already written (#111).
-
-**Unsaved buffers (#106).** The server declares full text sync
-(`textDocumentSync.change: 1`), so it diagnoses what you are typing, not only
-what is saved. After each `didChange` it waits for 500 ms of quiet, then runs
-Rector on the buffer: the text is written to a temp copy **inside the
-project**, in a hidden `.rector-warm-<pid>/` directory next to the original
-and under the original's file name, so autoload, `rector.php` and the
-working-directory containment apply exactly as for the saved file. The
-server also passes the original path along, and the worker asks Rector's own
-`Skipper` about it: a `withSkip()` entry that matches the original (exact
-path, relative path, a glob, or a rule skipped for that path) is applied to
-the copy too. The copy and its directory are deleted when the run ends,
-including when Rector reports an error. A server killed outright
-(`kill -9`) cannot do that, so each server removes, at startup, any
-`.rector-warm-<pid>` directory whose pid is no longer running. The startup
-walk goes 8 levels deep and skips `vendor/`, `node_modules/` and VCS
-directories. Before each run, the server also removes such directories next
-to the file it is diagnosing. A directory whose pid is still running belongs
-to another server and is kept. Diagnostics and quick fixes come back on the
-original URI, and error messages name the original path. The result is the
-one a cold `vendor/bin/rector process --dry-run` gives on a file with the
-same content at the same path.
-
-`rector.php` and `composer.lock` are configuration, not code Rector
-refactors, so their unsaved buffers are not diagnosed. They take effect when
-saved. A file-watcher event for a path inside a `.rector-warm-<pid>/`
-directory is the server's own temp copy and is ignored.
-
-Every result carries the document `version` it was computed for. A result is
-published only if that version is still the latest: a change that arrives
-while Rector runs on the previous version supersedes it, and the loop reads
-that change before it publishes. Code actions are offered only while the
-buffer is still at the version their diagnostics describe. For a client that
-declares `workspace.workspaceEdit.documentChanges`, each edit also names that
-version, so the client rejects it if the buffer has moved on. `didSave`
-diagnoses the saved file and cancels a pending buffer run; `didClose` drops
-the buffer.
-
-Limits of the buffer mode:
-
-- Applying the original path's skips relies on two private lists in
-  Rector's skip resolvers. Their names are the same from Rector 2.4.0 to the
-  locked 2.6.7 (checked in Rector's source). On 2.4 to 2.5.1, which have no
-  `Skipper::matchSkip()`, rule-scoped skips are checked through
-  `shouldSkipElementAndFilePath()` instead (reasoned from the source, not
-  run). If a future Rector renames those lists, the buffer is diagnosed
-  without those skips rather than failing; the notice goes to stderr only
-  when the call runs cold, since the forked worker has no stderr.
-- An exact-path `withSkip()` entry for a file that has **never been saved to
-  disk** does not apply to its unsaved buffer: Rector drops non-glob skip
-  paths that do not exist. Once the file is saved, the skip applies, as it
-  does for a cold run.
-- `didOpen` still reads the file from disk. A buffer that is already
-  modified when it is opened is diagnosed from its first change.
-- Only `file:` URIs are diagnosed. An `untitled:` buffer has no project
-  path, so it gets no diagnostics.
-- The debounce reads stdin with a timeout. On Linux and macOS that is
-  `stream_select`. `select()` on Windows works only on sockets, so there the
-  server polls instead: every 5 ms it checks PHP's read buffer and the bytes
-  waiting in the pipe. The windows-latest CI leg runs the E2E test in which a
-  change sent while Rector runs supersedes that run, and it passes there. If
-  a pipe could not report waiting bytes, the debounce would still fire on
-  time, and the only loss would be that superseding.
-- Editors, watchers and `git status` can see the temp directory while a run
-  is in progress.
-
-On `initialized` the server also asks the client (via
-`client/registerCapability`) to watch `rector.php` and `composer.lock` and
-report changes through `workspace/didChangeWatchedFiles`. When one of those
-files changes, every currently-open document is re-diagnosed, most-recently
-opened-or-saved first (#115) -- so the document you are actively working in
-gets fresh diagnostics before ones that merely happened to be opened
-earlier; the total time across every open document is unchanged. The warm
-worker already reloads the config on its next call on its own, but nothing
-else would trigger that next call for a document the editor is not also
-re-saving, so diagnostics would otherwise keep reflecting the old config
-until the editor restarted the server (#101). The registration is only sent
-to a client whose `initialize` declared
-`workspace.didChangeWatchedFiles.dynamicRegistration: true`, as the LSP spec
-requires; with any other client the config is still reloaded on the next
-`didSave` (the warm worker compares a content hash of the config on every
-call), just not pushed to documents the editor does not re-save (#105).
-
-**Workspace-wide fix (#102).** `workspace/executeCommand` advertises one
-command, `rector-warm.fixWorkspace`, only when the client's `initialize`
-declared `workspace.applyEdit`. Running it dry-runs the warm worker over the
-whole working directory (the same `RectorTool::process()`/`file_diffs` oracle
-`textDocument/codeAction` uses per file) and sends every changed file back in
-ONE `workspace/applyEdit` request -- `documentChanges` when the client
-declared `workspace.workspaceEdit.documentChanges`, the plain `changes` map
-otherwise. `window.workDoneProgress` clients see `$/progress` around the run
-("Rector: fixing workspace" / "Rector: analysing the workspace") on its own
-token, separate from the cold-boot one above, so the two never mix in a
-client that is watching for either specifically. A client that never
-declared `workspace.applyEdit` gets a JSON-RPC error (there would be nowhere
-to send the fix) rather than a command that silently does nothing; an
-unrecognised command name gets the standard "Method not found" shape too. A
-workspace with nothing to fix still answers the request, just with no
-`workspace/applyEdit` sent.
-
-The fix itself is computed from disk, so a file the server knows has an
-unsaved (dirty) buffer -- a `textDocument/didChange` the editor has not yet
-saved -- is skipped rather than fixed: applying a disk-derived edit there
-would silently discard the unsaved edits (#140). The command's own result
-lists any skipped URIs under `skippedDirtyBuffers` so the client can tell
-this happened, rather than the fix silently going nowhere. A file that is
-open but not dirty is unaffected and still gets fixed.
-
-Out of scope: `workspace/configuration` and multi-root workspaces (#107).
-
-For the architecture, the design decisions behind it, correctness (the warm
-== cold oracle) and current benchmark numbers -- written for someone
-evaluating this in five minutes, see
-[docs/lsp-for-rector-maintainers.md](docs/lsp-for-rector-maintainers.md).
-
-### Editor setup
-
-Every editor below spawns the same command:
-`rector-warm-lsp --working-dir=/path/to/project` (composer-global install) or
-`vendor/bin/rector-warm-lsp --working-dir=/path/to/project` (local clone),
-filetype `php`, root markers `composer.json` / `rector.php`.
-
-Each editor says whether its snippet was run against a live install, and on
-which versions. Neovim and Helix were tested (macOS, against a fixture
-project: a file with a pending Rector change got one diagnostic plus an
-`Apply Rector: ...` quickfix, and a clean file got none). Sublime Text and
-PhpStorm/LSP4IJ were not.
-
-#### Neovim (0.11.3+, native `vim.lsp.config`)
-
-Tested on Neovim 0.11.3, 0.11.4 and 0.12.5, including starting Neovim outside
-the project directory.
-
-<!-- snippet:nvim-native-config -->
-```lua
--- ~/.config/nvim/lsp/rector.lua   (Neovim 0.11.3+)
--- `cmd` is a function, not a static list: `--working-dir` has to be the
--- resolved project root (matched against root_markers below), not whatever
--- directory Neovim happened to start in.
-return {
-  cmd = function(dispatchers, config)
-    local root = config.root_dir or vim.fn.getcwd()
-    return vim.lsp.rpc.start({ 'rector-warm-lsp', '--working-dir=' .. root }, dispatchers)
-  end,
-  filetypes = { 'php' },
-  root_markers = { 'composer.json', 'rector.php' },
-}
-```
-<!-- /snippet:nvim-native-config -->
-
-<!-- snippet:nvim-native-enable -->
-```lua
--- init.lua
-vim.lsp.enable('rector')
-```
-<!-- /snippet:nvim-native-enable -->
-
-This needs 0.11.3 or later: Neovim 0.11.0 to 0.11.2 do not pass `config` to a
-function `cmd`, so the snippet fails there with
-`attempt to index local 'config' (a nil value)`. On those versions, and on
-0.10, use the nvim-lspconfig setup below.
-
-#### Neovim (0.10 to 0.11.2, via [nvim-lspconfig](https://github.com/neovim/nvim-lspconfig))
-
-Tested on Neovim 0.10.4, 0.11.0 and 0.12.5 with nvim-lspconfig HEAD (a9bb4d5),
-including starting Neovim outside the project directory. On 0.10,
-nvim-lspconfig warns that it is dropping 0.10 support in its v3.
-
-Register a custom server before calling `setup`, using `on_new_config` so
-`cmd` picks up each resolved root rather than a fixed `vim.fn.getcwd()`:
-
-```lua
-local lspconfig = require('lspconfig')
-local configs = require('lspconfig.configs')
-if not configs.rector_warm then
-  configs.rector_warm = {
-    default_config = {
-      cmd = { 'rector-warm-lsp' },
-      filetypes = { 'php' },
-      root_dir = lspconfig.util.root_pattern('composer.json', 'rector.php'),
-    },
-    on_new_config = function(new_config, new_root_dir)
-      new_config.cmd = { 'rector-warm-lsp', '--working-dir=' .. new_root_dir }
-    end,
-  }
-end
-lspconfig.rector_warm.setup({})
-```
-
-#### Zed
-
-Zed's stable path for an arbitrary, non-bundled LSP is a small
-[language server extension](https://zed.dev/docs/extensions/languages#language-servers)
-rather than a plain `settings.json` entry -- unlike Neovim/Helix/Sublime, there
-is no documented `settings.json` shape here yet to snippet honestly. Filed as
-a gap for a follow-up rather than guessed at.
-
-#### Helix
-
-Tested on Helix 25.07.1.
-
-<!-- snippet:helix-languages -->
-```toml
-# ~/.config/helix/languages.toml
-[language-server.rector-warm-lsp]
-command = "rector-warm-lsp"
-args = ["--working-dir=."]
-
-[[language]]
-name = "php"
-roots = ["composer.json", "rector.php"]
-language-servers = ["rector-warm-lsp"]
-```
-<!-- /snippet:helix-languages -->
-
-Helix spawns language servers with the workspace root as the working
-directory, so `--working-dir=.` resolves to it. `roots` is needed: Helix's
-default PHP roots are `composer.json` / `index.php`, so a project that has
-only a `rector.php` would otherwise resolve to the git root.
-
-**Open `hx` from the project root, or from inside the project's git
-checkout.** Started from a subdirectory with no `.git` above it, or from
-outside the project, the server gets the wrong root and fails with
-"No rector.php found" or "path is outside the configured working directory".
-That is a limit of Helix's root search, which `roots` cannot fix.
-
-`language-servers = [...]` replaces Helix's default PHP servers rather than
-adding to them, so to keep your usual PHP server list both, e.g.
-`language-servers = ["intelephense", "rector-warm-lsp"]` (reasoned from
-Helix's docs, not run).
-
-#### Sublime Text ([LSP package](https://github.com/sublimelsp/LSP))
-
-**Untested:** not run against a live Sublime Text install. The keys below
-match the LSP package's documented client schema.
-
-```json
-// LSP.sublime-settings
-{
-  "clients": {
-    "rector-warm-lsp": {
-      "enabled": true,
-      "command": ["rector-warm-lsp", "--working-dir=${folder}"],
-      "selector": "source.php"
-    }
-  }
-}
-```
-
-`${folder}` is the window's *first* folder only (reasoned, from
-`window.extract_variables()`): in a multi-folder window the other folders'
-files are outside the working directory, and with no folder open the server
-gets an unusable `--working-dir`.
-
-#### PhpStorm / IntelliJ ([LSP4IJ](https://github.com/redhat-developer/lsp4ij) plugin)
-
-**Untested:** not run against a live PhpStorm/LSP4IJ install; written from
-LSP4IJ's docs.
-
-LSP4IJ has no project-file snippet for an ad hoc server; it is wired through
-its UI: **Settings > Languages & Frameworks > Language Servers > +**, define
-a server with command `rector-warm-lsp --working-dir=$PROJECT_DIR$` and
-file name pattern `*.php`.
-
-## How it works
-
-Three decisions worth knowing:
-
-1. **One daemon per project, not per call -- but the container it holds always lives in a forked worker, never in the daemon itself.** Working dir pins at server startup, keeping `$_SERVER['argv']` clean for `RectorConfigsResolver`. Before every call the runner hashes the resolved `rector.php`/`rector.dist.php` (whichever `RectorConfigsResolver` would pick), every file the config registered via `withBootstrapFiles()`, AND the project's `composer.json` (`withPhpSets()` with no argument reads its `require.php` once at boot to pick its rule sets), and a changed hash on any of them tears the current worker down and forks a brand-new one, so an edit to the config, to a bootstrap file it requires, or to `composer.json`'s PHP constraint takes effect on the next call rather than waiting for a restart. Booting always happens in a process that has never booted before: `rector.php` is a plain PHP file `require`d while building the container, and re-`require`ing it in a process that already required it once is a PHP fatal ("Cannot declare class/function already declared") when the config declares a class or function -- so the daemon process itself never boots the container; it only ever talks to a worker over a socket. Only the main config file, its declared bootstrap files and `composer.json` are hashed; a `rector.php` that `require`s some OTHER shared file directly (not via `withBootstrapFiles()`) is a known limitation -- touch/edit the main config file too to force a reboot after changing what it includes. `composer.json` is watched wholesale, not just its `require.php`: a project whose config never calls bare `withPhpSets()` still reboots on an unrelated `composer.json` edit (a new dependency, a reformat), the same coarse trade-off already accepted for the main config file. The target project's own `vendor/autoload.php` (if present) is loaded once per worker, the same way cold Rector's own CLI loads it for a composer-global install, so a class that only resolves through the project's Composer autoloader is visible to warm calls too; a `composer dump-autoload` mid-session is not picked up until the worker's next reboot.
-
-2. **Parallel mode forcibly disabled (`--debug` flag).** Rector's worker fork model expects `$_SERVER['argv'][0]` to be the rector CLI binary. From an MCP server it isn't, so workers can't respawn. Single-thread analysis only — that's fine for the per-file edit loop this is designed for.
-
-3. **Runtime-prefixed namespace handled.** Rector's bundled Symfony is namespaced `RectorPrefix<date>\\Symfony\\Component\\Console\\...` to avoid dependency conflicts. The runner detects the prefix at boot and resolves Application/Input/Output class names dynamically. Survives Rector version bumps.
-
-4. **A missing config, a config with zero rules, or a project's own `rector.php` printing while it loads, cannot corrupt the MCP stdout.** Rector's CLI treats a missing `rector.php`, or one that loads fine but registers no rules or sets, as friendly onboarding, and Symfony's console output writes straight to the real stdout stream, bypassing an `ob_start()` wrap entirely -- and a project's `rector.php` can `echo`, or trigger a notice/deprecation, while it loads. None of that reaches the JSON-RPC pipe: both a missing config and a config with zero registered rules are refused as a real, reported error *before* any of Rector's own console machinery runs (per call, not at server startup -- a `rector.php` fixed up later just works on the next call), config resolution and container boot run inside an output buffer, and PHP's own error display is pointed at stderr (`display_errors=stderr`).
-
-### Windows and other PHP builds without pcntl
-
-PHP on Windows has no `pcntl`, so there is no fork (the same holds for a build that
-disables `pcntl_fork` in `disable_functions`). The server is still warm there, by a
-different route ([#108](https://github.com/Digital-Process-Tools/mcp-rector-warm/issues/108)):
-right after a call returns, it starts a **standby** `php` worker process that boots the
-Rector container in the background. The next call is served by that already-booted
-worker, which then exits; a fresh standby starts for the call after. Each call still runs
-in a container nothing else was analysed in -- the same guarantee the forked worker gives
--- so the answers match a cold `rector process`.
-
-Reusing one worker process for every call was measured and rejected: 25 of the 55 E2E
-warm-vs-cold scenarios diverged (a dependency's edited method still answered with its old
-return type, and even a second, unedited file was reported as unchanged).
-
-What that costs compared with the fork:
-
-- **The boot has to fit between calls.** A call that arrives while the standby is still
-  booting waits for the rest of that boot -- never longer than a cold run, but not warm
-  either. On a large project (20 files, ~7s boot, PHP 8.2, Apple Silicon): 0.75s per call
-  (p50) with 15s between calls, against 7.4s cold; back-to-back calls with no pause,
-  7.6s against 8.1s cold. The fork path does 0.56s back-to-back on the same files.
-- **The config runs once per call**, as with cold Rector: side effects of loading
-  `rector.php` (clearing a cache, say) happen before every call, not once per session.
-- One idle `php` process holds a booted container between calls, as the forked worker does.
-
-`MCP_RECTOR_WARM_NO_PCNTL=cold` in the server's environment turns this off: every call then
-boots and runs in its own fresh `php` subprocess, as before #108.
-
-## FAQ
-
-**Does this replace `vendor/bin/rector`?** No. Use it from MCP clients (Claude Desktop, agents). For one-off CLI calls the regular binary is still simpler.
-
-**Can it apply changes?** Yes — pass `dryRun: false`. (Rector itself has no `--fix` flag: it writes by default and only previews with `--dry-run`.) This always works, regardless of `--call-timeout` ([#72](https://github.com/Digital-Process-Tools/mcp-rector-warm/issues/72)): the deadline only ever bounds a `dryRun: true` call. A write call is never killed by it — see the `--call-timeout` row's trade-off.
-
-**Why not a phar?** Rector ships as a real Composer library. Phar packaging would just add a runtime cost without a benefit here.
-
-**Memory?** The daemon sets `memory_limit = -1` like Rector's own CLI. Idle daemon ≈ 80MB resident.
-
-**Does it survive Rector version updates?** Probably. The prefix-detection scheme is forward-compatible with new `RectorPrefix<date>` values. Pin a Rector version in your own `composer.json` if you need determinism.
+Puts `mcp-rector-warm` and `rector-warm-lsp` on your `$PATH`. As a project dependency, both are in `vendor/bin/`.
+
+## Documentation
+
+- **[MCP server](docs/mcp.md)**: every client setup, the `rector_process` tool, options, the call timeout, compatibility.
+- **[Language server](docs/lsp.md)**: editor setup, diagnostics, quick-fixes, unsaved buffers, fix-all, limits.
+- **[How it works](docs/how-it-works.md)**: architecture, config reloads, Windows and other PHP builds without pcntl.
+- **[Benchmark](docs/benchmark.md)**: method, full numbers, how to reproduce.
+- **[FAQ](docs/faq.md)**.
+- **[The language server, for the Rector maintainers](docs/lsp-for-rector-maintainers.md)**: design, correctness checks, known limits.
 
 ## Credits
 

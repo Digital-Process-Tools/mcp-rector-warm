@@ -1,6 +1,6 @@
-"""#109: extract_snippet.py pulls a marked fenced block out of README.md
+"""#109: extract_snippet.py pulls a marked fenced block out of docs/lsp.md
 verbatim -- the piece #109's headless-editor smoke test depends on to run
-what the README actually documents, not a copy of it frozen at write time.
+what docs/lsp.md actually documents, not a copy of it frozen at write time.
 """
 
 from __future__ import annotations
@@ -13,7 +13,7 @@ from extract_snippet import SnippetNotFoundError, extract_snippet
 
 HERE = Path(__file__).resolve().parent
 REPO = HERE.parents[2]
-README = REPO / "README.md"
+README = REPO / "docs" / "lsp.md"
 
 
 def test_extracts_the_fenced_block_between_markers():
@@ -57,7 +57,7 @@ def test_marker_present_but_no_fenced_block_inside_raises():
 )
 def test_readme_itself_carries_every_marker_this_smoke_test_needs(marker):
     # This is the regression guard #109 is actually for: if a future edit to
-    # README.md drops or renames one of these markers, this fails here
+    # docs/lsp.md drops or renames one of these markers, this fails here
     # instead of the headless-editor CI job silently skipping that editor.
     text = README.read_text(encoding="utf-8")
     snippet = extract_snippet(text, marker)

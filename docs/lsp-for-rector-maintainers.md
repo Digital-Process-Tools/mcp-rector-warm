@@ -4,7 +4,7 @@ This page is written for the Rector maintainers (part of #51): what
 `bin/rector-warm-lsp` does, how it is built, how its correctness is checked,
 and what it currently costs versus a cold `rector process` call. It is a
 digest of what already exists in this repo -- the [Language server
-section](../README.md#language-server) of the README, [ADR
+docs](lsp.md), [ADR
 0001](decisions/0001-lsp-library-choice.md), and the test suite -- rather
 than a new description of the same mechanism.
 
@@ -62,8 +62,8 @@ an agent calling a tool:
   `skippedDirtyBuffers`.
 
 Editor setup for six clients (Neovim, Helix, Sublime Text, PhpStorm/LSP4IJ,
-plus the generic pattern) is in the README's [Editor
-setup](../README.md#editor-setup) subsection.
+plus the generic pattern) is in [Editor
+setup](lsp.md#editor-setup).
 
 Out of scope: `workspace/configuration` and multi-root workspaces (#107, one
 warm worker per `rector.php` root).
@@ -134,8 +134,8 @@ one escape hatch, reserved for a fixture whose entire point is that warm
 (e.g. #14, where a missing config's own default behaviour is the bug being
 fixed) -- see `CONTRIBUTING.md`'s "Checking against a real project" section
 for the full fixture format. `tools/warm-vs-cold.py` runs the same oracle
-against an arbitrary real project (see the README [Benchmark](../README.md#benchmark)
-section for the command).
+against an arbitrary real project (see [Benchmark](benchmark.md#reproduce-it)
+for the command).
 
 **Known limits.**
 
@@ -161,7 +161,7 @@ section for the command).
 
 ## Numbers
 
-The README's [Benchmark](../README.md#benchmark) section has the
+The [Benchmark](benchmark.md) page has the
 maintained, reproducible baseline (`tools/warm-vs-cold.py`, v0.5.0 on a real
 production codebase): **7.02s cold vs 0.68s warm per call at the median** --
 about 10x, first call included. Reproduce it on any project:

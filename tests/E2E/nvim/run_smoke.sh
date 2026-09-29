@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# #109: headless-Neovim smoke test of README.md's own LSP snippets.
+# #109: headless-Neovim smoke test of docs/lsp.md's own LSP snippets.
 #
 #   tests/E2E/nvim/run_smoke.sh
 #
 # Extracts the native `vim.lsp.config` + `vim.lsp.enable('rector')` snippets
-# straight out of README.md (so this exercises what the README actually
+# straight out of docs/lsp.md (so this exercises what the docs actually
 # says, not a frozen copy of it -- #94 found the native snippet broken on
 # every Neovim that has vim.lsp.config, and docs rot silently unless
 # something runs them), copies the existing lsp-project fixture
@@ -48,8 +48,8 @@ mkdir -p "$XDG_STATE_HOME" "$XDG_DATA_HOME" "$XDG_CACHE_HOME"
 
 config_dir="$scratch/config"
 mkdir -p "$config_dir/lsp"
-"$python" "$here/extract_snippet.py" nvim-native-config "$repo/README.md" > "$config_dir/lsp/rector.lua"
-"$python" "$here/extract_snippet.py" nvim-native-enable "$repo/README.md" > "$config_dir/enable.lua"
+"$python" "$here/extract_snippet.py" nvim-native-config "$repo/docs/lsp.md" > "$config_dir/lsp/rector.lua"
+"$python" "$here/extract_snippet.py" nvim-native-enable "$repo/docs/lsp.md" > "$config_dir/enable.lua"
 
 export PATH="$repo/bin:$PATH"
 
