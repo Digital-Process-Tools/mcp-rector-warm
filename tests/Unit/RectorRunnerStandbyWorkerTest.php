@@ -240,6 +240,150 @@ final class RectorRunnerStandbyWorkerTest extends TestCase
         self::assertLessThan(5.0, $elapsed, "4 silent connections must not stretch a 2s deadline (took {$elapsed}s)");
     }
 
+    /**
+     * #126 part 2: a retired worker (one that already served its call and is
+     * exiting on its own) must remove its own stderr temp file rather than
+     * leaving it for the daemon to reap later -- if the daemon is kill -9d
+     * before that reap ever runs, nothing else would ever unlink it. Nothing
+     * else in this test touches that file: there is no second call (which
+     * would run reapRetiredProcWorkers()), and $runner is still alive (its
+     * own __destruct() has not run), so a disappearance can only be the
+     * worker's own doing.
+     */
+    public function testARetiredWorkerRemovesItsOwnStderrFileWithoutWaitingForTheDaemonToReapIt(): void
+    {
+        $project = $this->makeDependencyProject();
+        $runner = self::noPcntlRunner();
+
+        try {
+            $runner->run(self::argv($project . '/src/Caller.php'));
+
+            $retiredProperty = new \ReflectionProperty(RectorRunner::class, 'retiredProcWorkers');
+            $retiredProperty->setAccessible(true);
+            $retired = $retiredProperty->getValue($runner);
+            self::assertNotEmpty($retired, 'control: the first call must have retired a worker');
+            $proc = $retired[0]['proc'];
+            $stderrFile = $retired[0]['stderr'];
+
+            $deadline = microtime(true) + 15.0;
+            while (proc_get_status($proc)['running'] && microtime(true) < $deadline) {
+                usleep(50_000);
+            }
+            self::assertFalse(proc_get_status($proc)['running'], 'control: the retired worker must actually exit on its own');
+
+            self::assertFileDoesNotExist(
+                $stderrFile,
+                'a retired worker must remove its own stderr file on exit -- if the daemon is killed before it ever reaps this worker, nothing else would (#126)',
+            );
+        } finally {
+            $runner->reboot();
+        }
+    }
+
+    /**
+     * #126 part 1: a call served by an already-warm standby that then times out
+     * must still report it was warm -- isWarm() alone cannot, because the
+     * timeout path discards the worker (discardProcWorker(true)) before the
+     * caller ever asks, so by then isWarm() always says false regardless of
+     * what actually served the call.
+     */
+    public function testATimedOutCallStillReportsItWasServedWarm(): void
+    {
+        $runner = new class(1) extends RectorRunner {
+            protected function canFork(): bool
+            {
+                return false;
+            }
+        };
+
+        $server = stream_socket_server('tcp://127.0.0.1:0', $errno, $errstr);
+        self::assertNotFalse($server);
+        $address = (string) stream_socket_get_name($server, false);
+        $client = @stream_socket_client('tcp://' . $address);
+        self::assertNotFalse($client);
+        $accepted = stream_socket_accept($server, 1);
+        self::assertNotFalse($accepted, 'control: something must actually connect');
+
+        $null = \PHP_OS_FAMILY === 'Windows' ? 'NUL' : '/dev/null';
+        // Stands in for a worker process that is alive but never answers --
+        // forces callProcWorker()'s read to hit the --call-timeout deadline.
+        $proc = proc_open([\PHP_BINARY, '-r', 'sleep(60);'], [0 => ['file', $null, 'r'], 1 => ['file', $null, 'w'], 2 => ['file', $null, 'w']], $pipes);
+        self::assertIsResource($proc);
+        $stderrFile = (string) tempnam(sys_get_temp_dir(), 'wasLastCallWarm-test-');
+
+        $property = new \ReflectionProperty(RectorRunner::class, 'procWorker');
+        $property->setAccessible(true);
+        $property->setValue($runner, [
+            'proc' => $proc,
+            'pid' => (int) proc_get_status($proc)['pid'],
+            'server' => $server,
+            'socket' => $client,
+            'token' => str_repeat('a', 32),
+            'stderr' => $stderrFile,
+            'ready' => true,
+        ]);
+
+        $callProcWorker = new \ReflectionMethod(RectorRunner::class, 'callProcWorker');
+        $callProcWorker->setAccessible(true);
+
+        $threw = null;
+        try {
+            $callProcWorker->invoke($runner, ['rector'], true, true);
+        } catch (\RuntimeException $e) {
+            $threw = $e;
+        } finally {
+            // callProcWorker() itself already discards (and proc_close()s) the
+            // worker on a timeout -- guard against double-closing an already
+            // invalid resource here.
+            @fclose($accepted);
+            if (is_resource($proc)) {
+                proc_terminate($proc, 9);
+                proc_close($proc);
+            }
+            @unlink($stderrFile);
+        }
+
+        self::assertNotNull($threw, 'must fire: nothing ever answers, so the call must time out');
+        self::assertStringContainsString('--call-timeout', $threw->getMessage());
+        self::assertFalse($runner->isWarm(), 'control: the timed-out worker was discarded, so isWarm() now says false');
+        self::assertTrue($runner->wasLastCallWarm(), 'the call WAS served by an already-warm standby before it timed out (#126)');
+    }
+
+    /**
+     * #125: -d flags given to the daemon are lost when it spawns the no-pcntl
+     * standby worker as a brand-new process (proc_open([PHP_BINARY, script])) --
+     * unlike pcntl_fork(), which clones the same process image, ini overrides
+     * included, for free. ini_get_all(null, true)'s local_value diverges from
+     * its global_value for exactly the settings a -d flag (or an early
+     * ini_set(), same effect from proc_open()'s point of view) actually
+     * changed; reconstructing -d flags from that diff is the only portable way
+     * to recover them (there is no reliable, cross-platform way to read back
+     * the original command line on Windows, the platform this whole no-pcntl
+     * path exists for).
+     */
+    public function testIniOverridesActiveOnTheDaemonAreForwardedAsDFlagsToTheStandby(): void
+    {
+        $previous = ini_get('precision');
+        $changed = $previous === '17' ? '15' : '17';
+        ini_set('precision', $changed);
+
+        try {
+            $method = new \ReflectionMethod(RectorRunner::class, 'collectIniOverrideArgs');
+            $method->setAccessible(true);
+            $args = $method->invoke(null);
+
+            self::assertContains('-d', $args);
+            self::assertContains("precision={$changed}", $args, 'must fire: a directive changed on the daemon must be forwarded');
+            self::assertStringNotContainsString(
+                'default_mimetype=',
+                implode('|', $args),
+                'must not fire: a directive nobody touched must never be forwarded',
+            );
+        } finally {
+            ini_set('precision', $previous);
+        }
+    }
+
     private static function isAlive(int $pid): bool
     {
         if (\PHP_OS_FAMILY === 'Windows') {

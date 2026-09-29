@@ -147,7 +147,18 @@ final class RectorTool
             return self::errorResult([
                 'exit_code' => -1,
                 'output' => '',
-                'warm_boot' => $this->runner->isWarm(),
+                // isWarm() alone would misreport here: a --call-timeout kill (or
+                // any other failure that discards the worker) makes it say false
+                // from that point on regardless of what actually served THIS call.
+                // wasLastCallWarm() is captured before that discard, at the point
+                // the call's own warm/cold outcome was decided (#126). It is not
+                // part of RunnerInterface -- only RectorRunner's own worker/
+                // container paths need the distinction; a test double answering
+                // for a whole run() call has no such after-the-fact discard to
+                // guard against.
+                'warm_boot' => $this->runner instanceof RectorRunner
+                    ? $this->runner->wasLastCallWarm()
+                    : $this->runner->isWarm(),
                 'error' => $e->getMessage(),
                 'error_class' => $e::class,
                 'trace' => $e->getTraceAsString(),

@@ -52,6 +52,15 @@ class RectorRunner implements RunnerInterface
     /** @var resource|null Persistent duplex socket to the warm-worker child. */
     private $workerSocket = null;
 
+    /** Whether the call most recently ATTEMPTED (not necessarily completed) was
+     *  served by an already-warm container/worker, captured at the moment $warmBoot
+     *  was decided for that call -- before anything the call itself does (a
+     *  --call-timeout kill, a crash) can tear the worker down. Unlike isWarm(),
+     *  which reports whether a warm worker/container exists RIGHT NOW, this
+     *  survives that teardown, so an error payload built after a failed call can
+     *  still report accurately whether THAT call was warm (#126). */
+    private bool $lastCallWasWarm = false;
+
     /** Absolute path of the main config file (--config, or rector.php/rector.dist.php) as
      *  resolved the last time a worker booted; null if none was found. Refreshed in THIS
      *  (never-booting) process by refreshConfigFileState() -- resolving the path and
@@ -140,6 +149,17 @@ class RectorRunner implements RunnerInterface
     public function isWarm(): bool
     {
         return $this->workerPid !== null || $this->procWorker !== null;
+    }
+
+    /** Whether the call most recently attempted was served by an already-warm
+     *  worker/container -- see $lastCallWasWarm. Distinct from isWarm(), and the
+     *  one to read from an error payload built AFTER a failed call (#126): a
+     *  --call-timeout kill (or any other failure that discards the worker) makes
+     *  isWarm() say false from that point on regardless of what actually served
+     *  the call, while this stays put. */
+    public function wasLastCallWarm(): bool
+    {
+        return $this->lastCallWasWarm;
     }
 
     /** @inheritDoc */
@@ -525,6 +545,7 @@ class RectorRunner implements RunnerInterface
      */
     protected function runForked(array $argv, bool $warmBoot, bool $dryRun): array
     {
+        $this->lastCallWasWarm = $warmBoot;
         \assert($this->workerSocket !== null);
         // #74 follow-up: same missing-flag pattern as the boot handshake frames
         // this file's own encodeHandshakeFrame()/encodeForkResult() guard
@@ -768,6 +789,9 @@ class RectorRunner implements RunnerInterface
      */
     protected function runCold(array $argv, bool $dryRun = true): array
     {
+        // Cold is never warm by definition -- there is no worker to have been
+        // pre-booted before this call started.
+        $this->lastCallWasWarm = false;
         // Both the result (#46) and the child's stdout/stderr (#45) travel through
         // temp files, never through OS pipes. A pipe has a small, fixed OS buffer:
         // reading two of them one after another (the original code) deadlocks the
@@ -1035,6 +1059,41 @@ class RectorRunner implements RunnerInterface
      * non-blocking wait on proc_open() pipes do not work on Windows, which is the
      * platform this path exists for, while sockets behave the same everywhere.
      */
+    /**
+     * The -d ini overrides given to the daemon at startup, reconstructed for
+     * re-passing to a brand-new proc_open() child (#125). Unlike pcntl_fork()
+     * (this file, the other worker path), which clones the SAME process image --
+     * ini overrides included -- for free, the PHP CLI SAPI consumes -d flags before
+     * $_SERVER["argv"] is even populated, so they are simply gone by the time this
+     * process can inspect its own argv; there is also no portable way to read back
+     * the daemon original command line (no /proc on Windows, the platform this
+     * whole no-pcntl path exists for). ini_get_all(null, true) instead diffs each
+     * directive active value against its php.ini master value: a directive a -d
+     * flag (or, with the identical effect from the point of view of proc_open(), an
+     * early ini_set() such as this file own memory_limit override) changed is
+     * exactly the one where the two differ.
+     *
+     * @return list<string>
+     */
+    private static function collectIniOverrideArgs(): array
+    {
+        $args = [];
+        foreach (\ini_get_all(null, true) ?: [] as $name => $info) {
+            if (!\is_array($info)) {
+                continue;
+            }
+            $global = $info['global_value'] ?? null;
+            $local = $info['local_value'] ?? null;
+            if (!\is_string($global) || !\is_string($local) || $global === $local) {
+                continue;
+            }
+            $args[] = '-d';
+            $args[] = $name . '=' . $local;
+        }
+
+        return $args;
+    }
+
     private function spawnProcWorker(): void
     {
         $server = @\stream_socket_server('tcp://127.0.0.1:0', $errno, $errstr);
@@ -1054,7 +1113,11 @@ class RectorRunner implements RunnerInterface
             1 => ['file', \PHP_OS_FAMILY === 'Windows' ? 'NUL' : '/dev/null', 'w'],
             2 => ['file', $stderrFile, 'w'],
         ];
-        $proc = \proc_open([\PHP_BINARY, \dirname(__DIR__) . '/bin/rector-warm-worker.php'], $descriptors, $pipes);
+        $proc = \proc_open(
+            [\PHP_BINARY, ...self::collectIniOverrideArgs(), \dirname(__DIR__) . '/bin/rector-warm-worker.php'],
+            $descriptors,
+            $pipes,
+        );
         if (!\is_resource($proc)) {
             \fclose($server);
             @\unlink($stderrFile);
@@ -1177,6 +1240,10 @@ class RectorRunner implements RunnerInterface
      */
     private function callProcWorker(array $argv, bool $warmBoot, bool $dryRun): array
     {
+        // Captured here, before anything below (a --call-timeout kill, a closed
+        // connection) can discard $this->procWorker: isWarm() alone cannot tell an
+        // error payload built after such a discard whether THIS call was warm (#126).
+        $this->lastCallWasWarm = $warmBoot;
         \assert($this->procWorker !== null && $this->procWorker['socket'] !== null);
         $socket = $this->procWorker['socket'];
         $payload = (string) \json_encode(

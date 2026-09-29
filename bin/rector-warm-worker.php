@@ -55,9 +55,16 @@ if ($socket === false) {
 $daemonPid = is_int($request['daemon_pid'] ?? null) ? $request['daemon_pid'] : null;
 $code = (new RectorRunner())->serveProcessWorker($socket, $request['token'], $daemonPid);
 
-if ($code === RectorRunner::WORKER_EXIT_ORPHANED && is_string($request['stderr_file'] ?? null)) {
-    // The daemon that would have removed our stderr file is gone. Close it first:
-    // Windows cannot delete a file that is still open.
+// Exit code 0 covers two cases: we served our one call and are retiring, or
+// nothing ever arrived (EOF -- the daemon discarded us). Either way we are
+// exiting on our own with nothing more to do, so remove our own stderr file
+// now rather than leaving it for the daemon to reap later (reapRetiredProcWorkers()
+// / stopRetiredProcWorkers()) -- if the daemon is kill -9d before that reap ever
+// runs, nothing else would ever unlink it (#126). A worker that instead exits
+// via WORKER_EXIT_ORPHANED already means the daemon is already gone; the same
+// cleanup applies.
+if (($code === RectorRunner::WORKER_EXIT_ORPHANED || $code === 0) && is_string($request['stderr_file'] ?? null)) {
+    // Close it first: Windows cannot delete a file that is still open.
     fclose(STDERR);
     @unlink($request['stderr_file']);
 }
