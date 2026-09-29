@@ -32,8 +32,21 @@ final class ProcessTree
      * and the caller still waits on it (pcntl_waitpid(), proc_close()) exactly as
      * it did before #112. The descendants are not the caller's children; once
      * their parents die they are reparented and reaped by init/launchd.
+     *
+     * $excludePids (#134): pids to leave alone even if the process table shows
+     * them as $rootPid's own descendants. This exists for a caller that IS
+     * itself one of $rootPid's children (bin/rector-warm-orphan-watchdog.php,
+     * spawned by the very worker process it watches) -- without an exclusion,
+     * the freeze loop below would enumerate that caller as a descendant of its
+     * own target and SIGSTOP it mid-call, before it ever reaches the final
+     * SIGKILL, deadlocking the very kill it is in the middle of performing
+     * (reproduced empirically: the freeze loop's own debug trace stopped dead
+     * between finding the watchdog's pid as a "new" descendant and the next
+     * round, with no further progress ever logged).
+     *
+     * @param list<int> $excludePids
      */
-    public static function killTree(int $rootPid): void
+    public static function killTree(int $rootPid, array $excludePids = []): void
     {
         if ($rootPid <= 0) {
             return;
@@ -41,6 +54,15 @@ final class ProcessTree
         if (\PHP_OS_FAMILY === 'Windows') {
             // /T walks the tree by parent pid, so it must run while the root is
             // still alive -- before the caller's proc_terminate(), never after.
+            // $excludePids is NOT honoured here: taskkill /T takes no per-pid
+            // exclusion, so a caller that IS itself a descendant of $rootPid (the
+            // watchdog is) gets killed along with the rest of the tree on this
+            // branch. Unlike the POSIX path's STOP-then-enumerate freeze loop,
+            // this is not a deadlock risk (taskkill does not suspend anything
+            // mid-scan), only an abrupt exit of a process that was about to call
+            // exit(0) on its own right after this -- harmless in that caller's
+            // one current use, but a real gap if a future caller relies on
+            // surviving its own tree-kill on Windows.
             self::run(['taskkill', '/T', '/F', '/PID', (string) $rootPid]);
 
             return;
@@ -53,14 +75,14 @@ final class ProcessTree
         self::signal([$rootPid], 'STOP');
         $frozen = [];
         for ($round = 0; $round < self::MAX_FREEZE_ROUNDS; $round++) {
-            $new = \array_values(\array_diff(self::descendantsOf($rootPid), $frozen));
+            $new = \array_values(\array_diff(self::descendantsOf($rootPid), $frozen, $excludePids));
             if ($new === []) {
                 break;
             }
             self::signal($new, 'STOP');
             $frozen = \array_merge($frozen, $new);
         }
-        self::signal(\array_merge($frozen, [$rootPid]), 'KILL');
+        self::signal(\array_values(\array_diff(\array_merge($frozen, [$rootPid]), $excludePids)), 'KILL');
     }
 
     /**
@@ -119,6 +141,33 @@ final class ProcessTree
         $out = self::run(['ps', '-o', 'pid=', '-p', (string) $pid]);
 
         return $out === null ? null : \trim($out) !== '';
+    }
+
+    /**
+     * $pid's own parent pid right now, read from the process table (POSIX only --
+     * Windows has no equivalent reparenting-to-init concept to read), or null when
+     * that cannot be told (no proc_open()/`ps`, or $pid itself no longer exists).
+     *
+     * Unlike isAlive($otherPid) probed from a THIRD process, this is not fooled by
+     * a zombie: reparenting to init/launchd happens the instant a process's real
+     * parent dies -- before anyone reaps it -- so a caller watching $pid from
+     * outside (neither $pid's parent nor grandparent) can still notice its parent
+     * dying immediately, the same guarantee posix_getppid() gives a process
+     * checking its OWN parent (see RectorRunner::serveProcessWorker()'s and
+     * forkAndExecute()'s own #127 comments for the zombie caveat this sidesteps).
+     */
+    public static function parentOf(int $pid): ?int
+    {
+        if (\PHP_OS_FAMILY === 'Windows' || $pid <= 0) {
+            return null;
+        }
+        $out = self::run(['ps', '-o', 'ppid=', '-p', (string) $pid]);
+        if ($out === null) {
+            return null;
+        }
+        $trimmed = \trim($out);
+
+        return $trimmed === '' ? null : (int) $trimmed;
     }
 
     /**

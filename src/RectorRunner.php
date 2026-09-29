@@ -1050,7 +1050,10 @@ class RectorRunner implements RunnerInterface
     /** How often an idle standby checks that its daemon is alive. 2s, not less: on
      *  Windows each check starts a `tasklist`. #127: also throttles
      *  forkAndExecute()'s orphan check while a call is IN FLIGHT on the pcntl
-     *  warm-worker path -- not only an idle standby's poll any more. */
+     *  warm-worker path -- not only an idle standby's poll any more. #134: also
+     *  the poll interval bin/rector-warm-orphan-watchdog.php is spawned with
+     *  (spawnOrphanWatchdog() passes it as that script's own argv), the same
+     *  idea's third consumer -- the no-pcntl path's own in-call orphan check. */
     private const ORPHAN_POLL_SECONDS = 2;
 
     /** The no-pcntl worker this instance talks to, or null.
@@ -1271,11 +1274,20 @@ class RectorRunner implements RunnerInterface
      * worker's own INI parser rather than passed through as the literal
      * four-character sequence it was in the parent daemon (#130).
      *
-     * A value containing a literal single quote cannot use that form (there is
-     * no escape for it inside single quotes), so it falls back to the original
-     * double-quoted + backslash/quote-escaped form. Backslash is escaped before
-     * quote in that fallback specifically so a value ending in a backslash
-     * cannot swallow the closing quote.
+     * A value containing a literal single quote cannot wrap the WHOLE value in
+     * single quotes (there is no escape for a quote inside single quotes), and
+     * falling back to one double-quoted whole-value form for that case -- #125's
+     * original fallback -- reintroduces ${...} interpolation for the rest of a
+     * value that also contains a single quote: "it's ${HOME}" reached the worker
+     * as "it's /Users/..." (#135, split out of an independent E2E review of #133).
+     * PHP's own ini parser accepts several adjacent quoted segments with nothing
+     * between them as one concatenated value (confirmed empirically: name='a'"'"'b'
+     * parses to a'b, matching how a shell itself lets 'a'"'"'b' mean a'b), so each
+     * literal single quote in $value becomes its own one-character double-quoted
+     * segment -- trivially safe, since a lone quote needs no backslash/quote
+     * escaping there -- and every run BETWEEN quotes, which may still contain
+     * ${...} or a backslash, stays single-quoted: never interpolated, never
+     * escape-processed, exactly like the no-quote case above.
      */
     private static function quoteIniValue(string $value): string
     {
@@ -1283,7 +1295,19 @@ class RectorRunner implements RunnerInterface
             return "'" . $value . "'";
         }
 
-        return '"' . \str_replace(['\\', '"'], ['\\\\', '\\"'], $value) . '"';
+        $parts = \explode("'", $value);
+        $lastIndex = \count($parts) - 1;
+        $segments = [];
+        foreach ($parts as $i => $part) {
+            if ($part !== '') {
+                $segments[] = "'" . $part . "'";
+            }
+            if ($i < $lastIndex) {
+                $segments[] = '"\'"';
+            }
+        }
+
+        return \implode('', $segments);
     }
 
     private function spawnProcWorker(): void
@@ -1656,14 +1680,67 @@ class RectorRunner implements RunnerInterface
         $request = \json_decode($frame, true);
         $argv = \is_array($request) && \is_array($request['argv'] ?? null) ? $request['argv'] : [];
         $warmBoot = \is_array($request) && ($request['warm_boot'] ?? false) === true;
+        // #134: execute() below runs the real analysis synchronously, in this
+        // process, with no fork and no tick point to hang a daemon-liveness poll
+        // off (that is exactly why the idle-wait loop above cannot help once a
+        // frame has arrived -- see its own comment). A separate watchdog process
+        // is the one primitive still available: it kills this worker's whole
+        // process tree if $daemonPid dies while execute() is running, instead of
+        // the call running to completion for a daemon (and client) that is gone.
+        $watchdog = $this->spawnOrphanWatchdog($daemonPid);
         try {
             $result = $this->execute($argv, $warmBoot);
         } catch (\Throwable $e) {
             $result = ['error' => $e->getMessage(), 'error_class' => $e::class];
+        } finally {
+            $this->stopOrphanWatchdog($watchdog);
         }
         $this->writeFrame($socket, $this->encodeForkResult($result));
 
         return 0;
+    }
+
+    /**
+     * #134: start bin/rector-warm-orphan-watchdog.php watching $daemonPid, or null
+     * when there is no daemon to watch ($daemonPid === null) or it could not be
+     * spawned -- best effort, same as the rest of this no-pcntl path's process-tree
+     * handling (ProcessTree itself is best-effort by design).
+     *
+     * @return resource|null
+     */
+    private function spawnOrphanWatchdog(?int $daemonPid)
+    {
+        if ($daemonPid === null || !\function_exists('proc_open')) {
+            return null;
+        }
+        $null = \PHP_OS_FAMILY === 'Windows' ? 'NUL' : '/dev/null';
+        $descriptors = [0 => ['file', $null, 'r'], 1 => ['file', $null, 'w'], 2 => ['file', $null, 'w']];
+        $watchdog = @\proc_open(
+            [
+                \PHP_BINARY,
+                \dirname(__DIR__) . '/bin/rector-warm-orphan-watchdog.php',
+                (string) $daemonPid,
+                (string) \getmypid(),
+                (string) self::ORPHAN_POLL_SECONDS,
+            ],
+            $descriptors,
+            $pipes,
+        );
+
+        return \is_resource($watchdog) ? $watchdog : null;
+    }
+
+    /** @param resource|null $watchdog */
+    private function stopOrphanWatchdog($watchdog): void
+    {
+        if ($watchdog === null) {
+            return;
+        }
+        $status = @\proc_get_status($watchdog);
+        if (\is_array($status) && $status['running']) {
+            \proc_terminate($watchdog, 9);
+        }
+        @\proc_close($watchdog);
     }
 
     /**

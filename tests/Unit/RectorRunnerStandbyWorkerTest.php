@@ -647,6 +647,27 @@ final class RectorRunnerStandbyWorkerTest extends TestCase
     }
 
     /**
+     * #135: split out of the E2E check on PR #133. Fixing #130 made a literal
+     * `${VAR}` round-trip using INI single quotes, but a value containing BOTH a
+     * single quote and `${...}` used to fall back to the single whole-value
+     * double-quoted form (#125's original fallback), which the ini parser DOES
+     * interpolate -- 4 of 19 probes failed exactly this way: `it's ${HOME}`
+     * reached the worker as `it's /Users/...`, `o'k ${precision}` as `o'k 14`.
+     * Both of the issue's own repro values, asserted against a REAL child
+     * process the same way #130's own single-quote and dollar-brace tests are.
+     */
+    public function testAForwardedValueContainingBothASingleQuoteAndDollarBraceSurvivesARealChildProcess(): void
+    {
+        foreach (["it's \${HOME}", "o'k \${precision}"] as $raw) {
+            self::assertSame(
+                $raw,
+                self::roundTripUserAgentThroughARealChildProcess($raw),
+                "a value containing both a single quote and \\\${...} must survive a real child process unchanged, not partially interpolated (#135): {$raw}",
+            );
+        }
+    }
+
+    /**
      * Self-review finding: $lastCallWasWarm must not survive across calls when
      * THIS call fails before ever reaching a decision point (boot(),
      * spawnProcWorker(), awaitProcWorkerReady()) -- otherwise it silently
@@ -690,6 +711,192 @@ final class RectorRunnerStandbyWorkerTest extends TestCase
             $runner->wasLastCallWarm(),
             'a call that fails before reaching a warm/cold decision point must not inherit a PREVIOUS calls warm state (self-review finding)',
         );
+    }
+
+    /**
+     * #134: split out of the E2E check on PR #133. #127/#108's idle-wait poll in
+     * serveProcessWorker() only runs BEFORE a call's request frame arrives; once
+     * execute() is running there is no fork and no tick point to hang a
+     * daemon-liveness check off, so a daemon killed -9 mid-call used to leave the
+     * standby worker running to completion regardless. A REAL daemon subprocess
+     * (not this test process, which cannot safely kill -9 itself) runs two calls:
+     * a quick one against Quick.php (so runViaStandbyWorker()'s own finally block
+     * retires that worker and pre-spawns a fresh standby for the NEXT call before
+     * $r->run() returns), then reports that fresh standby's real pid, then a
+     * second call against Wedge.php -- picked up by the SAME pre-spawned standby
+     * (warm) -- whose custom rule sleeps, simulating an in-flight analysis. The
+     * daemon is SIGKILLed while that sleep is in progress and the test polls how
+     * long the reported worker pid keeps answering kill(pid, 0).
+     */
+    public function testTheStandbyExitsWhenItsDaemonIsKilledMidCall(): void
+    {
+        $tmp = sys_get_temp_dir() . '/rector-runner-134-daemon-kill-mid-call-test-' . bin2hex(random_bytes(8));
+        mkdir($tmp);
+        mkdir($tmp . '/src');
+        file_put_contents(
+            $tmp . '/src/Quick.php',
+            "<?php\n\ndeclare(strict_types=1);\n\nfinal class Quick\n{\n}\n",
+        );
+        file_put_contents(
+            $tmp . '/src/Wedge.php',
+            "<?php\n\ndeclare(strict_types=1);\n\nfinal class Wedge\n{\n}\n",
+        );
+        file_put_contents(
+            $tmp . '/rector.php',
+            "<?php\n\n"
+            . "declare(strict_types=1);\n\n"
+            . "use PhpParser\Node;\n"
+            . "use PhpParser\Node\Stmt\Class_;\n"
+            . "use Rector\Config\RectorConfig;\n"
+            . "use Rector\Rector\AbstractRector;\n\n"
+            . "final class Wedge134Rector extends AbstractRector\n"
+            . "{\n"
+            . "    public function getNodeTypes(): array\n"
+            . "    {\n"
+            . "        return [Class_::class];\n"
+            . "    }\n\n"
+            . "    public function refactor(Node \$node): ?Node\n"
+            . "    {\n"
+            . "        if ((\$node->name?->toString() ?? '') === 'Wedge') {\n"
+            . "            sleep(20);\n"
+            . "        }\n\n"
+            . "        return null;\n"
+            . "    }\n"
+            . "}\n\n"
+            . "return RectorConfig::configure()->withRules([Wedge134Rector::class]);\n",
+        );
+
+        $driverScript = $tmp . '/driver.php';
+        file_put_contents(
+            $driverScript,
+            "<?php\n"
+            . "declare(strict_types=1);\n"
+            . 'require ' . var_export(dirname(__DIR__, 2) . '/vendor/autoload.php', true) . ";\n"
+            . 'chdir(' . var_export($tmp, true) . ");\n"
+            . "\$_SERVER['argv'] = ['rector'];\n"
+            . "\$runner = new class(0) extends \Dpt\McpRectorWarm\RectorRunner {\n"
+            . "    protected function canFork(): bool\n"
+            . "    {\n"
+            . "        return false;\n"
+            . "    }\n"
+            . "};\n"
+            . '$runner->run(' . var_export(self::argv($tmp . '/src/Quick.php'), true) . ");\n"
+            . "\$ref = new \ReflectionProperty(\Dpt\McpRectorWarm\RectorRunner::class, 'procWorker');\n"
+            . "\$ref->setAccessible(true);\n"
+            . "\$w = \$ref->getValue(\$runner);\n"
+            . "echo 'WORKER_PID=' . \$w['pid'] . \"\\n\";\n"
+            . "fflush(STDOUT);\n"
+            . '$runner->run(' . var_export(self::argv($tmp . '/src/Wedge.php'), true) . ");\n",
+        );
+
+        $descriptors = [0 => ['pipe', 'r'], 1 => ['pipe', 'w'], 2 => ['pipe', 'w']];
+        $proc = proc_open([\PHP_BINARY, $driverScript], $descriptors, $pipes);
+        self::assertIsResource($proc, 'must be able to spawn the driver ("daemon") subprocess');
+        fclose($pipes[0]);
+
+        $workerPid = null;
+        try {
+            $deadline = microtime(true) + 30.0;
+            $buffer = '';
+            while ($workerPid === null && microtime(true) < $deadline) {
+                $line = fgets($pipes[1]);
+                if ($line === false) {
+                    break;
+                }
+                $buffer .= $line;
+                if (preg_match('/WORKER_PID=(\d+)/', $line, $m) === 1) {
+                    $workerPid = (int) $m[1];
+                }
+            }
+            self::assertNotNull($workerPid, "driver never reported a worker pid; stdout so far: {$buffer}");
+            self::assertTrue(
+                self::isAlive($workerPid),
+                'must fire: the reported worker pid must genuinely be alive right after the daemon reported it',
+            );
+
+            $status = proc_get_status($proc);
+            self::assertIsArray($status);
+            $daemonPid = (int) $status['pid'];
+
+            // Give the pre-spawned standby time to finish booting and receive the
+            // second (wedge) call's request frame -- it started booting the moment
+            // the FIRST call's finally block spawned it, so most of this overlaps
+            // work already in flight; the sleep(20) in the rule leaves comfortable
+            // margin either way.
+            sleep(4);
+
+            self::assertTrue(self::isAlive($daemonPid), 'control: the daemon must still be alive right before it is killed');
+            // posix_kill()/SIGKILL are pcntl/posix-only: both are UNCONDITIONALLY
+            // evaluated by a bare `||` expression regardless of which side short-
+            // circuits, so referencing either on Windows (no posix extension, and
+            // SIGKILL is defined by pcntl, absent there too -- see this file's own
+            // src/RectorRunner.php:1554 comment) is a fatal error before the
+            // fallback ever runs, not a graceful skip (self-review finding).
+            if (\PHP_OS_FAMILY === 'Windows') {
+                // Deliberately NOT ProcessTree::killTree($daemonPid): its Windows
+                // branch runs `taskkill /T /F`, which kills the daemon's WHOLE
+                // process tree -- including the worker -- synchronously, before
+                // this call even returns (ProcessTree.php's own doc comment on
+                // that branch names this exact gap). That would kill the worker
+                // as a side effect of "killing the daemon", not via the watchdog
+                // this test exists to exercise, making the positive control right
+                // below vacuously true for the wrong reason (CI finding on
+                // windows-latest/8.3). `taskkill /F /PID` with no `/T` kills only
+                // the named pid, leaving the worker (and its watchdog) alive for
+                // the watchdog to notice the daemon's death and act on.
+                $null = 'NUL';
+                $killer = proc_open(
+                    ['taskkill', '/F', '/PID', (string) $daemonPid],
+                    [0 => ['file', $null, 'r'], 1 => ['file', $null, 'w'], 2 => ['file', $null, 'w']],
+                    $killerPipes,
+                );
+                self::assertIsResource($killer, 'must be able to spawn taskkill to kill the driver ("daemon") alone');
+                self::assertSame(0, proc_close($killer), 'taskkill /F /PID <daemonPid> (no /T) must succeed');
+            } else {
+                self::assertTrue(posix_kill($daemonPid, \SIGKILL), 'must be able to kill -9 the driver ("daemon")');
+            }
+
+            // Positive control for the poll itself: the worker pid must still
+            // exist at least once right after the kill -- otherwise a broken poll
+            // (or a pid reused instantly) would pass this test for free by
+            // finding "no process" from the very first check.
+            self::assertTrue(
+                self::isAlive($workerPid),
+                'must fire: the worker must still exist immediately after the kill -- otherwise the poll below is vacuous',
+            );
+
+            $pollDeadline = microtime(true) + 8.0;
+            $stillAlive = true;
+            while (microtime(true) < $pollDeadline) {
+                if (!self::isAlive($workerPid)) {
+                    $stillAlive = false;
+                    break;
+                }
+                usleep(100_000);
+            }
+            $elapsed = 8.0 - max(0.0, $pollDeadline - microtime(true));
+
+            self::assertFalse(
+                $stillAlive,
+                "the standby worker must exit once its daemon is killed -9 mid-call, within a few seconds -- "
+                . 'still alive after 8s (#134)',
+            );
+            self::assertLessThan(
+                5.0,
+                $elapsed,
+                "the standby worker took {$elapsed}s to exit after its daemon was killed -9 mid-call -- "
+                . 'expected roughly ORPHAN_POLL_SECONDS, not the full sleep(20) (#134)',
+            );
+        } finally {
+            if ($workerPid !== null && self::isAlive($workerPid)) {
+                \Dpt\McpRectorWarm\Support\ProcessTree::killTree($workerPid);
+            }
+            fclose($pipes[1]);
+            fclose($pipes[2]);
+            @proc_terminate($proc, 9);
+            proc_close($proc);
+            self::removeTree($tmp);
+        }
     }
 
     private static function isAlive(int $pid): bool
