@@ -388,4 +388,68 @@ final class LspServerBufferTest extends TestCase
         $server->runDueDiagnostics(self::LATER);
         self::assertSame([], $source->calls);
     }
+
+    /**
+     * #131: follow-up from #111/#128 -- runDueDiagnostics() is reached when
+     * a client sends textDocument/didChange without ever having sent
+     * didOpen for that document (spec-legal). That debounced run is just as
+     * much a cold-boot "first diagnose" as diagnoseDocument()'s own, so it
+     * must report progress and flip hasBootedOnce too. A shared log between
+     * the frame writer and the fake diagnostics source is the only way to
+     * observe that create/begin are written LIVE, before diagnoseBuffer()
+     * runs -- exactly the pattern
+     * testProgressCreateAndBeginAreWrittenToTheTransportBeforeDiagnoseRuns
+     * (LspServerTest) uses for the didOpen path.
+     */
+    public function testRunDueDiagnosticsReportsColdBootProgressWithNoPrecedingDidOpen(): void
+    {
+        $log = new class () {
+            /** @var list<string> */
+            public array $entries = [];
+        };
+
+        $source = new class ($log) implements BufferDiagnosticsSource {
+            public function __construct(private object $log)
+            {
+            }
+
+            public function diagnose(string $absolutePath): array
+            {
+                return ['fixes' => []];
+            }
+
+            public function diagnoseBuffer(string $absolutePath, string $content): array
+            {
+                $this->log->entries[] = 'diagnose-called';
+
+                return ['fixes' => []];
+            }
+        };
+
+        $frameWriter = function (array $frame) use ($log): void {
+            $log->entries[] = 'wrote:' . ($frame['method'] ?? '?');
+        };
+
+        $server = new LspServer('1.0.0', $source, frameWriter: $frameWriter);
+
+        $server->handle([
+            'jsonrpc' => '2.0',
+            'id' => 1,
+            'method' => 'initialize',
+            'params' => ['capabilities' => ['window' => ['workDoneProgress' => true]]],
+        ]);
+
+        // Must fire: no didOpen is ever sent -- didChange is this
+        // document's only touch, and this is the server's very first
+        // diagnose overall.
+        self::change($server, 1, "<?php\nfixable\n");
+        $server->runDueDiagnostics(self::LATER);
+
+        self::assertSame([
+            'wrote:window/workDoneProgress/create',
+            'wrote:$/progress',
+            'diagnose-called',
+            'wrote:$/progress',
+        ], $log->entries);
+    }
 }
