@@ -31,6 +31,10 @@ an agent calling a tool:
   other Rector/tool-level error) is published as an Error-severity
   diagnostic with no quickfix, so a broken file is never indistinguishable
   from a clean one (#90, #91).
+- **Cold-boot progress and cancellation.** `window/workDoneProgress` fires
+  around the first diagnose only (the cold-boot call), when the client
+  declares the capability; `$/cancelRequest` is honoured for a
+  `textDocument/codeAction` not yet dispatched (#111).
 
 Editor setup for six clients (Neovim, Helix, Sublime Text, PhpStorm/LSP4IJ,
 plus the generic pattern) is in the README's [Editor

@@ -216,7 +216,12 @@ clears a file's diagnostics. Results are pinned to the document version that
 requested them, so a stale one is discarded if a newer `didSave` for the same
 document finishes first -- inert in the current strictly-synchronous stdio
 loop (nothing can race it there today), kept as defense-in-depth for a future
-async/pipelined transport.
+async/pipelined transport. When the client declares `window.workDoneProgress`,
+the server reports it ("Rector: warming up" / "Rector: analysing" plus the
+file) around the very first diagnose only -- the one cold-boot call, roughly
+1.3-1.8s -- since every later call is already warm; a `$/cancelRequest` for a
+`textDocument/codeAction` whose id has not been dispatched yet is honoured
+with a "Request cancelled" error instead of running it (#111).
 
 On `initialized` the server also asks the client (via
 `client/registerCapability`) to watch `rector.php` and `composer.lock` and

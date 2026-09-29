@@ -19,6 +19,25 @@ final class LspServer
     /** #105: set from `initialize`'s client capabilities */
     private bool $canWatchFiles = false;
 
+    /** #111: set from `initialize`'s client capabilities (window.workDoneProgress) */
+    private bool $canReportProgress = false;
+
+    /**
+     * #111: the editor shows nothing during the first (cold-boot) diagnose,
+     * about 1.3-1.8s per the issue. Only THAT first call is worth a progress
+     * notification -- every later diagnose is already warm and near-instant,
+     * so reporting progress around it would be noise, not signal.
+     */
+    private bool $hasBootedOnce = false;
+
+    /**
+     * @var array<string, true> #111: JSON-RPC request ids seen in a
+     *   `$/cancelRequest` notification, keyed by (string) cast so an int id
+     *   and its string form collide on purpose -- JSON-RPC ids are typed
+     *   per-message, not per-protocol, and a client is free to use either.
+     */
+    private array $cancelledRequestIds = [];
+
     /** @var array<string, int> URI -> the version this server last diagnosed */
     private array $documentVersions = [];
 
@@ -69,9 +88,9 @@ final class LspServer
         $isRequest = array_key_exists('id', $message);
 
         if ($method === 'initialize') {
-            $this->canWatchFiles = self::clientSupportsDynamicWatchedFiles(
-                is_array($params) ? ($params['capabilities'] ?? null) : null,
-            );
+            $capabilities = is_array($params) ? ($params['capabilities'] ?? null) : null;
+            $this->canWatchFiles = self::clientSupportsDynamicWatchedFiles($capabilities);
+            $this->canReportProgress = self::clientSupportsWorkDoneProgress($capabilities);
 
             return [$this->result($id, [
                 'capabilities' => [
@@ -120,11 +139,36 @@ final class LspServer
         }
 
         if ($method === 'textDocument/codeAction') {
+            // #111: honour a $/cancelRequest received for this exact id
+            // before it was dispatched -- the read loop handles one message
+            // at a time (see the class docblock), so this can only ever
+            // fire for a request whose cancelRequest notification the
+            // client happened to get onto the wire first.
+            if ($id !== null && isset($this->cancelledRequestIds[self::idKey($id)])) {
+                unset($this->cancelledRequestIds[self::idKey($id)]);
+
+                return [$this->error($id, -32800, 'Request cancelled')];
+            }
+
             return [$this->codeAction($id, is_array($params) ? $params : [])];
         }
 
         if ($method === 'workspace/didChangeWatchedFiles') {
             return $this->watchedFilesChanged(is_array($params) ? ($params['changes'] ?? []) : []);
+        }
+
+        // #111: a NOTIFICATION (never a request -- the spec gives it no id),
+        // so there is nothing to reply with here. It only ever affects a
+        // request this server has not dispatched yet: see the dispatch
+        // branch above for codeAction, which is the one request this issue
+        // asks to honour it for.
+        if ($method === '$/cancelRequest') {
+            $cancelId = is_array($params) ? ($params['id'] ?? null) : null;
+            if ($cancelId !== null) {
+                $this->cancelledRequestIds[self::idKey($cancelId)] = true;
+            }
+
+            return [];
         }
 
         if ($isRequest) {
@@ -149,6 +193,24 @@ final class LspServer
         $watched = is_array($workspace) ? ($workspace['didChangeWatchedFiles'] ?? null) : null;
 
         return is_array($watched) && ($watched['dynamicRegistration'] ?? false) === true;
+    }
+
+    /** #111: `window.workDoneProgress` on the client's declared capabilities. */
+    private static function clientSupportsWorkDoneProgress(mixed $capabilities): bool
+    {
+        if (!is_array($capabilities)) {
+            return false;
+        }
+
+        $window = $capabilities['window'] ?? null;
+
+        return is_array($window) && ($window['workDoneProgress'] ?? false) === true;
+    }
+
+    /** #111: a stable string key for a JSON-RPC id, which may be an int or a string. */
+    private static function idKey(mixed $id): string
+    {
+        return (string) $id;
     }
 
     /**
@@ -274,7 +336,25 @@ final class LspServer
         }
 
         $path = self::uriToPath($uri);
+
+        // #111: only the very first diagnose is a cold boot -- see the
+        // $hasBootedOnce property doc. Reporting progress is decided once,
+        // up front, so the begin/end pair below either both fire or neither
+        // does, never a begin with no matching end.
+        $reportProgress = $this->canReportProgress && !$this->hasBootedOnce;
+        $this->hasBootedOnce = true;
+
+        $frames = [];
+        if ($reportProgress) {
+            $frames[] = $this->progressCreate();
+            $frames[] = $this->progressBegin('Rector: warming up', 'Rector: analysing ' . basename($path));
+        }
+
         $result = $this->diagnostics->diagnose($path);
+
+        if ($reportProgress) {
+            $frames[] = $this->progressEnd();
+        }
 
         // Drop a stale result (#53): comparing against the version THIS call
         // started with, not whatever is tracked now, is what makes a stale
@@ -323,7 +403,44 @@ final class LspServer
             ];
         }
 
-        return [$this->publishDiagnostics($uri, $diagnostics)];
+        $frames[] = $this->publishDiagnostics($uri, $diagnostics);
+
+        return $frames;
+    }
+
+    /** #111: server-initiated `window/workDoneProgress/create`, before the first `$/progress`. */
+    private function progressCreate(): array
+    {
+        return [
+            'jsonrpc' => '2.0',
+            'id' => 'rector-warm-lsp/progress-create',
+            'method' => 'window/workDoneProgress/create',
+            'params' => ['token' => 'rector-warm-lsp/cold-boot'],
+        ];
+    }
+
+    private function progressBegin(string $title, string $message): array
+    {
+        return [
+            'jsonrpc' => '2.0',
+            'method' => '$/progress',
+            'params' => [
+                'token' => 'rector-warm-lsp/cold-boot',
+                'value' => ['kind' => 'begin', 'title' => $title, 'message' => $message],
+            ],
+        ];
+    }
+
+    private function progressEnd(): array
+    {
+        return [
+            'jsonrpc' => '2.0',
+            'method' => '$/progress',
+            'params' => [
+                'token' => 'rector-warm-lsp/cold-boot',
+                'value' => ['kind' => 'end'],
+            ],
+        ];
     }
 
     /**

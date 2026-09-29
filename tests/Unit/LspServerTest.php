@@ -1054,4 +1054,165 @@ final class LspServerTest extends TestCase
         // all from it, since the reentrant version:2 call already published.
         self::assertSame([], $responses);
     }
+
+    /** #111: window/workDoneProgress around the first diagnose (cold boot). */
+    public function testWorkDoneProgressIsSentAroundTheFirstDiagnoseWhenClientSupportsIt(): void
+    {
+        $server = new LspServer('1.0.0', self::fakeSource([]));
+
+        $server->handle([
+            'jsonrpc' => '2.0',
+            'id' => 1,
+            'method' => 'initialize',
+            'params' => ['capabilities' => ['window' => ['workDoneProgress' => true]]],
+        ]);
+
+        $responses = $server->handle([
+            'jsonrpc' => '2.0',
+            'method' => 'textDocument/didOpen',
+            'params' => ['textDocument' => ['uri' => 'file:///tmp/Sample.php', 'version' => 1]],
+        ]);
+
+        $methods = array_map(static fn (array $frame): ?string => $frame['method'] ?? null, $responses);
+
+        self::assertSame(
+            ['window/workDoneProgress/create', '$/progress', '$/progress', 'textDocument/publishDiagnostics'],
+            $methods,
+        );
+
+        $token = $responses[0]['params']['token'];
+        self::assertSame($token, $responses[1]['params']['token']);
+        self::assertSame($token, $responses[2]['params']['token']);
+
+        $begin = $responses[1]['params']['value'];
+        self::assertSame('begin', $begin['kind']);
+        self::assertSame('Rector: warming up', $begin['title']);
+        self::assertSame('Rector: analysing Sample.php', $begin['message']);
+
+        $end = $responses[2]['params']['value'];
+        self::assertSame('end', $end['kind']);
+    }
+
+    /**
+     * Positive control for the test above: without the client declaring
+     * `window.workDoneProgress`, nothing progress-shaped may be sent -- a
+     * silent no-op here must never be indistinguishable from "the feature
+     * ran and chose to say nothing".
+     */
+    public function testNoProgressIsSentWhenClientLacksTheCapability(): void
+    {
+        $server = new LspServer('1.0.0', self::fakeSource([]));
+
+        $server->handle([
+            'jsonrpc' => '2.0',
+            'id' => 1,
+            'method' => 'initialize',
+            'params' => ['capabilities' => []],
+        ]);
+
+        $responses = $server->handle([
+            'jsonrpc' => '2.0',
+            'method' => 'textDocument/didOpen',
+            'params' => ['textDocument' => ['uri' => 'file:///tmp/Sample.php', 'version' => 1]],
+        ]);
+
+        self::assertCount(1, $responses);
+        self::assertSame('textDocument/publishDiagnostics', $responses[0]['method']);
+    }
+
+    /** #111: only the FIRST diagnose is a cold boot -- later ones must stay silent. */
+    public function testProgressIsOnlySentAroundTheFirstDiagnoseNotLaterOnes(): void
+    {
+        $server = new LspServer('1.0.0', self::fakeSource([]));
+
+        $server->handle([
+            'jsonrpc' => '2.0',
+            'id' => 1,
+            'method' => 'initialize',
+            'params' => ['capabilities' => ['window' => ['workDoneProgress' => true]]],
+        ]);
+
+        $server->handle([
+            'jsonrpc' => '2.0',
+            'method' => 'textDocument/didOpen',
+            'params' => ['textDocument' => ['uri' => 'file:///tmp/Sample.php', 'version' => 1]],
+        ]);
+
+        $second = $server->handle([
+            'jsonrpc' => '2.0',
+            'method' => 'textDocument/didSave',
+            'params' => ['textDocument' => ['uri' => 'file:///tmp/Sample.php', 'version' => 2]],
+        ]);
+
+        self::assertCount(1, $second);
+        self::assertSame('textDocument/publishDiagnostics', $second[0]['method']);
+    }
+
+    /** #111: $/cancelRequest for a codeAction's own id must refuse that request. */
+    public function testCodeActionIsRefusedAfterCancelRequestForTheSameId(): void
+    {
+        $server = new LspServer('1.0.0', self::fakeSource([
+            self::fix(0, 1, "fixed\n", 'SomeRector'),
+        ]));
+
+        $server->handle([
+            'jsonrpc' => '2.0',
+            'method' => 'textDocument/didOpen',
+            'params' => ['textDocument' => ['uri' => 'file:///tmp/Sample.php', 'version' => 1]],
+        ]);
+
+        $server->handle([
+            'jsonrpc' => '2.0',
+            'method' => '$/cancelRequest',
+            'params' => ['id' => 42],
+        ]);
+
+        $responses = $server->handle([
+            'jsonrpc' => '2.0',
+            'id' => 42,
+            'method' => 'textDocument/codeAction',
+            'params' => ['textDocument' => ['uri' => 'file:///tmp/Sample.php']],
+        ]);
+
+        self::assertCount(1, $responses);
+        self::assertArrayHasKey('error', $responses[0]);
+        self::assertSame(-32800, $responses[0]['error']['code']);
+    }
+
+    /**
+     * Positive control: a cancelRequest for a DIFFERENT id must not refuse
+     * an unrelated codeAction -- otherwise a single cancellation would
+     * silently disable every future codeAction, indistinguishable from
+     * "cancellation is correctly scoped to its own id".
+     */
+    public function testCancelRequestDoesNotAffectAnUnrelatedCodeActionId(): void
+    {
+        $server = new LspServer('1.0.0', self::fakeSource([
+            self::fix(0, 1, "fixed\n", 'SomeRector'),
+        ]));
+
+        $server->handle([
+            'jsonrpc' => '2.0',
+            'method' => 'textDocument/didOpen',
+            'params' => ['textDocument' => ['uri' => 'file:///tmp/Sample.php', 'version' => 1]],
+        ]);
+
+        $server->handle([
+            'jsonrpc' => '2.0',
+            'method' => '$/cancelRequest',
+            'params' => ['id' => 42],
+        ]);
+
+        $responses = $server->handle([
+            'jsonrpc' => '2.0',
+            'id' => 43,
+            'method' => 'textDocument/codeAction',
+            'params' => ['textDocument' => ['uri' => 'file:///tmp/Sample.php']],
+        ]);
+
+        self::assertCount(1, $responses);
+        self::assertArrayNotHasKey('error', $responses[0]);
+        self::assertArrayHasKey('result', $responses[0]);
+        self::assertNotEmpty($responses[0]['result']);
+    }
 }
