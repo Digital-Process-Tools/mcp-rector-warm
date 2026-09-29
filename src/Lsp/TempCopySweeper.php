@@ -158,8 +158,18 @@ final class TempCopySweeper
         $descriptors = [1 => ['pipe', 'w'], 2 => ['pipe', 'w']];
         $process = @proc_open(['fsutil', 'reparsepoint', 'query', $path], $descriptors, $pipes);
 
+        // #161/#162 self-review: the exec()-based code this replaced left
+        // $exitCode at its pre-set 0 (== "is a junction") whenever exec()
+        // itself failed to spawn -- an accidental but real fail-CLOSED
+        // direction: unqueryable was treated as "yes, refuse it". Returning
+        // false here (unqueryable == "not a junction") would flip that,
+        // letting removeIfStale() proceed to unlink()/rmdir() through a
+        // path it was never actually able to rule out as a junction -- the
+        // same #142/#144 class this guard exists to close, reopened
+        // whenever `proc_open` itself cannot start (disabled, sandboxed,
+        // out of resources), independent of the path it was asked about.
         if (!is_resource($process)) {
-            return false;
+            return true;
         }
 
         // Drained so the child cannot block on a full pipe before
