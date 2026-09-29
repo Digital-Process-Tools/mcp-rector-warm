@@ -212,7 +212,30 @@ is never indistinguishable from a clean one (#90, #91).
 `Apply Rector: Rector fix` for the same no-rule-pinned case) -- a
 `WorkspaceEdit` built straight from Rector's own unified diff, no full-file
 read needed -- plus a whole-file "Apply all Rector fixes" action. `didClose`
-clears a file's diagnostics.
+clears a file's diagnostics. Results are pinned to the document version that
+requested them, so a stale one is discarded if a newer `didSave` for the same
+document finishes first -- inert in the current strictly-synchronous stdio
+loop (nothing can race it there today), kept as defense-in-depth for a future
+async/pipelined transport. When the client declares `window.workDoneProgress`,
+the server reports it ("Rector: warming up" / "Rector: analysing" plus the
+file) around the very first diagnose only -- the one cold-boot call, roughly
+1.3-1.8s -- since every later call is already warm. `create` and `begin`
+reach the client BEFORE that diagnose runs, not batched together with `end`
+and the diagnostics afterwards (PR #128 review): the server writes each
+frame to the transport the moment it is ready, wired that way from
+`bin/rector-warm-lsp`. Before committing to `begin`, the server WAITS (up
+to 200ms, `LspServer::CREATE_REPLY_TIMEOUT_SECONDS`, added to the one-time
+cold-boot cost above) for the client's own reply to `create`; only an
+explicit success reply lets `begin`/`end` through -- an explicit refusal,
+the window elapsing with no reply at all, or some other message arriving
+first all skip progress for that round rather than assume it is fine, per
+the LSP spec. A `$/cancelRequest` for a
+`textDocument/codeAction` whose id has not been dispatched yet is answered
+with a "Request cancelled" error rather than run -- protocol-correct, but,
+same as the stale-result discard above, inert in today's shipped binary: a
+conforming client only cancels an id it already sent a request for, and this
+server answers one message at a time, so that cancellation always arrives
+after the request's own response was already written (#111).
 
 **Unsaved buffers (#106).** The server declares full text sync
 (`textDocumentSync.change: 1`), so it diagnoses what you are typing, not only

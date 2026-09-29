@@ -26,6 +26,25 @@ final class LspServer
     /** #105: set from `initialize`'s client capabilities */
     private bool $canWatchFiles = false;
 
+    /** #111: set from `initialize`'s client capabilities (window.workDoneProgress) */
+    private bool $canReportProgress = false;
+
+    /**
+     * #111: the editor shows nothing during the first (cold-boot) diagnose,
+     * about 1.3-1.8s per the issue. Only THAT first call is worth a progress
+     * notification -- every later diagnose is already warm and near-instant,
+     * so reporting progress around it would be noise, not signal.
+     */
+    private bool $hasBootedOnce = false;
+
+    /**
+     * @var array<string, true> #111: JSON-RPC request ids seen in a
+     *   `$/cancelRequest` notification, keyed by (string) cast so an int id
+     *   and its string form collide on purpose -- JSON-RPC ids are typed
+     *   per-message, not per-protocol, and a client is free to use either.
+     */
+    private array $cancelledRequestIds = [];
+
     /** #106: client declared `workspace.workspaceEdit.documentChanges` */
     private bool $canUseDocumentChanges = false;
 
@@ -64,11 +83,78 @@ final class LspServer
      */
     private array $fixesByUri = [];
 
+    /**
+     * PR #128 E2E review (blocking finding 1): every frame diagnoseDocument()
+     * produces used to be collected into one array and handed back only
+     * after handle() returns -- so `window/workDoneProgress/create` and the
+     * `$/progress` begin notification reached the client at the SAME instant
+     * as `end` and `publishDiagnostics`, all AFTER the (slow, cold-boot)
+     * diagnose() call had already finished. That defeats the entire point
+     * of #111: the editor never sees "warming up" DURING the wait, only
+     * after it is over. $frameWriter, when given, is called synchronously
+     * the moment a frame is ready -- wired by bin/rector-warm-lsp to write
+     * straight to the transport -- so `create`/`begin` genuinely reach the
+     * wire before diagnose() runs. Left null (every existing unit test),
+     * emit() falls back to the original buffer-and-return-at-the-end
+     * behaviour, so nothing already covered changes shape.
+     */
     public function __construct(
         private readonly string $serverVersion,
         private readonly ?DiagnosticsSource $diagnostics = null,
         private readonly float $debounceSeconds = 0.5,
+        private readonly ?\Closure $frameWriter = null,
+        /**
+         * PR #128 E2E review (blocking finding 2): waits up to the given
+         * number of seconds for a message to become available, returning
+         * it (consuming it) or null if the window elapses with nothing.
+         * Used to see whether the client's reply to
+         * `window/workDoneProgress/create` arrives before this server
+         * decides whether to send `$/progress` begin.
+         *
+         * Second E2E review round, PR #128: a zero-timeout, "already
+         * sitting in the pipe" peek is NOT enough -- a real client's
+         * reply arrives milliseconds later over a real transport, never
+         * instantly, so a bare peek right after writing `create` never
+         * actually saw it (the exact bug this closure's own earlier
+         * version reintroduced). isProgressCreateRefused() below now
+         * calls this with a real, non-zero window and genuinely waits.
+         * Left null in every existing unit test and in any caller that
+         * cannot offer this at all -- the ONE exception to "only an
+         * explicit success proceeds" (see isProgressCreateRefused()'s own
+         * docblock): with no way to ask at all, progress fires normally,
+         * exactly as it did before this whole mechanism existed.
+         *
+         * @var (\Closure(float): (array<string, mixed>|null))|null
+         */
+        private readonly ?\Closure $tryReadAhead = null,
+        /**
+         * Companion to $tryReadAhead: called when a message WAS read ahead
+         * but turned out not to be the create-request's own reply, so it
+         * must be handed back for ordinary dispatch rather than dropped.
+         *
+         * @var (\Closure(array<string, mixed>): void)|null
+         */
+        private readonly ?\Closure $pushBackMessage = null,
     ) {
+    }
+
+    /**
+     * Write $frame immediately via $frameWriter when one is wired (the
+     * production path), or buffer it into $buffer for the caller to return
+     * (every existing unit test, which has no real transport to write to).
+     *
+     * @param array<string, mixed> $frame
+     * @param list<array<string, mixed>> $buffer
+     */
+    private function emit(array $frame, array &$buffer): void
+    {
+        if ($this->frameWriter !== null) {
+            ($this->frameWriter)($frame);
+
+            return;
+        }
+
+        $buffer[] = $frame;
     }
 
     /**
@@ -97,6 +183,7 @@ final class LspServer
         if ($method === 'initialize') {
             $capabilities = is_array($params) ? ($params['capabilities'] ?? null) : null;
             $this->canWatchFiles = self::clientSupportsDynamicWatchedFiles($capabilities);
+            $this->canReportProgress = self::clientSupportsWorkDoneProgress($capabilities);
             $this->canUseDocumentChanges = self::clientSupportsDocumentChanges($capabilities);
 
             return [$this->result($id, [
@@ -150,11 +237,46 @@ final class LspServer
         }
 
         if ($method === 'textDocument/codeAction') {
+            // #111: honour a $/cancelRequest received for this exact id
+            // before it was dispatched. Self-review correction (Explore
+            // pass): a conforming client only ever sends $/cancelRequest
+            // for an id it already used on an outgoing request, and
+            // bin/rector-warm-lsp's main loop reads and fully handles one
+            // message at a time (see diagnoseDocument()'s stale-result
+            // comment below) -- so a real editor's cancelRequest for
+            // codeAction id X always arrives AFTER that request's response
+            // was already written, never before. This branch is therefore
+            // unreachable in the shipped binary today, exactly like the
+            // stale-version-discard branch it sits next to; kept as
+            // defense-in-depth (protocol-correct now) for whenever this
+            // loop stops being strictly synchronous, and exercised in
+            // LspServerTest only via a directly-reordered handle() call
+            // that no real client produces.
+            if ($id !== null && isset($this->cancelledRequestIds[self::idKey($id)])) {
+                unset($this->cancelledRequestIds[self::idKey($id)]);
+
+                return [$this->error($id, -32800, 'Request cancelled')];
+            }
+
             return [$this->codeAction($id, is_array($params) ? $params : [])];
         }
 
         if ($method === 'workspace/didChangeWatchedFiles') {
             return $this->watchedFilesChanged(is_array($params) ? ($params['changes'] ?? []) : []);
+        }
+
+        // #111: a NOTIFICATION (never a request -- the spec gives it no id),
+        // so there is nothing to reply with here. It only ever affects a
+        // request this server has not dispatched yet: see the dispatch
+        // branch above for codeAction, which is the one request this issue
+        // asks to honour it for.
+        if ($method === '$/cancelRequest') {
+            $cancelId = is_array($params) ? ($params['id'] ?? null) : null;
+            if ($cancelId !== null) {
+                $this->cancelledRequestIds[self::idKey($cancelId)] = true;
+            }
+
+            return [];
         }
 
         if ($isRequest) {
@@ -292,6 +414,24 @@ final class LspServer
         $watched = is_array($workspace) ? ($workspace['didChangeWatchedFiles'] ?? null) : null;
 
         return is_array($watched) && ($watched['dynamicRegistration'] ?? false) === true;
+    }
+
+    /** #111: `window.workDoneProgress` on the client's declared capabilities. */
+    private static function clientSupportsWorkDoneProgress(mixed $capabilities): bool
+    {
+        if (!is_array($capabilities)) {
+            return false;
+        }
+
+        $window = $capabilities['window'] ?? null;
+
+        return is_array($window) && ($window['workDoneProgress'] ?? false) === true;
+    }
+
+    /** #111: a stable string key for a JSON-RPC id, which may be an int or a string. */
+    private static function idKey(mixed $id): string
+    {
+        return (string) $id;
     }
 
     /**
@@ -468,7 +608,45 @@ final class LspServer
         unset($this->buffers[$uri], $this->pendingDeadlines[$uri], $this->readyResults[$uri]);
 
         $path = self::uriToPath($uri);
+
+        // #111: only the very first diagnose is a cold boot -- see the
+        // $hasBootedOnce property doc. Reporting progress is decided once,
+        // up front, so the begin/end pair below either both fire or neither
+        // does, never a begin with no matching end.
+        $reportProgress = $this->canReportProgress && !$this->hasBootedOnce;
+        $this->hasBootedOnce = true;
+
+        $frames = [];
+        // PR #128 E2E review (blocking finding 1): emit(), not a plain
+        // array push -- when $frameWriter is wired, `create` reaches the
+        // transport HERE, before diagnose() below ever runs, rather than
+        // being batched with every other frame until this whole function
+        // returns.
+        $progressRefused = false;
+        if ($reportProgress) {
+            $this->emit($this->progressCreate(), $frames);
+
+            // PR #128 E2E review (blocking finding 2, tightened in the
+            // second review round): genuinely WAIT (up to
+            // CREATE_REPLY_TIMEOUT_SECONDS, see isProgressCreateRefused()'s
+            // own docblock) for the client's reply to `create` before
+            // committing to `begin` -- the LSP spec forbids sending
+            // $/progress for a token the client's own reply to `create`
+            // rejected.
+            $progressRefused = $this->isProgressCreateRefused();
+            if (!$progressRefused) {
+                $this->emit(
+                    $this->progressBegin('Rector: warming up', 'Rector: analysing ' . basename(str_replace('\\', '/', $path))),
+                    $frames,
+                );
+            }
+        }
+
         $result = $this->diagnostics->diagnose($path);
+
+        if ($reportProgress && !$progressRefused) {
+            $this->emit($this->progressEnd(), $frames);
+        }
 
         // Drop a stale result (#53): comparing against the version THIS call
         // started with, not whatever is tracked now, is what makes a stale
@@ -486,7 +664,9 @@ final class LspServer
             return [];
         }
 
-        return [$this->publishResult($uri, $result, $version, false)];
+        $this->emit($this->publishResult($uri, $result, $version, false), $frames);
+
+        return $frames;
     }
 
     /**
@@ -532,6 +712,153 @@ final class LspServer
         }
 
         return $this->publishDiagnostics($uri, $diagnostics, $withVersion && is_int($version) ? $version : null);
+    }
+
+    /** #111: server-initiated `window/workDoneProgress/create`, before the first `$/progress`. */
+    private function progressCreate(): array
+    {
+        return [
+            'jsonrpc' => '2.0',
+            'id' => 'rector-warm-lsp/progress-create',
+            'method' => 'window/workDoneProgress/create',
+            'params' => ['token' => 'rector-warm-lsp/cold-boot'],
+        ];
+    }
+
+    private function progressBegin(string $title, string $message): array
+    {
+        return [
+            'jsonrpc' => '2.0',
+            'method' => '$/progress',
+            'params' => [
+                'token' => 'rector-warm-lsp/cold-boot',
+                'value' => ['kind' => 'begin', 'title' => $title, 'message' => $message],
+            ],
+        ];
+    }
+
+    private function progressEnd(): array
+    {
+        return [
+            'jsonrpc' => '2.0',
+            'method' => '$/progress',
+            'params' => [
+                'token' => 'rector-warm-lsp/cold-boot',
+                'value' => ['kind' => 'end'],
+            ],
+        ];
+    }
+
+    /**
+     * #111: how long isProgressCreateRefused() waits for the client's own
+     * reply to `window/workDoneProgress/create` before giving up on it.
+     * Second E2E review round, PR #128: a real client's reply arrives
+     * milliseconds later over a real transport, never instantly -- this
+     * has to be a real window, not the zero-timeout peek the first fix
+     * used, which never actually saw a delayed reply at all.
+     */
+    private const CREATE_REPLY_TIMEOUT_SECONDS = 0.2;
+
+    /**
+     * PR #128 E2E review (blocking finding 2): the LSP spec forbids sending
+     * `$/progress` for a token whose `create` request the client answered
+     * with an error.
+     *
+     * Second E2E review round: the first fix here only ever peeked for a
+     * reply ALREADY sitting in the transport's buffer (a zero-timeout
+     * check), so a real client's reply -- which arrives milliseconds
+     * later, not instantly -- was never actually seen; begin/end still
+     * fired on a token the client went on to refuse. Fixed by genuinely
+     * WAITING up to CREATE_REPLY_TIMEOUT_SECONDS via $tryReadAhead (which
+     * takes that timeout and, in production, is
+     * StdioLspTransport::waitForInput() underneath -- the same primitive
+     * #106's own debounce timer uses, Windows-safe there too).
+     *
+     * Third self-review pass (oss:auditor, same PR #128 round): a single
+     * $tryReadAhead call consumes the WHOLE window on the first message it
+     * sees, even one arriving 1ms in -- an ordinary client sending anything
+     * else (a log notification, another request's reply) shortly after
+     * `didOpen` and before its own `create` reply would have that reply
+     * pushed back and progress skipped, even though the real reply might
+     * have arrived comfortably within the remaining ~199ms. Fixed with a
+     * bounded retry loop: each non-matching message is collected locally
+     * (never re-queued into the transport's own pending FIFO mid-loop --
+     * doing that would have this same call immediately re-read the message
+     * it just set aside, spinning until the deadline instead of genuinely
+     * waiting for anything new) and only pushed back, in original order,
+     * once the loop actually concludes -- either the real reply arrives or
+     * the deadline is exhausted.
+     *
+     * Only an EXPLICIT success reply is treated as "not refused" now.
+     * Anything else -- an explicit error, the window elapsing with no
+     * reply at all, or the window being spent on other messages with the
+     * real reply never arriving -- skips progress for this round: this
+     * server can no longer confirm the client actually accepted the
+     * token, and the LSP spec violation this whole method exists to avoid
+     * is exactly what happens if it guesses "probably fine" instead.
+     */
+    private function isProgressCreateRefused(): bool
+    {
+        if ($this->tryReadAhead === null) {
+            return false;
+        }
+
+        $deadline = microtime(true) + self::CREATE_REPLY_TIMEOUT_SECONDS;
+        $setAside = [];
+
+        while (true) {
+            $remaining = $deadline - microtime(true);
+            if ($remaining <= 0.0) {
+                $this->pushBackInOriginalOrder($setAside);
+
+                return true;
+            }
+
+            $message = ($this->tryReadAhead)($remaining);
+            if ($message === null) {
+                // The window elapsed with no reply at all -- treat as
+                // unresolved, not as success. See this method's own
+                // docblock.
+                $this->pushBackInOriginalOrder($setAside);
+
+                return true;
+            }
+
+            $isOurCreateReply = array_key_exists('id', $message)
+                && ($message['id'] ?? null) === 'rector-warm-lsp/progress-create'
+                && ($message['method'] ?? null) === null;
+
+            if ($isOurCreateReply) {
+                $this->pushBackInOriginalOrder($setAside);
+
+                return array_key_exists('error', $message);
+            }
+
+            // Not our reply -- something else the client sent while we
+            // were waiting. Set aside for now (see this method's own
+            // docblock for why NOT pushed back immediately) and keep
+            // waiting on the remaining budget for the real reply.
+            $setAside[] = $message;
+        }
+    }
+
+    /**
+     * @param list<array<string, mixed>> $messages in the order they were
+     *   originally seen
+     */
+    private function pushBackInOriginalOrder(array $messages): void
+    {
+        if ($this->pushBackMessage === null) {
+            return;
+        }
+
+        // pushBackMessage() prepends (see StdioLspTransport::pushBack()'s
+        // own docblock), so pushing the LAST-seen message first and the
+        // FIRST-seen message last is what leaves them in original,
+        // first-seen-first-dispatched order at the front of the queue.
+        foreach (array_reverse($messages) as $message) {
+            ($this->pushBackMessage)($message);
+        }
     }
 
     /**

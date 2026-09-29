@@ -55,8 +55,35 @@ TempCopySweeper::sweepTree(getcwd() ?: '.');
 
 $transport = new StdioLspTransport(STDIN, STDOUT);
 $diagnostics = new RectorDiagnosticsSource(new RectorTool());
-$server = new LspServer(ServerVersion::resolve(), $diagnostics);
+
+$server = new LspServer(
+    ServerVersion::resolve(),
+    $diagnostics,
+    frameWriter: static function (array $frame) use ($transport): void {
+        // Blocking finding 1: write the moment a frame is ready, not
+        // batched until handle() returns -- this is what makes
+        // window/workDoneProgress/create and the $/progress begin
+        // notification reach the client BEFORE a slow cold-boot diagnose()
+        // call, rather than after it.
+        $transport->write($frame);
+    },
+    // PR #128 E2E review (blocking finding 2): $transport itself now owns
+    // the read-ahead/push-back FIFO (StdioLspTransport::tryRead()/
+    // pushBack()), so LspLoop's own read() calls -- which know nothing
+    // about this mechanism -- see a pushed-back message exactly like any
+    // other, with no separate queue to wire through here.
+    tryReadAhead: static function (float $timeoutSeconds) use ($transport): ?array {
+        return $transport->tryRead($timeoutSeconds);
+    },
+    pushBackMessage: static function (array $message) use ($transport): void {
+        $transport->pushBack($message);
+    },
+);
 
 // #106: the loop lives in LspLoop so the debounce (a read with a timeout)
-// and the drain-before-publish ordering are unit-tested.
+// and the drain-before-publish ordering are unit-tested. PR #128's own
+// $pending FIFO now lives inside StdioLspTransport itself (read()/
+// waitForInput() both drain it first), so LspLoop's own read() calls see a
+// pushed-back message exactly like any other -- nothing here needs to know
+// about it.
 exit((new LspLoop($transport, $server))->run());

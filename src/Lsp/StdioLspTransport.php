@@ -21,6 +21,21 @@ final class StdioLspTransport
     private $out;
 
     /**
+     * @var list<array<string, mixed>> PR #128 E2E review (blocking finding
+     *   2): messages read AHEAD by tryRead() -- a peek when called with
+     *   its default 0.0 timeout, but a genuine, potentially-blocking wait
+     *   when called with a real one (second E2E review round:
+     *   LspServer::isProgressCreateRefused() waits up to
+     *   CREATE_REPLY_TIMEOUT_SECONDS this way) -- that turned out not to
+     *   be what the caller was looking for, and were handed back via
+     *   pushBack() rather than dropped. read() and waitForInput() both
+     *   drain this FIFO first, so a caller that knows nothing about
+     *   tryRead() (LspLoop's own read loop) still sees a pushed-back
+     *   message exactly like any other, in order.
+     */
+    private array $pending = [];
+
+    /**
      * @param resource $in
      * @param resource $out
      */
@@ -38,6 +53,10 @@ final class StdioLspTransport
      */
     public function read(): ?array
     {
+        if ($this->pending !== []) {
+            return array_shift($this->pending);
+        }
+
         $headerLine = fgets($this->in);
         if ($headerLine === false) {
             return null;
@@ -98,6 +117,14 @@ final class StdioLspTransport
      */
     public function waitForInput(float $timeoutSeconds): bool
     {
+        // PR #128 E2E review: a message already read ahead and pushed back
+        // (see $pending's own docblock) counts as waiting -- LspLoop's
+        // debounce must not block for the full timeout when the very next
+        // read() would return instantly anyway.
+        if ($this->pending !== []) {
+            return true;
+        }
+
         $timeoutSeconds = max(0.0, $timeoutSeconds);
 
         if ($this->hasBufferedInput()) {
@@ -114,7 +141,18 @@ final class StdioLspTransport
         $read = [$this->in];
         $write = null;
         $except = null;
-        $ready = @stream_select($read, $write, $except, $seconds, $microseconds);
+
+        try {
+            // PR #128 self-review: stream_select() throws ValueError
+            // instead of returning false for a stream it cannot poll at
+            // all (observed for php://memory, this class's own test
+            // doubles for STDIN) -- `@` does not suppress a thrown
+            // exception, only a warning, so this used to propagate
+            // uncaught. Same fallback as the false case: poll instead.
+            $ready = @stream_select($read, $write, $except, $seconds, $microseconds);
+        } catch (\ValueError) {
+            return $this->pollForInput($timeoutSeconds);
+        }
 
         if ($ready === false) {
             return $this->pollForInput($timeoutSeconds);
@@ -184,5 +222,45 @@ final class StdioLspTransport
         }
 
         fflush($this->out);
+    }
+
+    /**
+     * PR #128 E2E review (blocking finding 2): reads the next message ONLY
+     * if it becomes available within $timeoutSeconds, null otherwise --
+     * 0.0 (the default) is a pure non-blocking peek.
+     *
+     * Self-review correction (second E2E pass, PR #128): this used to run
+     * its own `stream_select()` call with a bare 0/0 timeout, independent
+     * of `waitForInput()` -- and on windows-latest CI that call was
+     * OBSERVED to hang (job #109299103869: a `read_frame()` timeout waiting
+     * for `$/progress` begin, not merely the "reasoned, not observed"
+     * degradation this docblock originally claimed). `waitForInput()`
+     * already solves exactly this problem for #106's own debounce timer,
+     * including the Windows case (a non-socket, file-backed STDIN pipe
+     * polls via `PeekNamedPipe`/`fstat()` there instead of `select()`), so
+     * this delegates to it rather than duplicating a narrower, broken
+     * version of the same logic.
+     *
+     * Third self-review pass (PR #128, second E2E review round): a
+     * zero-timeout peek right after writing `create` never actually saw a
+     * real client's reply, which arrives milliseconds later over a real
+     * transport, not instantly -- accepting a real $timeoutSeconds here is
+     * what lets LspServer::isProgressCreateRefused() genuinely wait for it
+     * instead.
+     */
+    public function tryRead(float $timeoutSeconds = 0.0): ?array
+    {
+        return $this->waitForInput($timeoutSeconds) ? $this->read() : null;
+    }
+
+    /**
+     * Companion to tryRead(): a message read ahead that turned out not to
+     * be what the caller was looking for, handed back for ordinary
+     * dispatch on the very next read()/waitForInput() call rather than
+     * dropped. See $pending's own docblock.
+     */
+    public function pushBack(array $message): void
+    {
+        array_unshift($this->pending, $message);
     }
 }

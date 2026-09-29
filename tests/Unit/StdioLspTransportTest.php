@@ -115,4 +115,69 @@ final class StdioLspTransportTest extends TestCase
         $this->expectException(\RuntimeException::class);
         $transport->write(['jsonrpc' => '2.0', 'method' => 'initialized']);
     }
+
+    /**
+     * PR #128 E2E review (blocking finding 2), second self-review pass:
+     * tryRead() now delegates to waitForInput() (see its own docblock for
+     * why -- the windows-latest hang this replaces), which already
+     * degrades a stream stream_select() cannot poll at all (ValueError,
+     * observed for php://memory -- this class's own stand-in for STDIN in
+     * every test here) to `pollForInput()`'s fstat()-based check instead of
+     * propagating the exception. A plain php://memory stream is therefore
+     * enough for every case below -- no real socket pair needed (the
+     * earlier STREAM_PF_UNIX-based version of these tests is what CI's
+     * no-pcntl leg refused outright: that build disables
+     * stream_socket_pair() via disable_functions, which makes the
+     * function call itself fatal, not merely return false).
+     */
+    public function testTryReadReturnsAMessageThatIsAlreadyWaiting(): void
+    {
+        $body = '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}';
+        $in = fopen('php://memory', 'r+');
+        fwrite($in, "Content-Length: " . strlen($body) . "\r\n\r\n" . $body);
+        rewind($in);
+
+        $transport = new StdioLspTransport($in, fopen('php://memory', 'w'));
+
+        self::assertSame(
+            ['jsonrpc' => '2.0', 'id' => 1, 'method' => 'initialize', 'params' => []],
+            $transport->tryRead(),
+        );
+    }
+
+    /**
+     * Positive control for the test above: nothing waiting must return
+     * null rather than blocking -- this is the ordinary case (a real
+     * client that has not replied yet), and the whole point of tryRead()
+     * over read() is that this case returns immediately instead of
+     * hanging the server.
+     */
+    public function testTryReadReturnsNullWhenNothingIsWaiting(): void
+    {
+        $transport = new StdioLspTransport(fopen('php://memory', 'r'), fopen('php://memory', 'w'));
+
+        self::assertNull($transport->tryRead());
+    }
+
+    /**
+     * A message pushed back (tryRead() peeked it, but it was not what the
+     * caller wanted) must be the very next thing read() returns -- before
+     * whatever is still sitting on the real stream underneath.
+     */
+    public function testPushBackIsReadBeforeTheUnderlyingStream(): void
+    {
+        $body = '{"jsonrpc":"2.0","method":"textDocument/didSave","params":{}}';
+        $in = fopen('php://memory', 'r+');
+        fwrite($in, "Content-Length: " . strlen($body) . "\r\n\r\n" . $body);
+        rewind($in);
+
+        $transport = new StdioLspTransport($in, fopen('php://memory', 'w'));
+        $transport->pushBack(['jsonrpc' => '2.0', 'method' => 'pushedBack']);
+
+        self::assertSame(['jsonrpc' => '2.0', 'method' => 'pushedBack'], $transport->read());
+        self::assertSame(
+            ['jsonrpc' => '2.0', 'method' => 'textDocument/didSave', 'params' => []],
+            $transport->read(),
+        );
+    }
 }

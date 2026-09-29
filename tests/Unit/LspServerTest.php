@@ -1054,4 +1054,595 @@ final class LspServerTest extends TestCase
         // all from it, since the reentrant version:2 call already published.
         self::assertSame([], $responses);
     }
+
+    /** #111: window/workDoneProgress around the first diagnose (cold boot). */
+    public function testWorkDoneProgressIsSentAroundTheFirstDiagnoseWhenClientSupportsIt(): void
+    {
+        $server = new LspServer('1.0.0', self::fakeSource([]));
+
+        $server->handle([
+            'jsonrpc' => '2.0',
+            'id' => 1,
+            'method' => 'initialize',
+            'params' => ['capabilities' => ['window' => ['workDoneProgress' => true]]],
+        ]);
+
+        $responses = $server->handle([
+            'jsonrpc' => '2.0',
+            'method' => 'textDocument/didOpen',
+            'params' => ['textDocument' => ['uri' => 'file:///tmp/Sample.php', 'version' => 1]],
+        ]);
+
+        $methods = array_map(static fn (array $frame): ?string => $frame['method'] ?? null, $responses);
+
+        self::assertSame(
+            ['window/workDoneProgress/create', '$/progress', '$/progress', 'textDocument/publishDiagnostics'],
+            $methods,
+        );
+
+        $token = $responses[0]['params']['token'];
+        self::assertSame($token, $responses[1]['params']['token']);
+        self::assertSame($token, $responses[2]['params']['token']);
+
+        $begin = $responses[1]['params']['value'];
+        self::assertSame('begin', $begin['kind']);
+        self::assertSame('Rector: warming up', $begin['title']);
+        self::assertSame('Rector: analysing Sample.php', $begin['message']);
+
+        $end = $responses[2]['params']['value'];
+        self::assertSame('end', $end['kind']);
+    }
+
+    /**
+     * Self-review finding (oss:auditor pass): the progress message built
+     * `basename($path)` directly, but a UNC uri (#99) makes `uriToPath()`
+     * return a backslash-joined `\\host\share\...` path, and PHP's
+     * `basename()` only treats `\` as a separator on native Windows --
+     * on macOS/Linux this returned the WHOLE path, not the filename.
+     * `isWatchedConfigFile()` already normalizes with
+     * `str_replace('\\', '/', $path)` before its own `basename()` call for
+     * exactly this reason; the progress message now does the same.
+     */
+    public function testProgressMessageShowsOnlyTheFilenameForAUncPath(): void
+    {
+        $server = new LspServer('1.0.0', self::fakeSource([]));
+
+        $server->handle([
+            'jsonrpc' => '2.0',
+            'id' => 1,
+            'method' => 'initialize',
+            'params' => ['capabilities' => ['window' => ['workDoneProgress' => true]]],
+        ]);
+
+        $responses = $server->handle([
+            'jsonrpc' => '2.0',
+            'method' => 'textDocument/didOpen',
+            'params' => ['textDocument' => ['uri' => 'file://myserver/share/Sample.php', 'version' => 1]],
+        ]);
+
+        self::assertSame('Rector: analysing Sample.php', $responses[1]['params']['value']['message']);
+    }
+
+    /**
+     * Self-review correction (Explore pass): this is a companion/negative
+     * case, not a "positive control" -- it asserts the ABSENCE of an
+     * effect under conditions where the effect was never expected to fire,
+     * so it would pass unchanged even with the whole #111 feature deleted.
+     * It still earns its place alongside the test above: together they
+     * pin BOTH branches of the capability check, so a future edit that
+     * makes progress fire unconditionally (dropping the capability gate
+     * entirely) is caught here rather than only by the positive case.
+     */
+    public function testNoProgressIsSentWhenClientLacksTheCapability(): void
+    {
+        $server = new LspServer('1.0.0', self::fakeSource([]));
+
+        $server->handle([
+            'jsonrpc' => '2.0',
+            'id' => 1,
+            'method' => 'initialize',
+            'params' => ['capabilities' => []],
+        ]);
+
+        $responses = $server->handle([
+            'jsonrpc' => '2.0',
+            'method' => 'textDocument/didOpen',
+            'params' => ['textDocument' => ['uri' => 'file:///tmp/Sample.php', 'version' => 1]],
+        ]);
+
+        self::assertCount(1, $responses);
+        self::assertSame('textDocument/publishDiagnostics', $responses[0]['method']);
+    }
+
+    /** #111: only the FIRST diagnose is a cold boot -- later ones must stay silent. */
+    public function testProgressIsOnlySentAroundTheFirstDiagnoseNotLaterOnes(): void
+    {
+        $server = new LspServer('1.0.0', self::fakeSource([]));
+
+        $server->handle([
+            'jsonrpc' => '2.0',
+            'id' => 1,
+            'method' => 'initialize',
+            'params' => ['capabilities' => ['window' => ['workDoneProgress' => true]]],
+        ]);
+
+        $server->handle([
+            'jsonrpc' => '2.0',
+            'method' => 'textDocument/didOpen',
+            'params' => ['textDocument' => ['uri' => 'file:///tmp/Sample.php', 'version' => 1]],
+        ]);
+
+        $second = $server->handle([
+            'jsonrpc' => '2.0',
+            'method' => 'textDocument/didSave',
+            'params' => ['textDocument' => ['uri' => 'file:///tmp/Sample.php', 'version' => 2]],
+        ]);
+
+        self::assertCount(1, $second);
+        self::assertSame('textDocument/publishDiagnostics', $second[0]['method']);
+    }
+
+    /** #111: $/cancelRequest for a codeAction's own id must refuse that request. */
+    public function testCodeActionIsRefusedAfterCancelRequestForTheSameId(): void
+    {
+        $server = new LspServer('1.0.0', self::fakeSource([
+            self::fix(0, 1, "fixed\n", 'SomeRector'),
+        ]));
+
+        $server->handle([
+            'jsonrpc' => '2.0',
+            'method' => 'textDocument/didOpen',
+            'params' => ['textDocument' => ['uri' => 'file:///tmp/Sample.php', 'version' => 1]],
+        ]);
+
+        $server->handle([
+            'jsonrpc' => '2.0',
+            'method' => '$/cancelRequest',
+            'params' => ['id' => 42],
+        ]);
+
+        $responses = $server->handle([
+            'jsonrpc' => '2.0',
+            'id' => 42,
+            'method' => 'textDocument/codeAction',
+            'params' => ['textDocument' => ['uri' => 'file:///tmp/Sample.php']],
+        ]);
+
+        self::assertCount(1, $responses);
+        self::assertArrayHasKey('error', $responses[0]);
+        self::assertSame(-32800, $responses[0]['error']['code']);
+    }
+
+    /**
+     * Positive control: a cancelRequest for a DIFFERENT id must not refuse
+     * an unrelated codeAction -- otherwise a single cancellation would
+     * silently disable every future codeAction, indistinguishable from
+     * "cancellation is correctly scoped to its own id".
+     */
+    public function testCancelRequestDoesNotAffectAnUnrelatedCodeActionId(): void
+    {
+        $server = new LspServer('1.0.0', self::fakeSource([
+            self::fix(0, 1, "fixed\n", 'SomeRector'),
+        ]));
+
+        $server->handle([
+            'jsonrpc' => '2.0',
+            'method' => 'textDocument/didOpen',
+            'params' => ['textDocument' => ['uri' => 'file:///tmp/Sample.php', 'version' => 1]],
+        ]);
+
+        $server->handle([
+            'jsonrpc' => '2.0',
+            'method' => '$/cancelRequest',
+            'params' => ['id' => 42],
+        ]);
+
+        $responses = $server->handle([
+            'jsonrpc' => '2.0',
+            'id' => 43,
+            'method' => 'textDocument/codeAction',
+            'params' => ['textDocument' => ['uri' => 'file:///tmp/Sample.php']],
+        ]);
+
+        self::assertCount(1, $responses);
+        self::assertArrayNotHasKey('error', $responses[0]);
+        self::assertArrayHasKey('result', $responses[0]);
+        self::assertNotEmpty($responses[0]['result']);
+    }
+
+    /**
+     * PR #128 E2E review, blocking finding 1: progress must reach the
+     * transport LIVE -- `create` and `begin` written BEFORE diagnose()
+     * runs, not batched together with `end`/publishDiagnostics after it
+     * finishes. A log shared between the frame writer and the fake
+     * DiagnosticsSource is the only way to observe WHEN each thing
+     * happened, not just what order handle()'s return value lists them in.
+     */
+    public function testProgressCreateAndBeginAreWrittenToTheTransportBeforeDiagnoseRuns(): void
+    {
+        $log = new class () {
+            /** @var list<string> */
+            public array $entries = [];
+        };
+
+        $diagnostics = new class ($log) implements DiagnosticsSource {
+            public function __construct(private object $log)
+            {
+            }
+
+            public function diagnose(string $absolutePath): array
+            {
+                $this->log->entries[] = 'diagnose-called';
+
+                return ['fixes' => []];
+            }
+        };
+
+        $frameWriter = function (array $frame) use ($log): void {
+            $log->entries[] = 'wrote:' . ($frame['method'] ?? '?');
+        };
+
+        $server = new LspServer('1.0.0', $diagnostics, frameWriter: $frameWriter);
+
+        $server->handle([
+            'jsonrpc' => '2.0',
+            'id' => 1,
+            'method' => 'initialize',
+            'params' => ['capabilities' => ['window' => ['workDoneProgress' => true]]],
+        ]);
+
+        $server->handle([
+            'jsonrpc' => '2.0',
+            'method' => 'textDocument/didOpen',
+            'params' => ['textDocument' => ['uri' => 'file:///tmp/Sample.php', 'version' => 1]],
+        ]);
+
+        self::assertSame([
+            'wrote:window/workDoneProgress/create',
+            'wrote:$/progress',
+            'diagnose-called',
+            'wrote:$/progress',
+            'wrote:textDocument/publishDiagnostics',
+        ], $log->entries);
+    }
+
+    /**
+     * PR #128 E2E review, blocking finding 2: when the client's reply to
+     * `create` is already available (non-blocking peek) and is an error,
+     * neither `$/progress` begin nor end may be sent for that token.
+     */
+    public function testProgressBeginAndEndAreSuppressedWhenTheClientRefusesCreate(): void
+    {
+        $server = new LspServer(
+            '1.0.0',
+            self::fakeSource([]),
+            tryReadAhead: static fn (): array => [
+                'jsonrpc' => '2.0',
+                'id' => 'rector-warm-lsp/progress-create',
+                'error' => ['code' => -32800, 'message' => 'client declined this progress token'],
+            ],
+        );
+
+        $server->handle([
+            'jsonrpc' => '2.0',
+            'id' => 1,
+            'method' => 'initialize',
+            'params' => ['capabilities' => ['window' => ['workDoneProgress' => true]]],
+        ]);
+
+        $responses = $server->handle([
+            'jsonrpc' => '2.0',
+            'method' => 'textDocument/didOpen',
+            'params' => ['textDocument' => ['uri' => 'file:///tmp/Sample.php', 'version' => 1]],
+        ]);
+
+        $methods = array_map(static fn (array $frame): ?string => $frame['method'] ?? null, $responses);
+
+        self::assertSame(
+            ['window/workDoneProgress/create', 'textDocument/publishDiagnostics'],
+            $methods,
+        );
+    }
+
+    /**
+     * Second E2E review round, PR #128: when $tryReadAhead is not wired at
+     * all (every caller that cannot offer this capability), progress must
+     * still fire normally -- this is the ONE case that still assumes
+     * success without confirmation, because there is no mechanism to ask.
+     * Every OTHER "we could not confirm" case below now skips instead.
+     */
+    public function testProgressFiresNormallyWhenNoReadAheadCapabilityIsWiredAtAll(): void
+    {
+        $server = new LspServer('1.0.0', self::fakeSource([]));
+
+        $server->handle([
+            'jsonrpc' => '2.0',
+            'id' => 1,
+            'method' => 'initialize',
+            'params' => ['capabilities' => ['window' => ['workDoneProgress' => true]]],
+        ]);
+
+        $responses = $server->handle([
+            'jsonrpc' => '2.0',
+            'method' => 'textDocument/didOpen',
+            'params' => ['textDocument' => ['uri' => 'file:///tmp/Sample.php', 'version' => 1]],
+        ]);
+
+        $methods = array_map(static fn (array $frame): ?string => $frame['method'] ?? null, $responses);
+
+        self::assertSame(
+            ['window/workDoneProgress/create', '$/progress', '$/progress', 'textDocument/publishDiagnostics'],
+            $methods,
+        );
+    }
+
+    /**
+     * Second E2E review round, PR #128: the window elapsing with no reply
+     * AT ALL must now skip progress, not assume success -- a client that
+     * never acks `create` must never see a live $/progress for that token.
+     * This is a real semantic change from the first PR #128 fix, which
+     * treated "nothing seen yet" (a zero-timeout peek) as "proceed";
+     * $tryReadAhead is now given a genuine window (isProgressCreateRefused's
+     * own CREATE_REPLY_TIMEOUT_SECONDS), so "still nothing after waiting
+     * for it" is a real timeout, not an instant, meaningless peek.
+     */
+    public function testProgressIsSkippedWhenTheCreateReplyNeverArrivesWithinTheWindow(): void
+    {
+        $server = new LspServer(
+            '1.0.0',
+            self::fakeSource([]),
+            tryReadAhead: static fn (float $timeoutSeconds): ?array => null,
+        );
+
+        $server->handle([
+            'jsonrpc' => '2.0',
+            'id' => 1,
+            'method' => 'initialize',
+            'params' => ['capabilities' => ['window' => ['workDoneProgress' => true]]],
+        ]);
+
+        $responses = $server->handle([
+            'jsonrpc' => '2.0',
+            'method' => 'textDocument/didOpen',
+            'params' => ['textDocument' => ['uri' => 'file:///tmp/Sample.php', 'version' => 1]],
+        ]);
+
+        $methods = array_map(static fn (array $frame): ?string => $frame['method'] ?? null, $responses);
+
+        self::assertSame(
+            ['window/workDoneProgress/create', 'textDocument/publishDiagnostics'],
+            $methods,
+        );
+    }
+
+    /**
+     * Second E2E review round, PR #128: the read-ahead peek can legitimately
+     * find a message that is NOT the create reply (e.g. the client sent
+     * something else first) -- it must be handed back via
+     * $pushBackMessage rather than silently dropped, but this round's
+     * create reply is now unresolved (not "assumed fine" the way the
+     * first PR #128 fix treated it), so progress is skipped too.
+     *
+     * Third self-review pass (oss:auditor, same round): the fake closure
+     * returns the unrelated message once, then null -- modelling "nothing
+     * else, ever, including the real reply, arrives within the window".
+     * Confirms the RETRY loop still terminates and skips correctly when
+     * the real reply genuinely never comes, not just when it is consumed
+     * by a single call. See the recovery test right below for the case
+     * where the real reply DOES arrive after the unrelated message.
+     */
+    public function testAnUnrelatedReadAheadMessageIsPushedBackAndProgressIsSkipped(): void
+    {
+        $pushedBack = [];
+        $unrelated = ['jsonrpc' => '2.0', 'method' => 'textDocument/didSave', 'params' => ['textDocument' => ['uri' => 'file:///tmp/Other.php']]];
+        $calls = new class () {
+            public int $count = 0;
+        };
+
+        $server = new LspServer(
+            '1.0.0',
+            self::fakeSource([]),
+            tryReadAhead: static function (float $timeoutSeconds) use ($unrelated, $calls): ?array {
+                $calls->count++;
+
+                return $calls->count === 1 ? $unrelated : null;
+            },
+            pushBackMessage: function (array $message) use (&$pushedBack): void {
+                $pushedBack[] = $message;
+            },
+        );
+
+        $server->handle([
+            'jsonrpc' => '2.0',
+            'id' => 1,
+            'method' => 'initialize',
+            'params' => ['capabilities' => ['window' => ['workDoneProgress' => true]]],
+        ]);
+
+        $responses = $server->handle([
+            'jsonrpc' => '2.0',
+            'method' => 'textDocument/didOpen',
+            'params' => ['textDocument' => ['uri' => 'file:///tmp/Sample.php', 'version' => 1]],
+        ]);
+
+        $methods = array_map(static fn (array $frame): ?string => $frame['method'] ?? null, $responses);
+
+        self::assertSame(
+            ['window/workDoneProgress/create', 'textDocument/publishDiagnostics'],
+            $methods,
+        );
+        self::assertSame([$unrelated], $pushedBack);
+    }
+
+    /**
+     * Third self-review pass (oss:auditor, same PR #128 round): a single
+     * $tryReadAhead call used to consume the WHOLE window on the first
+     * message it saw, even an unrelated one arriving moments before the
+     * real reply -- skipping progress on an otherwise-healthy client that
+     * happened to send something else first. This proves the retry loop
+     * actually recovers: an unrelated message is set aside, and the real
+     * (successful) reply arriving on the VERY NEXT call still lets
+     * progress fire, with the unrelated message still pushed back rather
+     * than lost.
+     */
+    public function testProgressFiresWhenTheRealReplyArrivesAfterAnUnrelatedMessage(): void
+    {
+        $pushedBack = [];
+        $unrelated = ['jsonrpc' => '2.0', 'method' => 'textDocument/didSave', 'params' => ['textDocument' => ['uri' => 'file:///tmp/Other.php']]];
+        $realReply = ['jsonrpc' => '2.0', 'id' => 'rector-warm-lsp/progress-create', 'result' => null];
+        $calls = new class () {
+            public int $count = 0;
+        };
+
+        $server = new LspServer(
+            '1.0.0',
+            self::fakeSource([]),
+            tryReadAhead: static function (float $timeoutSeconds) use ($unrelated, $realReply, $calls): ?array {
+                $calls->count++;
+
+                return $calls->count === 1 ? $unrelated : $realReply;
+            },
+            pushBackMessage: function (array $message) use (&$pushedBack): void {
+                $pushedBack[] = $message;
+            },
+        );
+
+        $server->handle([
+            'jsonrpc' => '2.0',
+            'id' => 1,
+            'method' => 'initialize',
+            'params' => ['capabilities' => ['window' => ['workDoneProgress' => true]]],
+        ]);
+
+        $responses = $server->handle([
+            'jsonrpc' => '2.0',
+            'method' => 'textDocument/didOpen',
+            'params' => ['textDocument' => ['uri' => 'file:///tmp/Sample.php', 'version' => 1]],
+        ]);
+
+        $methods = array_map(static fn (array $frame): ?string => $frame['method'] ?? null, $responses);
+
+        self::assertSame(
+            ['window/workDoneProgress/create', '$/progress', '$/progress', 'textDocument/publishDiagnostics'],
+            $methods,
+        );
+        self::assertSame([$unrelated], $pushedBack);
+    }
+
+    /**
+     * PR #128 second E2E review (the blocking finding this round): a
+     * delayed EXPLICIT ERROR reply must skip progress. This fake closure
+     * only "sees" the reply if given a timeout at least as long as the
+     * delay -- called with one shorter (the old, unfixed call shape,
+     * which passed no timeout at all) it sees nothing.
+     *
+     * oss:auditor self-review correction (same round): this test's red
+     * (against commit 75a63eb)-then-green transition is real, but it is
+     * driven by the OLD "null means proceed" semantics this round also
+     * changed, not by timeout-forwarding specifically -- both an
+     * unforwarded timeout (null, old semantics: proceed) and a forwarded
+     * one (the delayed error, new semantics: skip) happen to produce
+     * DIFFERENT outcomes here only because of that semantics change, so
+     * this test alone cannot tell "timeout forwarded correctly" apart from
+     * "timeout not forwarded, but null now also skips". The sibling
+     * positive control right after this one is what actually pins
+     * timeout-forwarding: an unforwarded timeout there would see null (old
+     * behaviour) and WRONGLY skip a reply that should fire, which is the
+     * one case a forwarding regression cannot hide behind the semantics
+     * change.
+     */
+    public function testProgressIsSkippedWhenTheDelayedCreateReplyIsAnError(): void
+    {
+        $replyDelaySeconds = 0.05;
+
+        $server = new LspServer(
+            '1.0.0',
+            self::fakeSource([]),
+            tryReadAhead: static function (float $timeoutSeconds = 0.0) use ($replyDelaySeconds): ?array {
+                if ($timeoutSeconds < $replyDelaySeconds) {
+                    // The old call shape (no timeout argument at all, or
+                    // one shorter than the delay): the reply is not there
+                    // YET, exactly what a zero-timeout peek would see.
+                    return null;
+                }
+
+                usleep((int) ($replyDelaySeconds * 1_000_000));
+
+                return [
+                    'jsonrpc' => '2.0',
+                    'id' => 'rector-warm-lsp/progress-create',
+                    'error' => ['code' => -32800, 'message' => 'client declined this progress token'],
+                ];
+            },
+        );
+
+        $server->handle([
+            'jsonrpc' => '2.0',
+            'id' => 1,
+            'method' => 'initialize',
+            'params' => ['capabilities' => ['window' => ['workDoneProgress' => true]]],
+        ]);
+
+        $responses = $server->handle([
+            'jsonrpc' => '2.0',
+            'method' => 'textDocument/didOpen',
+            'params' => ['textDocument' => ['uri' => 'file:///tmp/Sample.php', 'version' => 1]],
+        ]);
+
+        $methods = array_map(static fn (array $frame): ?string => $frame['method'] ?? null, $responses);
+
+        self::assertSame(
+            ['window/workDoneProgress/create', 'textDocument/publishDiagnostics'],
+            $methods,
+        );
+    }
+
+    /**
+     * Positive control for the test above: the SAME delayed-reply closure,
+     * but the delayed reply is a SUCCESS this time -- begin/end must still
+     * fire once the wait genuinely confirms it, proving this is a real
+     * wait-and-check, not a change that suppresses progress unconditionally.
+     */
+    public function testProgressFiresWhenTheDelayedCreateReplyIsASuccess(): void
+    {
+        $replyDelaySeconds = 0.05;
+
+        $server = new LspServer(
+            '1.0.0',
+            self::fakeSource([]),
+            tryReadAhead: static function (float $timeoutSeconds = 0.0) use ($replyDelaySeconds): ?array {
+                if ($timeoutSeconds < $replyDelaySeconds) {
+                    return null;
+                }
+
+                usleep((int) ($replyDelaySeconds * 1_000_000));
+
+                return [
+                    'jsonrpc' => '2.0',
+                    'id' => 'rector-warm-lsp/progress-create',
+                    'result' => null,
+                ];
+            },
+        );
+
+        $server->handle([
+            'jsonrpc' => '2.0',
+            'id' => 1,
+            'method' => 'initialize',
+            'params' => ['capabilities' => ['window' => ['workDoneProgress' => true]]],
+        ]);
+
+        $responses = $server->handle([
+            'jsonrpc' => '2.0',
+            'method' => 'textDocument/didOpen',
+            'params' => ['textDocument' => ['uri' => 'file:///tmp/Sample.php', 'version' => 1]],
+        ]);
+
+        $methods = array_map(static fn (array $frame): ?string => $frame['method'] ?? null, $responses);
+
+        self::assertSame(
+            ['window/workDoneProgress/create', '$/progress', '$/progress', 'textDocument/publishDiagnostics'],
+            $methods,
+        );
+    }
 }
