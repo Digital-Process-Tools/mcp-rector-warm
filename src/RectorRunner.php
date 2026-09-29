@@ -504,46 +504,74 @@ class RectorRunner implements RunnerInterface
      */
     private function serveWorker($socket, ?int $daemonPid = null): void
     {
+        // #133: an independent E2E check of #127 found that ANY Throwable escaping
+        // this method (not only bootInPlace()'s, which the old code caught) unwinds
+        // this FORKED CHILD straight back into boot()'s own call frame -- pcntl_fork()
+        // duplicates the whole PHP call stack and every inherited fd, including the
+        // real daemon's own client stdin/stdout, so an uncaught exception here does
+        // not "crash the worker": it resumes this forked child inside the SAME
+        // request-handling loop the real daemon is running, which then answers the
+        // client's own pipes as a second, bogus server. Concretely: the old code's
+        // OWN writeFrame($socket, ...) call at the end of the request loop sat
+        // OUTSIDE any try/catch -- once #127's orphan check started throwing on a
+        // dead $socket, that write itself threw a broken-pipe RuntimeException
+        // straight past this method's edge with nothing left to catch it. The same
+        // escape already existed before #127, just far rarer: any writeFrame() call
+        // here (the boot-failure report, the boot-success handshake, or a normal
+        // call's reply) throws exactly this way whenever the daemon's end of
+        // $socket has already closed by the time it runs. Wrapping the ENTIRE body
+        // in one try/catch/finally, with an unconditional exit() in the finally, is
+        // what actually closes this: this worker process must NEVER return or
+        // unwind into its caller, no matter what throws or when.
+        $exitCode = 0;
         try {
-            $this->bootInPlace();
-        } catch (\Throwable $e) {
-            $this->writeFrame($socket, $this->encodeHandshakeFrame([
-                'ok' => false,
-                'error' => $e->getMessage(),
-                'error_class' => $e::class,
-            ]));
-            \fclose($socket);
-            exit(1);
-        }
-        $this->writeFrame($socket, $this->encodeHandshakeFrame([
-            'ok' => true,
-            'bootstrap_files' => $this->bootstrapFileHashes,
-        ]));
-
-        while (true) {
-            $frame = $this->readFrame($socket);
-            if ($frame === null) {
-                break;
-            }
-            $request = \json_decode($frame, true);
-            $argv = \is_array($request) && \is_array($request['argv'] ?? null) ? $request['argv'] : [];
-            $warmBoot = \is_array($request) && ($request['warm_boot'] ?? false) === true;
-            // Default true (analysis, deadline applies) when the field is
-            // somehow missing -- the safer of the two readings for an
-            // unrecognised/older frame: it fails toward "may still be
-            // killed", never toward "silently unkillable" (#72).
-            $dryRun = !\is_array($request) || ($request['dry_run'] ?? true) === true;
             try {
-                $result = $this->forkAndExecute($argv, $warmBoot, $dryRun, $daemonPid);
+                $this->bootInPlace();
             } catch (\Throwable $e) {
-                $result = ['error' => $e->getMessage(), 'error_class' => $e::class];
-            }
-            $encoded = \json_encode($result, \JSON_INVALID_UTF8_SUBSTITUTE);
-            $this->writeFrame($socket, $encoded !== false ? $encoded : '{"error":"failed to encode the warm-worker result"}');
-        }
+                $this->writeFrame($socket, $this->encodeHandshakeFrame([
+                    'ok' => false,
+                    'error' => $e->getMessage(),
+                    'error_class' => $e::class,
+                ]));
+                $exitCode = 1;
 
-        \fclose($socket);
-        exit(0);
+                return;
+            }
+            $this->writeFrame($socket, $this->encodeHandshakeFrame([
+                'ok' => true,
+                'bootstrap_files' => $this->bootstrapFileHashes,
+            ]));
+
+            while (true) {
+                $frame = $this->readFrame($socket);
+                if ($frame === null) {
+                    break;
+                }
+                $request = \json_decode($frame, true);
+                $argv = \is_array($request) && \is_array($request['argv'] ?? null) ? $request['argv'] : [];
+                $warmBoot = \is_array($request) && ($request['warm_boot'] ?? false) === true;
+                // Default true (analysis, deadline applies) when the field is
+                // somehow missing -- the safer of the two readings for an
+                // unrecognised/older frame: it fails toward "may still be
+                // killed", never toward "silently unkillable" (#72).
+                $dryRun = !\is_array($request) || ($request['dry_run'] ?? true) === true;
+                try {
+                    $result = $this->forkAndExecute($argv, $warmBoot, $dryRun, $daemonPid);
+                } catch (\Throwable $e) {
+                    $result = ['error' => $e->getMessage(), 'error_class' => $e::class];
+                }
+                $encoded = \json_encode($result, \JSON_INVALID_UTF8_SUBSTITUTE);
+                $this->writeFrame($socket, $encoded !== false ? $encoded : '{"error":"failed to encode the warm-worker result"}');
+            }
+        } catch (\Throwable) {
+            // Catch-all safety net -- see the docblock above. Whatever threw
+            // (writeFrame() on a dead socket, or anything else), this worker
+            // still exits cleanly rather than escaping into boot()'s caller.
+            $exitCode = 1;
+        } finally {
+            @\fclose($socket);
+            exit($exitCode);
+        }
     }
 
     /**

@@ -1628,6 +1628,121 @@ final class RectorRunnerTest extends TestCase
             rmdir($tmp);
         }
     }
+
+    /**
+     * #133: an independent E2E check of the #127 fix found that ANY Throwable
+     * escaping serveWorker() (not only bootInPlace()'s, which was already caught)
+     * unwinds the forked worker straight back into boot()'s own caller -- a real
+     * pcntl_fork() duplicates the WHOLE call stack, including inherited fds, so an
+     * uncaught exception there does not crash the worker: it resumes as a second,
+     * bogus copy of whatever was running before the fork. The concrete trigger:
+     * writeFrame() throwing on an already-dead $socket used to sit outside every
+     * try/catch in serveWorker().
+     *
+     * Reproduced here WITHOUT any daemon-kill timing: the daemon's own end of the
+     * socket pair is closed BEFORE the fork even happens, so bootInPlace() succeeds
+     * (a real, trivial rector.php) but the very first writeFrame() (the boot
+     * handshake) fails immediately with a broken pipe -- "a worker whose daemon is
+     * already gone by the time it tries to reply", which is exactly the shape #133
+     * found on EVERY write site, not only the one #127 added. The forked child
+     * wraps serveWorker() in its OWN try/catch (independent of PHPUnit's own
+     * exception handler, which is also copied into the fork and could otherwise
+     * mask this) and writes a marker file if the call either throws past
+     * serveWorker() or plainly returns -- either one proves the escape, since
+     * serveWorker() is documented to always exit() internally.
+     */
+    public function testServeWorkerNeverUnwindsWhenTheSocketIsAlreadyDead(): void
+    {
+        if (!\function_exists('pcntl_fork') || !\function_exists('pcntl_waitpid')) {
+            self::markTestSkipped('pcntl_fork/pcntl_waitpid unavailable in this environment');
+        }
+
+        $tmp = sys_get_temp_dir() . '/rector-runner-133-serveworker-escape-test-' . bin2hex(random_bytes(8));
+        mkdir($tmp);
+        file_put_contents(
+            $tmp . '/rector.php',
+            "<?php\n\ndeclare(strict_types=1);\n\nuse Rector\\Config\\RectorConfig;\n\nreturn RectorConfig::configure();\n",
+        );
+        $previousCwd = getcwd();
+        $previousArgv = $_SERVER['argv'] ?? ['rector'];
+        $markerFile = $tmp . '/serveworker-escaped.marker';
+
+        try {
+            chdir($tmp);
+            $_SERVER['argv'] = ['rector'];
+
+            $sockets = stream_socket_pair(STREAM_PF_UNIX, STREAM_SOCK_STREAM, STREAM_IPPROTO_IP);
+            self::assertIsArray($sockets);
+            [$parentSocket, $childSocket] = $sockets;
+
+            $pid = pcntl_fork();
+            self::assertNotSame(-1, $pid, 'pcntl_fork() must succeed to run this test');
+
+            if ($pid === 0) {
+                // Child ("worker"): close the daemon's own end FIRST -- every
+                // writeFrame() this worker attempts from here on fails with a
+                // broken pipe, starting with the boot handshake itself.
+                fclose($parentSocket);
+
+                $runner = new RectorRunner(0);
+                $method = new \ReflectionMethod(RectorRunner::class, 'serveWorker');
+                $method->setAccessible(true);
+                try {
+                    $method->invoke($runner, $childSocket, null);
+                    // serveWorker() is documented to always exit() -- reaching
+                    // this line at all (a plain return, not even a throw) is
+                    // itself the bug.
+                    file_put_contents($markerFile, 'returned without exiting');
+                } catch (\Throwable $e) {
+                    // #133's exact bug: an exception reached past serveWorker().
+                    file_put_contents($markerFile, 'escaped as: ' . $e->getMessage());
+                }
+                // Only reached if serveWorker() failed to exit() on its own --
+                // a deliberately different code from serveWorker()'s own exit(1)
+                // (below) so the parent can tell which one actually ran.
+                exit(50);
+            }
+
+            // Parent (this test process, standing in for "the daemon"): close
+            // BOTH ends now -- not just $childSocket (which this process never
+            // uses anyway), but $parentSocket too. A unix socket pair endpoint is
+            // only truly dead once EVERY process holding a copy of that fd has
+            // closed it; pcntl_fork() duplicated $parentSocket into the child,
+            // and the child already closed its OWN copy, but THIS process (the
+            // real owner) still held one open until this line -- without closing
+            // it here, the child's writeFrame() call succeeds into a live,
+            // unread buffer instead of failing, and the child's subsequent
+            // readFrame() then blocks forever waiting for a request nobody will
+            // ever send, hanging this whole test (caught by self-review: the
+            // first run of this test timed out for exactly this reason).
+            fclose($childSocket);
+            fclose($parentSocket);
+            $status = 0;
+            pcntl_waitpid($pid, $status);
+
+            self::assertFileDoesNotExist(
+                $markerFile,
+                'must fire: serveWorker() must never unwind past its own exit() call, even when every '
+                . 'write it attempts fails immediately (#133)',
+            );
+            self::assertTrue(
+                pcntl_wifexited($status),
+                'the forked worker must have called exit() cleanly, not crashed or been signalled',
+            );
+            self::assertSame(
+                1,
+                pcntl_wexitstatus($status),
+                'a write failure on an already-dead socket must still exit(1) from INSIDE serveWorker() '
+                . "itself -- exit code 50 would mean the escape's own fallback exit() ran instead (#133)",
+            );
+        } finally {
+            chdir($previousCwd);
+            $_SERVER['argv'] = $previousArgv;
+            @unlink($markerFile);
+            unlink($tmp . '/rector.php');
+            rmdir($tmp);
+        }
+    }
 }
 
 /**
