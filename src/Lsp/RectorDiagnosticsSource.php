@@ -224,6 +224,21 @@ final class RectorDiagnosticsSource implements BufferDiagnosticsSource, Workspac
         TempCopySweeper::sweepDirectory($directory);
 
         try {
+            // #142/#144: a symlink or NTFS junction planted at the
+            // deterministic `.rector-warm-<pid>` name would have is_dir()
+            // follow it -- the write below then lands through it. Refused
+            // before that happens. `$tempDirectory` is checked again below,
+            // right before the `finally` block's own unlink/rmdir:
+            // isLinkOrJunction($tempDirectory) here only prevents this
+            // branch from being entered, and does nothing to a `finally`
+            // that runs unconditionally on every exit from `try` -- a
+            // re-check is the only way to keep it out of that block too.
+            // isLinkOrJunction() widens is_link() to also catch a junction,
+            // which is_link() does not reliably detect (#144).
+            if (TempCopySweeper::isLinkOrJunction($tempDirectory)) {
+                return self::failure(sprintf('rector-warm-lsp: refusing a symlinked or junctioned temp directory in %s', $directory));
+            }
+
             if (!is_dir($tempDirectory) && !@mkdir($tempDirectory, 0o700) && !is_dir($tempDirectory)) {
                 return self::failure(sprintf('rector-warm-lsp: could not create a temp directory in %s', $directory));
             }
@@ -241,8 +256,18 @@ final class RectorDiagnosticsSource implements BufferDiagnosticsSource, Workspac
         } catch (\Throwable $e) {
             $result = self::failure($e->getMessage());
         } finally {
-            @unlink($tempPath);
-            @rmdir($tempDirectory);
+            // #142/#144: `$tempDirectory` is an intermediate path component
+            // of `$tempPath`, not its final one, so unlink() follows a
+            // symlink or junction there regardless of the early return
+            // above -- that return only skips the write; it does not skip
+            // this block, which runs on every exit from `try`, including
+            // that one. Re-checked here so a symlinked or junctioned
+            // `$tempDirectory` never reaches unlink/rmdir either, whether or
+            // not the write above ever ran.
+            if (!TempCopySweeper::isLinkOrJunction($tempDirectory)) {
+                @unlink($tempPath);
+                @rmdir($tempDirectory);
+            }
         }
 
         foreach ($result['errors'] ?? [] as $i => $error) {

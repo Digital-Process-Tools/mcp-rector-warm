@@ -45,7 +45,7 @@ final class TempCopySweeper
                     continue;
                 }
                 $path = $directory . DIRECTORY_SEPARATOR . $entry;
-                if (!is_dir($path) || is_link($path)) {
+                if (!is_dir($path) || self::isLinkOrJunction($path)) {
                     continue;
                 }
 
@@ -93,7 +93,15 @@ final class TempCopySweeper
 
     private static function removeIfStale(string $path, int $pid): bool
     {
-        if ($pid === getmypid() || self::isAlive($pid) !== false) {
+        // #142/#144: the shared sink both sweepTree() (which also checks
+        // this itself, before ever reaching here) and sweepDirectory()
+        // (which does not -- its glob(..., GLOB_ONLYDIR) follows a symlink
+        // or a junction) funnel into. Refusing here closes both routes at
+        // once: a symlink or junction can point anywhere, and deleting
+        // through it means deleting outside the workspace. isLinkOrJunction()
+        // widens is_link() to also catch an NTFS junction, which is_link()
+        // does not reliably detect (#144).
+        if (self::isLinkOrJunction($path) || $pid === getmypid() || self::isAlive($pid) !== false) {
             return false;
         }
 
@@ -106,6 +114,34 @@ final class TempCopySweeper
         }
 
         return @rmdir($path);
+    }
+
+    /**
+     * #144: is_link() is documented reliable for a POSIX symlink and a
+     * Windows symlink, but NOT for an NTFS junction (`mklink /J`, which --
+     * unlike `mklink /D` -- needs no elevated privilege) -- a distinct
+     * Windows reparse-point type, confirmed on this repo's own CI to slip
+     * past is_link() undetected (#144). `fsutil reparsepoint query` exits 0
+     * for ANY reparse point (a junction or a symlink) and non-zero for an
+     * ordinary directory or a path that does not exist -- exactly the
+     * is_link() semantics this needs, widened to the type is_link() misses.
+     * A no-op everywhere but Windows, where is_link() alone is already
+     * proven reliable (#142).
+     */
+    public static function isLinkOrJunction(string $path): bool
+    {
+        if (is_link($path)) {
+            return true;
+        }
+
+        if (PHP_OS_FAMILY !== 'Windows') {
+            return false;
+        }
+
+        $exitCode = 0;
+        @exec(sprintf('fsutil reparsepoint query %s 2>NUL', escapeshellarg($path)), result_code: $exitCode);
+
+        return $exitCode === 0;
     }
 
     /**

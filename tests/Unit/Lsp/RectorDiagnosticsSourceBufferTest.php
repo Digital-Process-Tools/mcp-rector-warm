@@ -43,9 +43,31 @@ final class RectorDiagnosticsSourceBufferTest extends TestCase
                 continue;
             }
             $path = $dir . '/' . $entry;
-            is_dir($path) ? $this->removeTree($path) : unlink($path);
+            if (is_link($path)) {
+                self::removeLink($path);
+            } elseif (is_dir($path)) {
+                $this->removeTree($path);
+            } else {
+                unlink($path);
+            }
         }
         rmdir($dir);
+    }
+
+    /**
+     * Removes a symlink itself, never its target. On Windows a link to a
+     * directory is a directory entry: unlink() refuses it ("Is a
+     * directory") and rmdir() is what removes the link -- still without
+     * touching the target. rmdir() is tried first there because a link
+     * whose target is already gone no longer answers is_dir(). Elsewhere
+     * unlink() removes the link.
+     */
+    private static function removeLink(string $path): void
+    {
+        if (PHP_OS_FAMILY === 'Windows' && @rmdir($path)) {
+            return;
+        }
+        unlink($path);
     }
 
     /**
@@ -235,5 +257,111 @@ final class RectorDiagnosticsSourceBufferTest extends TestCase
         } finally {
             @rmdir($outsideDir);
         }
+    }
+
+    /**
+     * #142: a symlink planted at the deterministic `.rector-warm-<pid>` name
+     * beside the original must not have anything written through it, and --
+     * the gap a first attempt at this fix left open -- must not have
+     * anything unlinked through it in the `finally` block either, whether or
+     * not a same-named file already sits at the symlink's target.
+     */
+    public function testABufferForASymlinkedTempDirectoryIsRefusedAndNothingOutsideIsTouched(): void
+    {
+        $externalDir = sys_get_temp_dir() . '/mcp-rector-lsp-external-' . bin2hex(random_bytes(4));
+        mkdir($externalDir, 0o700, true);
+        $externalFile = $externalDir . '/Sample.php';
+        file_put_contents($externalFile, "<?php\n\nclass NotYours\n{\n}\n");
+
+        $symlinkPath = $this->workDir . '/src/.rector-warm-' . getmypid();
+
+        try {
+            self::assertTrue(symlink($externalDir, $symlinkPath), 'could not create the test symlink');
+
+            $called = false;
+            $result = $this->source(function () use (&$called): string {
+                $called = true;
+
+                return '{"totals":{"changed_files":0,"errors":0}}';
+            })->diagnoseBuffer($this->original, "<?php\n\nclass Sample\n{\n    // unsaved\n}\n");
+
+            self::assertFalse($called, 'a symlinked temp directory must be refused before Rector is asked to run');
+            self::assertStringContainsString('symlinked or junctioned temp directory', $result['errors'][0]['message']);
+            self::assertSame("<?php\n\nclass NotYours\n{\n}\n", file_get_contents($externalFile), 'the finally block must not unlink through the symlink');
+            self::assertFileExists($externalFile);
+            // The symlink itself is refused, not removed -- it is left in
+            // place next to the original, same as any other candidate this
+            // code chooses not to touch. The original file is untouched,
+            // which is the thing this test guards.
+            self::assertSame("<?php\n\nclass Sample\n{\n}\n", file_get_contents($this->original));
+        } finally {
+            // Removed as a link, never recursed into (following it a second
+            // time would be the exact bug under test), and before its target
+            // is removed: on Windows a link to a directory needs rmdir().
+            self::removeLink($symlinkPath);
+            $this->removeTree($externalDir);
+        }
+    }
+
+    /**
+     * #144: an NTFS junction (`mklink /J`) is a distinct Windows
+     * reparse-point type from the symlink #142's guard above was proven
+     * against -- `mklink /J` needs no elevated privilege, unlike `mklink
+     * /D`. PHP's is_link() is documented reliable for POSIX and Windows
+     * symlinks; its behaviour on a junction is the open question this
+     * guards, at both is_link() call sites in diagnoseBuffer() (the
+     * pre-write refusal and the finally block's re-check). Windows-only:
+     * there is no junction concept to create elsewhere.
+     */
+    public function testABufferForAJunctionedTempDirectoryIsRefusedOnWindows(): void
+    {
+        if (PHP_OS_FAMILY !== 'Windows') {
+            self::markTestSkipped('NTFS junctions only exist on Windows.');
+        }
+
+        $externalDir = sys_get_temp_dir() . '/mcp-rector-lsp-external-' . bin2hex(random_bytes(4));
+        mkdir($externalDir, 0o700, true);
+        $externalFile = $externalDir . '/Sample.php';
+        file_put_contents($externalFile, "<?php\n\nclass NotYours\n{\n}\n");
+
+        $junctionPath = $this->workDir . '/src/.rector-warm-' . getmypid();
+
+        try {
+            self::createJunction($externalDir, $junctionPath);
+
+            $called = false;
+            $result = $this->source(function () use (&$called): string {
+                $called = true;
+
+                return '{"totals":{"changed_files":0,"errors":0}}';
+            })->diagnoseBuffer($this->original, "<?php\n\nclass Sample\n{\n    // unsaved\n}\n");
+
+            self::assertFalse($called, 'a junctioned temp directory must be refused before Rector is asked to run');
+            self::assertStringContainsString('symlinked or junctioned temp directory', $result['errors'][0]['message']);
+            self::assertSame("<?php\n\nclass NotYours\n{\n}\n", file_get_contents($externalFile), 'the finally block must not unlink through the junction');
+            self::assertFileExists($externalFile);
+            self::assertSame("<?php\n\nclass Sample\n{\n}\n", file_get_contents($this->original));
+        } finally {
+            // Removed as a link, never recursed into (following it a second
+            // time would be the exact bug under test), and before its target
+            // is removed: rmdir() removes a junction without touching its
+            // target, same as it does for a directory symlink on Windows.
+            self::removeLink($junctionPath);
+            $this->removeTree($externalDir);
+        }
+    }
+
+    /**
+     * `mklink /J` needs no elevated privilege, unlike `mklink /D`. Uses
+     * cmd.exe's mklink directly -- PHP's symlink() cannot create a
+     * junction, and link() creates a hardlink, a different reparse type
+     * again.
+     */
+    private static function createJunction(string $target, string $link): void
+    {
+        $output = [];
+        $exitCode = 0;
+        exec(sprintf('mklink /J %s %s 2>&1', escapeshellarg($link), escapeshellarg($target)), $output, $exitCode);
+        self::assertSame(0, $exitCode, 'could not create the test junction: ' . implode("\n", $output));
     }
 }

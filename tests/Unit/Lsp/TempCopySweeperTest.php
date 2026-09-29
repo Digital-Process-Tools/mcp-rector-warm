@@ -35,9 +35,31 @@ final class TempCopySweeperTest extends TestCase
                 continue;
             }
             $path = $dir . '/' . $entry;
-            is_dir($path) ? self::removeTree($path) : unlink($path);
+            if (is_link($path)) {
+                self::removeLink($path);
+            } elseif (is_dir($path)) {
+                self::removeTree($path);
+            } else {
+                unlink($path);
+            }
         }
         rmdir($dir);
+    }
+
+    /**
+     * Removes a symlink itself, never its target. On Windows a link to a
+     * directory is a directory entry: unlink() refuses it ("Is a
+     * directory") and rmdir() is what removes the link -- still without
+     * touching the target. rmdir() is tried first there because a link
+     * whose target is already gone no longer answers is_dir(). Elsewhere
+     * unlink() removes the link.
+     */
+    private static function removeLink(string $path): void
+    {
+        if (PHP_OS_FAMILY === 'Windows' && @rmdir($path)) {
+            return;
+        }
+        unlink($path);
     }
 
     /** A pid that belonged to a process which has already exited. */
@@ -112,5 +134,104 @@ final class TempCopySweeperTest extends TestCase
         self::assertDirectoryDoesNotExist($here);
         self::assertDirectoryExists($elsewhere);
         self::assertDirectoryExists($live);
+    }
+
+    /**
+     * #142: sweepDirectory() reaches removeIfStale() via
+     * glob(..., GLOB_ONLYDIR), which follows a symlink -- unlike
+     * sweepTree()'s own direct-child loop, which already skips one. A
+     * symlink named like a stale candidate must not have its target's
+     * contents deleted, wherever that target is.
+     */
+    public function testSweepDirectoryDoesNotFollowASymlinkedCandidate(): void
+    {
+        $externalRoot = sys_get_temp_dir() . '/mcp-rector-sweep-external-' . bin2hex(random_bytes(4));
+        mkdir($externalRoot, 0o700, true);
+        $externalFile = $externalRoot . '/Outside.txt';
+        file_put_contents($externalFile, "not part of the workspace\n");
+
+        $pid = self::deadPid();
+        $symlinkPath = $this->root . '/vendor/pkg/.rector-warm-' . $pid;
+        mkdir(dirname($symlinkPath), 0o700, true);
+        self::assertTrue(symlink($externalRoot, $symlinkPath), 'could not create the test symlink');
+
+        // Positive control, same run: a real stale directory (no symlink
+        // involved) is still removed -- proves the guard didn't just start
+        // refusing every candidate.
+        $realStale = $this->plant('vendor/pkg2/.rector-warm-' . $pid);
+
+        try {
+            TempCopySweeper::sweepDirectory($this->root . '/vendor/pkg');
+            TempCopySweeper::sweepDirectory($this->root . '/vendor/pkg2');
+
+            self::assertFileExists($externalFile, 'a symlinked candidate must not have its target swept');
+            self::assertDirectoryDoesNotExist($realStale, 'a real stale directory (no symlink) must still be removed');
+        } finally {
+            // Removed as a link, never recursed into (following it a second
+            // time would be the exact bug under test), and before its target
+            // is removed: on Windows a link to a directory needs rmdir().
+            self::removeLink($symlinkPath);
+            self::removeTree($externalRoot);
+        }
+    }
+
+    /**
+     * #144: an NTFS junction (`mklink /J`) is a distinct Windows
+     * reparse-point type from the symlink #142's guards above were proven
+     * against -- `mklink /J` needs no elevated privilege, unlike `mklink
+     * /D`. PHP's is_link() is documented reliable for POSIX and Windows
+     * symlinks; its behaviour on a junction is the open question this
+     * guards. Windows-only: there is no junction concept to create
+     * elsewhere.
+     */
+    public function testSweepDirectoryDoesNotFollowAJunctionedCandidateOnWindows(): void
+    {
+        if (PHP_OS_FAMILY !== 'Windows') {
+            self::markTestSkipped('NTFS junctions only exist on Windows.');
+        }
+
+        $externalRoot = sys_get_temp_dir() . '/mcp-rector-sweep-external-' . bin2hex(random_bytes(4));
+        mkdir($externalRoot, 0o700, true);
+        $externalFile = $externalRoot . '/Outside.txt';
+        file_put_contents($externalFile, "not part of the workspace\n");
+
+        $pid = self::deadPid();
+        $junctionPath = $this->root . '/vendor/pkg/.rector-warm-' . $pid;
+        mkdir(dirname($junctionPath), 0o700, true);
+        self::createJunction($externalRoot, $junctionPath);
+
+        // Positive control, same run: a real stale directory (no junction
+        // involved) is still removed -- proves the guard didn't just start
+        // refusing every candidate.
+        $realStale = $this->plant('vendor/pkg2/.rector-warm-' . $pid);
+
+        try {
+            TempCopySweeper::sweepDirectory($this->root . '/vendor/pkg');
+            TempCopySweeper::sweepDirectory($this->root . '/vendor/pkg2');
+
+            self::assertFileExists($externalFile, 'a junctioned candidate must not have its target swept');
+            self::assertDirectoryDoesNotExist($realStale, 'a real stale directory (no junction) must still be removed');
+        } finally {
+            // Removed as a link, never recursed into (following it a second
+            // time would be the exact bug under test), and before its target
+            // is removed: rmdir() removes a junction without touching its
+            // target, same as it does for a directory symlink on Windows.
+            self::removeLink($junctionPath);
+            self::removeTree($externalRoot);
+        }
+    }
+
+    /**
+     * `mklink /J` needs no elevated privilege, unlike `mklink /D`. Uses
+     * cmd.exe's mklink directly -- PHP's symlink() cannot create a
+     * junction, and link() creates a hardlink, a different reparse type
+     * again.
+     */
+    private static function createJunction(string $target, string $link): void
+    {
+        $output = [];
+        $exitCode = 0;
+        exec(sprintf('mklink /J %s %s 2>&1', escapeshellarg($link), escapeshellarg($target)), $output, $exitCode);
+        self::assertSame(0, $exitCode, 'could not create the test junction: ' . implode("\n", $output));
     }
 }
