@@ -13,9 +13,22 @@ from __future__ import annotations
 
 import subprocess
 from pathlib import Path
+from urllib.parse import unquote, urlsplit
 
 from test_lsp_diagnostics import apply_edit, copy_fixture, start_server, stop_server
 from test_lsp_initialize import REPO, frame, php_binary, read_frame
+
+
+def uri_to_path(uri: str) -> Path:
+    """The inverse of LspServer::pathToUri() -- percent-decoded, same as a
+    real editor reads a `file://` URI back. A bare `removeprefix("file://")`
+    (this test's own first version, self-review finding: oss:auditor pass)
+    would leave a percent-escaped path segment -- e.g. a space as `%20`, or
+    (Windows-only, reasoned not observed here) a drive letter percent-
+    escaped by an implementation that does not special-case it the way
+    LspServer::pathToUri() now does -- literal in the resulting Path,
+    silently failing to resolve to the real file."""
+    return Path(unquote(urlsplit(uri).path))
 
 APPLY_EDIT_CAPABILITIES = {
     "workspace": {"applyEdit": True, "workspaceEdit": {"documentChanges": True}},
@@ -75,7 +88,7 @@ def test_fix_workspace_matches_a_cold_rector_apply_across_every_changed_file(tmp
 
     for change in document_changes:
         uri = change["textDocument"]["uri"]
-        path = Path(uri.removeprefix("file://"))
+        path = uri_to_path(uri)
         relative = path.relative_to(project)
         original = (project / relative).read_bytes().decode("utf-8")
 

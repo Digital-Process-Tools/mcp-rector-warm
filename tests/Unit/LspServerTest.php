@@ -53,11 +53,12 @@ final class LspServerTest extends TestCase
      * `workspace/executeCommand` has somewhere to go.
      *
      * @param array<string, list<array<string, mixed>>> $files absolute path -> fixes
+     * @param list<array{message: string, line: int}> $errors
      */
-    private static function fakeWorkspaceSource(array $files): DiagnosticsSource
+    private static function fakeWorkspaceSource(array $files, array $errors = []): DiagnosticsSource
     {
-        return new class ($files) implements DiagnosticsSource, WorkspaceDiagnosticsSource {
-            public function __construct(private readonly array $files)
+        return new class ($files, $errors) implements DiagnosticsSource, WorkspaceDiagnosticsSource {
+            public function __construct(private readonly array $files, private readonly array $errors)
             {
             }
 
@@ -68,7 +69,7 @@ final class LspServerTest extends TestCase
 
             public function diagnoseWorkspace(string $rootPath): array
             {
-                return ['files' => $this->files, 'errors' => []];
+                return ['files' => $this->files, 'errors' => $this->errors];
             }
         };
     }
@@ -1846,6 +1847,40 @@ final class LspServerTest extends TestCase
         self::assertNotContains('workspace/applyEdit', $methods);
         self::assertSame(9, $responses[array_key_last($responses)]['id']);
         self::assertArrayNotHasKey('error', $responses[array_key_last($responses)]);
+    }
+
+    /**
+     * Self-review finding (both the Explore and oss:auditor review passes,
+     * independently): an empty `files` map is not always "nothing to fix"
+     * -- diagnoseWorkspace() also returns it for a genuine failure
+     * (RectorDiagnosticsSource::interpretWorkspace()'s own two failure
+     * branches), distinguished only by a non-empty `errors`. Positive
+     * control, paired with the negative-control test directly above (same
+     * empty `files`, but `errors: []` there): a non-empty `errors`
+     * alongside empty `files` must surface as a JSON-RPC error, never the
+     * same silent "nothing changed" success.
+     */
+    public function testExecuteCommandFailsRatherThanSilentlySucceedingWhenDiagnoseWorkspaceReportsAnError(): void
+    {
+        $server = new LspServer('1.0.0', self::fakeWorkspaceSource([], [
+            ['message' => 'rector_process: path is outside the configured working directory.', 'line' => 0],
+        ]));
+        self::initialize($server, self::APPLY_EDIT_ONLY);
+
+        $responses = $server->handle([
+            'jsonrpc' => '2.0',
+            'id' => 12,
+            'method' => 'workspace/executeCommand',
+            'params' => ['command' => 'rector-warm.fixWorkspace'],
+        ]);
+
+        self::assertCount(1, $responses);
+        self::assertSame(12, $responses[0]['id']);
+        self::assertArrayHasKey('error', $responses[0]);
+        self::assertStringContainsString(
+            'outside the configured working directory',
+            $responses[0]['error']['message'],
+        );
     }
 
     /**

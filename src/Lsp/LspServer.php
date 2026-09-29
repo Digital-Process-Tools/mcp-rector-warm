@@ -1134,6 +1134,34 @@ final class LspServer
         }
 
         if ($outcome['files'] === []) {
+            // Self-review finding (both the Explore and oss:auditor review
+            // passes, independently): an empty `files` map is NOT always
+            // "nothing to fix" -- diagnoseWorkspace() returns it for a
+            // genuine failure too (a refused/errored RectorTool call, or an
+            // unparseable report; see RectorDiagnosticsSource::
+            // interpretWorkspace()'s own two failure branches), and this
+            // used to answer success with nothing applied either way --
+            // exactly the silent-no-op-on-a-real-failure shape this
+            // command's own docblock says it refuses. `errors` is the same
+            // signal publishResult()'s #90 handling already surfaces for
+            // the single-file path (as an Error diagnostic); here, with no
+            // per-file diagnostic to attach it to, it becomes the request's
+            // own JSON-RPC error instead. A file that fails alongside
+            // others that succeed (e.g. one syntax error in an otherwise
+            // fixable tree) is NOT refused here -- $outcome['files'] is
+            // non-empty in that case, and the successful fixes are applied
+            // exactly like a cold `rector process` continues past one
+            // broken file.
+            if ($outcome['errors'] !== []) {
+                $frames[] = $this->error(
+                    $id,
+                    -32803,
+                    sprintf('rector-warm.fixWorkspace failed: %s', $outcome['errors'][0]['message']),
+                );
+
+                return $frames;
+            }
+
             $frames[] = $this->result($id, null);
 
             return $frames;
@@ -1312,6 +1340,15 @@ final class LspServer
      * slash form uriToPath() already reads back correctly (its own
      * docblock: PHP's parse_url() returns `C:/...` for that shape, no
      * further UNC/drive-letter host handling needed on this side).
+     *
+     * Self-review finding (oss:auditor pass, reasoned/not observed -- no
+     * Windows machine here): the drive letter is split into its own
+     * segment BEFORE encoding and rejoined unencoded, rather than being
+     * run through the same rawurlencode() as every other segment --
+     * rawurlencode('C:') is `C%3A`, which would have produced
+     * `file:///C%3A/...` instead of this method's own documented
+     * `file:///C:/...`, exactly the mismatch this docblock always claimed
+     * NOT to produce.
      */
     private static function pathToUri(string $absolutePath): string
     {
@@ -1320,7 +1357,17 @@ final class LspServer
             $normalized = '/' . $normalized;
         }
 
-        $segments = array_map(static fn (string $segment): string => rawurlencode($segment), explode('/', $normalized));
+        $segments = explode('/', $normalized);
+        foreach ($segments as $index => $segment) {
+            // A Windows drive letter ("C:") must reach the URI unencoded --
+            // rawurlencode() turns ':' into '%3A', which would have
+            // produced `file:///C%3A/...` instead of the conformant
+            // `file:///C:/...` this method's own docblock (and
+            // uriToPath()'s read-back) both assume.
+            $segments[$index] = preg_match('#^[A-Za-z]:$#', $segment) === 1
+                ? $segment
+                : rawurlencode($segment);
+        }
 
         return 'file://' . implode('/', $segments);
     }
