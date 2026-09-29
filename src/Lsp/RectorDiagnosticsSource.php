@@ -108,9 +108,21 @@ final class RectorDiagnosticsSource implements BufferDiagnosticsSource, Workspac
         return rtrim($rootPath, '/\\') . DIRECTORY_SEPARATOR . $file;
     }
 
+    /**
+     * CI fix (PR #137, windows-latest legs): the character class here was
+     * `[\\/]` at runtime -- a single escaped forward slash, since PHP's
+     * single-quote parsing collapses `\\\\` to one backslash and THAT
+     * backslash then escapes the `/` that follows it inside the class,
+     * leaving no backslash actually IN the class. It never matched a real
+     * Windows absolute path (`C:\...`), only the `C:/...` form -- reasoned
+     * from `php -r` on this (macOS) machine confirming the exact string
+     * PHP produces for each byte count, not observed on Windows itself.
+     * Needs FOUR backslashes on disk so the class contains an escaped
+     * backslash (matches `\`) alongside the forward slash (matches `/`).
+     */
     private static function isAbsolutePath(string $path): bool
     {
-        return str_starts_with($path, '/') || preg_match('#^[A-Za-z]:[\\/]#', $path) === 1;
+        return str_starts_with($path, '/') || preg_match('#^[A-Za-z]:[\\\\/]#', $path) === 1;
     }
 
     /**

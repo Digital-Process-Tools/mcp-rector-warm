@@ -246,4 +246,39 @@ final class RectorDiagnosticsSourceTest extends TestCase
             @rmdir($outside);
         }
     }
+
+    /**
+     * CI fix (PR #137, windows-latest legs): isAbsolutePath()'s character
+     * class only ever matched a drive letter followed by a forward slash
+     * (`C:/...`), never the real Windows form (`C:\...`) -- a real Windows
+     * `file_diffs[].file` entry that was already absolute got treated as
+     * relative and re-prefixed with $rootPath, producing a doubled/mangled
+     * path. Pure string manipulation (no OS API call, no realpath()), so
+     * this pins both separator forms deterministically on any host --
+     * unlike the platform-forced tests elsewhere in this suite
+     * (RectorToolContainmentTest, isWithinRoot's $caseInsensitive param),
+     * this needs no explicit force parameter to exercise the Windows
+     * branch portably.
+     *
+     * @dataProvider absoluteAndRelativePaths
+     */
+    public function testIsAbsolutePathRecognisesBothWindowsAndPosixAbsoluteForms(string $path, bool $expected): void
+    {
+        $method = new \ReflectionMethod(RectorDiagnosticsSource::class, 'isAbsolutePath');
+        $method->setAccessible(true);
+
+        self::assertSame($expected, $method->invoke(null, $path));
+    }
+
+    /**
+     * @return iterable<string, array{string, bool}>
+     */
+    public static function absoluteAndRelativePaths(): iterable
+    {
+        yield 'windows backslash absolute' => ['C:\Users\me\A.php', true];
+        yield 'windows forward-slash absolute' => ['C:/Users/me/A.php', true];
+        yield 'posix absolute' => ['/home/user/A.php', true];
+        yield 'relative, no drive letter' => ['src/A.php', false];
+        yield 'relative with backslash separators' => ['src\A.php', false];
+    }
 }

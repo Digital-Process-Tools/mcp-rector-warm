@@ -11,6 +11,7 @@ over the whole project directory.
 
 from __future__ import annotations
 
+import re
 import subprocess
 from pathlib import Path
 from urllib.parse import unquote, urlsplit
@@ -18,17 +19,25 @@ from urllib.parse import unquote, urlsplit
 from test_lsp_diagnostics import apply_edit, copy_fixture, start_server, stop_server
 from test_lsp_initialize import REPO, frame, php_binary, read_frame
 
+# A `file:///C:/Users/...` URI's path component, per urlsplit(), keeps the
+# leading '/' before the drive letter (`/C:/Users/...`) -- unlike PHP's own
+# parse_url(), which LspServer::uriToPath()'s docblock notes already strips
+# it for exactly this shape. Left un-stripped, `Path("/C:/Users/...")` on
+# Windows is read as a root-relative path with a folder literally named
+# "C:", not the C: drive -- observed in CI (PR #137, windows-latest legs):
+# ValueError: '\C:\...' is not in the subpath of 'C:\...'
+_WINDOWS_DRIVE_WITH_LEADING_SLASH = re.compile(r"^/[A-Za-z]:")
+
 
 def uri_to_path(uri: str) -> Path:
-    """The inverse of LspServer::pathToUri() -- percent-decoded, same as a
-    real editor reads a `file://` URI back. A bare `removeprefix("file://")`
-    (this test's own first version, self-review finding: oss:auditor pass)
-    would leave a percent-escaped path segment -- e.g. a space as `%20`, or
-    (Windows-only, reasoned not observed here) a drive letter percent-
-    escaped by an implementation that does not special-case it the way
-    LspServer::pathToUri() now does -- literal in the resulting Path,
-    silently failing to resolve to the real file."""
-    return Path(unquote(urlsplit(uri).path))
+    """The inverse of LspServer::pathToUri() -- percent-decoded and, for a
+    Windows drive-letter path, stripped of the leading '/' the same way
+    LspServer::uriToPath() strips it on the PHP side, so this test reads a
+    `file://` URI back exactly the way a real editor would."""
+    path = unquote(urlsplit(uri).path)
+    if _WINDOWS_DRIVE_WITH_LEADING_SLASH.match(path):
+        path = path[1:]
+    return Path(path)
 
 APPLY_EDIT_CAPABILITIES = {
     "workspace": {"applyEdit": True, "workspaceEdit": {"documentChanges": True}},
