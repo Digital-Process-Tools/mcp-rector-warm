@@ -384,6 +384,52 @@ final class RectorRunnerStandbyWorkerTest extends TestCase
         }
     }
 
+    /**
+     * Self-review finding: $lastCallWasWarm must not survive across calls when
+     * THIS call fails before ever reaching a decision point (boot(),
+     * spawnProcWorker(), awaitProcWorkerReady()) -- otherwise it silently
+     * inherits whatever a PREVIOUS, unrelated call last decided, which is
+     * exactly the class of misreport #126 itself was filed for, just in the
+     * opposite direction. canFork() is forced true (regardless of what this
+     * environment actually has) purely to select run()'s pcntl branch; the
+     * overridden boot() below throws before ever touching a real pcntl
+     * function, so this is safe on every platform, including the no-pcntl CI
+     * job and Windows.
+     */
+    public function testACallThatFailsBeforeAnyDecisionDoesNotInheritAPreviousCallsWarmState(): void
+    {
+        $runner = new class extends RectorRunner {
+            protected function canFork(): bool
+            {
+                return true;
+            }
+
+            protected function boot(): void
+            {
+                throw new \RuntimeException('simulated cold-boot failure');
+            }
+        };
+
+        // Simulate a PRIOR, unrelated call that really was warm.
+        $property = new \ReflectionProperty(RectorRunner::class, 'lastCallWasWarm');
+        $property->setAccessible(true);
+        $property->setValue($runner, true);
+
+        $threw = null;
+        try {
+            $runner->run(['rector']);
+        } catch (\RuntimeException $e) {
+            $threw = $e;
+        }
+
+        self::assertNotNull($threw, 'must fire: boot() always throws here, so this call must fail before ever deciding warm/cold');
+        self::assertFalse($runner->isWarm(), 'control: nothing ever booted');
+        self::assertFalse(
+            $runner->wasLastCallWarm(),
+            'a call that fails before reaching a warm/cold decision point must not inherit a PREVIOUS calls warm state (self-review finding)',
+        );
+    }
+
     private static function isAlive(int $pid): bool
     {
         if (\PHP_OS_FAMILY === 'Windows') {

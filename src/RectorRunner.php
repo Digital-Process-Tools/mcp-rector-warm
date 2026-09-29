@@ -244,6 +244,13 @@ class RectorRunner implements RunnerInterface
      */
     public function run(array $argv, bool $dryRun = true): array
     {
+        // Reset up front, not merely at each decision point below: a call that
+        // fails BEFORE reaching one (boot(), spawnProcWorker(), or
+        // awaitProcWorkerReady() throwing) must not inherit whatever a PREVIOUS,
+        // unrelated call last decided -- that would misreport exactly the class
+        // of thing #126 itself was filed for, just in the opposite direction
+        // (self-review finding).
+        $this->lastCallWasWarm = false;
         if (!$this->canFork()) {
             // No pcntl (Windows, or #18's disable_functions case): no fork, so no
             // copy-on-write snapshot of a booted container to isolate each call in.
@@ -1070,8 +1077,9 @@ class RectorRunner implements RunnerInterface
      * whole no-pcntl path exists for). ini_get_all(null, true) instead diffs each
      * directive active value against its php.ini master value: a directive a -d
      * flag (or, with the identical effect from the point of view of proc_open(), an
-     * early ini_set() such as this file own memory_limit override) changed is
-     * exactly the one where the two differ.
+     * early ini_set() such as the daemon entrypoints own memory_limit override --
+     * bin/mcp-rector-warm, bin/rector-warm-lsp, never this file itself -- changed
+     * is exactly the one where the two differ.
      *
      * @return list<string>
      */
