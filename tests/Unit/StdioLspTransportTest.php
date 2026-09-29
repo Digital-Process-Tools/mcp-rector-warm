@@ -124,9 +124,31 @@ final class StdioLspTransportTest extends TestCase
      * select()-able, see the ValueError test below) gives a real,
      * poll-able stream in-process.
      */
+    /**
+     * oss:auditor self-review finding (PR #128 second pass): `STREAM_PF_UNIX`
+     * socket pairs have a documented history of being unreliable/unavailable
+     * on some Windows PHP builds. Skipping LOUDLY when the capability itself
+     * is missing -- not assuming by OS name, same discipline
+     * RectorRunnerTest already uses for posix_kill/pcntl_fork -- means a
+     * platform where this genuinely does not work reports "cannot confirm",
+     * never a silently-vacuous pass or a hard failure unrelated to what
+     * these tests exist to check.
+     *
+     * @return array{0: resource, 1: resource}
+     */
+    private function pollableSocketPair(): array
+    {
+        $pair = @stream_socket_pair(STREAM_PF_UNIX, STREAM_SOCK_STREAM, STREAM_IPPROTO_IP);
+        if ($pair === false) {
+            self::markTestSkipped('stream_socket_pair(STREAM_PF_UNIX, ...) unavailable in this environment');
+        }
+
+        return $pair;
+    }
+
     public function testTryReadReturnsAMessageThatIsAlreadyWaiting(): void
     {
-        [$readEnd, $writeEnd] = stream_socket_pair(STREAM_PF_UNIX, STREAM_SOCK_STREAM, STREAM_IPPROTO_IP);
+        [$readEnd, $writeEnd] = $this->pollableSocketPair();
         $body = '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}';
         fwrite($writeEnd, "Content-Length: " . strlen($body) . "\r\n\r\n" . $body);
 
@@ -147,7 +169,7 @@ final class StdioLspTransportTest extends TestCase
      */
     public function testTryReadReturnsNullWhenNothingIsWaiting(): void
     {
-        [$readEnd, ] = stream_socket_pair(STREAM_PF_UNIX, STREAM_SOCK_STREAM, STREAM_IPPROTO_IP);
+        [$readEnd, ] = $this->pollableSocketPair();
 
         $transport = new StdioLspTransport($readEnd, fopen('php://memory', 'w'));
 

@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -112,6 +113,22 @@ def test_progress_is_not_sent_at_all_without_the_client_capability(project):
 
 
 def test_progress_is_suppressed_when_the_client_refuses_create(project):
+    # oss:auditor self-review finding (PR #128 second pass): the peek this
+    # relies on (StdioLspTransport::tryRead(), stream_select() with a 0/0
+    # timeout) is documented -- in that same file's own docblock -- as
+    # unreliable for a non-socket, file-backed stream like an inherited
+    # STDIN pipe on Windows. Asserting the POSIX pipe-buffering behaviour
+    # unconditionally there would make this test either fail for a reason
+    # unrelated to a real regression, or -- worse, if the platform quietly
+    # made select() report readable anyway -- pass without having proven
+    # anything. Skip loudly rather than either.
+    if sys.platform.startswith("win"):
+        pytest.skip(
+            "stream_select() is unreliable for non-socket streams on Windows -- "
+            "the create-refusal peek this test exercises is not expected to "
+            "fire there (see StdioLspTransport::tryRead()'s own docblock)",
+        )
+
     server = start_server(project, {"window": {"workDoneProgress": True}})
     try:
         uri = (project / "src" / "Fixable.php").as_uri()
