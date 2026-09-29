@@ -1704,6 +1704,36 @@ final class LspServerTest extends TestCase
 
     private const APPLY_EDIT_ONLY = ['workspace' => ['applyEdit' => true]];
 
+    /**
+     * Second-pass self-review note (Explore, on the fix for the two
+     * findings above): pathToUri()'s Windows drive-letter handling was
+     * verified by hand during that fix but had no test of its own -- this
+     * is pure string manipulation (str_replace/preg_match/explode), not an
+     * OS API call, so it is deterministic on any host and worth pinning
+     * directly rather than leaving it "reasoned, not observed" only.
+     */
+    public function testPathToUriKeepsAWindowsDriveLetterColonUnencoded(): void
+    {
+        $method = new \ReflectionMethod(LspServer::class, 'pathToUri');
+        $method->setAccessible(true);
+
+        self::assertSame(
+            'file:///C:/Users/me/A.php',
+            $method->invoke(null, 'C:\\Users\\me\\A.php'),
+        );
+    }
+
+    public function testPathToUriEncodesAnOrdinaryPosixPathSegment(): void
+    {
+        $method = new \ReflectionMethod(LspServer::class, 'pathToUri');
+        $method->setAccessible(true);
+
+        self::assertSame(
+            'file:///home/user/foo%20bar.php',
+            $method->invoke(null, '/home/user/foo bar.php'),
+        );
+    }
+
     public function testExecuteCommandRefusesAnUnknownCommand(): void
     {
         $server = new LspServer('1.0.0', self::fakeWorkspaceSource([]));
