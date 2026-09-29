@@ -304,6 +304,79 @@ final class RectorDiagnosticsSourceBufferTest extends TestCase
     }
 
     /**
+     * #149: round-2 release-delta audit finding. #142/#144's guards above
+     * only ever checked `$tempDirectory` -- a REAL, non-symlinked
+     * `.rector-warm-<pid>` directory (planted ahead of time, named after
+     * this server's own live pid so TempCopySweeper's startup sweep skips
+     * it -- it explicitly never sweeps its own pid) passes both of those
+     * checks, and the leaf `$tempPath` inside it was never checked at all.
+     * A symlink planted there, named after the buffer's own basename, must
+     * not be written through, and -- the same finally-block gap #142/#144
+     * closed for `$tempDirectory` -- must not be unlinked through either.
+     */
+    public function testABufferForASymlinkedTempFileInARealTempDirectoryIsRefusedAndNothingOutsideIsTouched(): void
+    {
+        $externalFile = sys_get_temp_dir() . '/mcp-rector-lsp-external-' . bin2hex(random_bytes(4)) . '.php';
+        file_put_contents($externalFile, "<?php\n\nclass NotYours\n{\n}\n");
+
+        $realTempDirectory = $this->workDir . '/src/.rector-warm-' . getmypid();
+        mkdir($realTempDirectory, 0o700, true);
+        $symlinkPath = $realTempDirectory . '/Sample.php';
+
+        try {
+            self::assertTrue(symlink($externalFile, $symlinkPath), 'could not create the test symlink');
+
+            $called = false;
+            $result = $this->source(function () use (&$called): string {
+                $called = true;
+
+                return '{"totals":{"changed_files":0,"errors":0}}';
+            })->diagnoseBuffer($this->original, "<?php\n\nclass Sample\n{\n    // unsaved\n}\n");
+
+            self::assertFalse($called, 'a symlinked temp file must be refused before Rector is asked to run');
+            self::assertStringContainsString('symlinked or junctioned temp file', $result['errors'][0]['message']);
+            self::assertSame("<?php\n\nclass NotYours\n{\n}\n", file_get_contents($externalFile), 'the write must not follow the symlink');
+            self::assertFileExists($externalFile);
+            // The symlink itself is refused, not removed -- the finally
+            // block's unlink() must not follow it either. The original file
+            // is untouched, which is the thing this test guards.
+            self::assertSame("<?php\n\nclass Sample\n{\n}\n", file_get_contents($this->original));
+        } finally {
+            self::removeLink($symlinkPath);
+            @rmdir($realTempDirectory);
+            @unlink($externalFile);
+        }
+    }
+
+    /**
+     * Positive control for the guard above: a genuinely real temp file
+     * inside a genuinely real temp directory -- no symlink anywhere -- must
+     * still be written, processed and cleaned up normally, including across
+     * two diagnoseBuffer() calls for the same buffer in a row (the
+     * server-lifetime reuse pattern the #149 finding's own repeat-call
+     * concern was raised against: `$tempDirectory` is deterministic per
+     * (pid, source directory), so a second call on the same buffer targets
+     * the very same `$tempPath` the first call already used and cleaned up).
+     */
+    public function testTwoConsecutiveBufferRunsForTheSameFileBothSucceed(): void
+    {
+        foreach (['first pass', 'second pass'] as $marker) {
+            $seenContent = null;
+            $buffer = "<?php\n\nclass Sample\n{\n    // {$marker}\n}\n";
+
+            $result = $this->source(function (string $path) use (&$seenContent): string {
+                $seenContent = (string) @file_get_contents($path);
+
+                return '{"totals":{"changed_files":0,"errors":0}}';
+            })->diagnoseBuffer($this->original, $buffer);
+
+            self::assertSame($buffer, $seenContent, $marker . ': the temp file must carry this pass\'s own content');
+            self::assertSame([], $result['errors'], $marker . ': must not fail');
+            self::assertSame(['src', 'src/Sample.php'], $this->projectEntries(), $marker . ': nothing left behind');
+        }
+    }
+
+    /**
      * #144: an NTFS junction (`mklink /J`) is a distinct Windows
      * reparse-point type from the symlink #142's guard above was proven
      * against -- `mklink /J` needs no elevated privilege, unlike `mklink

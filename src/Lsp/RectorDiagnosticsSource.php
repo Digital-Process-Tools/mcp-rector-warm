@@ -243,6 +243,21 @@ final class RectorDiagnosticsSource implements BufferDiagnosticsSource, Workspac
                 return self::failure(sprintf('rector-warm-lsp: could not create a temp directory in %s', $directory));
             }
 
+            // #149: the directory-level guard above stops a symlinked or
+            // junctioned `.rector-warm-<pid>` NAME from being entered, but a
+            // genuinely real directory (e.g. one an attacker plants ahead of
+            // time, matching this server's own live pid so TempCopySweeper's
+            // startup sweep skips it) passes that guard -- and can then
+            // contain a symlink at the LEAF path, named after this buffer's
+            // own basename. Without this check, file_put_contents() below
+            // would follow it and overwrite whatever it points to, anywhere
+            // this process can write, before RectorTool's own realpath
+            // containment check ever runs (that check only gates whether
+            // Rector is invoked afterwards -- too late to stop the write).
+            if (TempCopySweeper::isLinkOrJunction($tempPath)) {
+                return self::failure(sprintf('rector-warm-lsp: refusing a symlinked or junctioned temp file in %s', $directory));
+            }
+
             if (@file_put_contents($tempPath, $content) !== strlen($content)) {
                 return self::failure(sprintf('rector-warm-lsp: could not write the unsaved buffer to a temp file in %s', $directory));
             }
@@ -264,7 +279,12 @@ final class RectorDiagnosticsSource implements BufferDiagnosticsSource, Workspac
             // that one. Re-checked here so a symlinked or junctioned
             // `$tempDirectory` never reaches unlink/rmdir either, whether or
             // not the write above ever ran.
-            if (!TempCopySweeper::isLinkOrJunction($tempDirectory)) {
+            // #149: re-checked here for the same reason $tempDirectory is
+            // re-checked just above -- this `finally` runs on every exit
+            // from `try`, including the early return the guard above takes,
+            // so unlink() must not be the one place a symlinked $tempPath
+            // still gets followed.
+            if (!TempCopySweeper::isLinkOrJunction($tempDirectory) && !TempCopySweeper::isLinkOrJunction($tempPath)) {
                 @unlink($tempPath);
                 @rmdir($tempDirectory);
             }
