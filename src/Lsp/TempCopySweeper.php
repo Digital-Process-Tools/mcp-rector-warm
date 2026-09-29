@@ -138,10 +138,38 @@ final class TempCopySweeper
             return false;
         }
 
-        $exitCode = 0;
-        @exec(sprintf('fsutil reparsepoint query %s 2>NUL', escapeshellarg($path)), result_code: $exitCode);
+        return self::isReparsePoint($path);
+    }
 
-        return $exitCode === 0;
+    /**
+     * #162: this used to build `fsutil reparsepoint query <path>` as a
+     * shell STRING via escapeshellarg(). On Windows, escapeshellarg()
+     * replaces the characters %, ! and " with spaces (documented php-src
+     * behaviour) -- for a path containing any of them, fsutil was being
+     * asked about a mangled path that does not exist, exited non-zero, and
+     * was read as "not a junction", reopening #142/#144 for that narrower
+     * path shape. proc_open() with the command given as an ARRAY (not a
+     * string) bypasses shell-string quoting entirely -- PHP builds the
+     * Windows command line itself, from the argv values as given, with no
+     * shell involved to mis-escape them.
+     */
+    private static function isReparsePoint(string $path): bool
+    {
+        $descriptors = [1 => ['pipe', 'w'], 2 => ['pipe', 'w']];
+        $process = @proc_open(['fsutil', 'reparsepoint', 'query', $path], $descriptors, $pipes);
+
+        if (!is_resource($process)) {
+            return false;
+        }
+
+        // Drained so the child cannot block on a full pipe before
+        // proc_close() waits for it; the output itself is not needed.
+        foreach ($pipes as $pipe) {
+            stream_get_contents($pipe);
+            fclose($pipe);
+        }
+
+        return proc_close($process) === 0;
     }
 
     /**

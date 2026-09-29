@@ -349,6 +349,92 @@ final class RectorDiagnosticsSourceBufferTest extends TestCase
     }
 
     /**
+     * #161: round-3 release-delta audit finding. isLinkOrJunction() (used
+     * by the guard above) only widens is_link() with a Windows junction
+     * check -- neither detects a HARD LINK, a second directory entry
+     * pointing at the same inode as a file elsewhere. is_link() is
+     * correctly false for a hard link (it genuinely is not a symlink), so
+     * it slips past the exact guard that refuses a symlink above. Same
+     * premise as that test: a real, non-symlinked `.rector-warm-<pid>`
+     * directory, planted ahead of time and named after this server's own
+     * live pid so the startup sweep skips it, with a hard link at the leaf
+     * instead of a symlink.
+     */
+    public function testABufferForAHardLinkedTempFileInARealTempDirectoryIsRefusedAndNothingOutsideIsTouched(): void
+    {
+        $externalFile = sys_get_temp_dir() . '/mcp-rector-lsp-external-' . bin2hex(random_bytes(4)) . '.php';
+        file_put_contents($externalFile, "<?php\n\nclass NotYours\n{\n}\n");
+
+        $realTempDirectory = $this->workDir . '/src/.rector-warm-' . getmypid();
+        mkdir($realTempDirectory, 0o700, true);
+        $hardLinkPath = $realTempDirectory . '/Sample.php';
+
+        try {
+            self::assertTrue(link($externalFile, $hardLinkPath), 'could not create the test hard link');
+
+            $called = false;
+            $result = $this->source(function () use (&$called): string {
+                $called = true;
+
+                return '{"totals":{"changed_files":0,"errors":0}}';
+            })->diagnoseBuffer($this->original, "<?php\n\nclass Sample\n{\n    // unsaved\n}\n");
+
+            self::assertFalse($called, 'a hard-linked temp file must be refused before Rector is asked to run');
+            self::assertStringContainsString('already exists', $result['errors'][0]['message']);
+            self::assertSame("<?php\n\nclass NotYours\n{\n}\n", file_get_contents($externalFile), 'the write must not follow the hard link');
+            self::assertFileExists($externalFile);
+            self::assertSame("<?php\n\nclass Sample\n{\n}\n", file_get_contents($this->original));
+        } finally {
+            @unlink($hardLinkPath);
+            @rmdir($realTempDirectory);
+            @unlink($externalFile);
+        }
+    }
+
+    /**
+     * #161: round-3 release-delta audit finding, the same-finding sibling of
+     * the hard-link test above. mkdir()'s 0o700 in diagnoseBuffer() only
+     * ever applies on the call that actually creates $tempDirectory -- once
+     * it exists (e.g. a directory an attacker planted ahead of time under
+     * this guessable `.rector-warm-<pid>` name), is_dir() short-circuits
+     * true and mkdir() never runs, so whatever mode it already had was kept
+     * -- wide enough for another user to read the buffer this method is
+     * about to write into it. A mode check made from INSIDE the runner
+     * closure, while $tempDirectory still exists, is the only way to see
+     * whether the guard narrows it during the call: the directory is
+     * removed again in diagnoseBuffer()'s own `finally` on success, so
+     * checking after the call would pass vacuously even with no fix at all.
+     * POSIX-only: chmod()'s mode bits are not meaningful on Windows.
+     */
+    public function testAPreExistingTempDirectoryHasItsModeReappliedOnReuse(): void
+    {
+        if (PHP_OS_FAMILY === 'Windows') {
+            self::markTestSkipped('POSIX directory mode bits are not meaningful on Windows.');
+        }
+
+        $realTempDirectory = $this->workDir . '/src/.rector-warm-' . getmypid();
+        mkdir($realTempDirectory, 0o777, true);
+        chmod($realTempDirectory, 0o777);
+
+        $seenMode = null;
+        $result = $this->source(function (string $path) use (&$seenMode): string {
+            // diagnoseBuffer() already called is_dir() on this same path
+            // (in the same PHP process) before chmod() ran -- PHP caches a
+            // path's stat result across calls, and chmod() does not
+            // invalidate that cache for fileperms() itself, so reading it
+            // without clearing first would show the pre-chmod mode even
+            // though the real, on-disk mode already changed.
+            clearstatcache(true, dirname($path));
+            $seenMode = fileperms(dirname($path)) & 0o777;
+
+            return '{"totals":{"changed_files":0,"errors":0}}';
+        })->diagnoseBuffer($this->original, "<?php\n\nclass Sample\n{\n    // unsaved\n}\n");
+
+        self::assertSame([], $result['errors']);
+        self::assertSame(0o700, $seenMode, 'a reused temp directory must have its mode narrowed to 0700, not keep whatever it had');
+    }
+
+    /**
      * Positive control for the guard above: a genuinely real temp file
      * inside a genuinely real temp directory -- no symlink anywhere -- must
      * still be written, processed and cleaned up normally, including across
