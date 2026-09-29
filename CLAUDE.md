@@ -29,6 +29,25 @@ done.
   which are reasoned; a reasoned claim is worth having, and should carry the label.
 - **Docs are part of the change.** A change nobody can discover is not shipped.
 
+## Before you merge a pull request
+
+Merging on green is the default for bug fixes, tests, docs and CI. Two kinds of pull
+request need more than a green CI run:
+
+- **A new feature waits for the maintainer's explicit OK.** "Feature" means new
+  user-visible behaviour: a new LSP method or command, a new CLI flag or MCP tool, or a
+  new config option. Once CI is green and review has passed, ask the maintainer and wait.
+  Do not merge on green.
+- **Every LSP pull request gets an independent end-to-end check before merge.** The
+  lane's own E2E tests are not enough. A second agent writes its own harness, drives
+  the real `bin/rector-warm-lsp` over stdio, and asserts that warm output equals cold
+  `vendor/bin/rector process` output byte for byte. The pull request has to carry that
+  check's result.
+
+These gates live here because a maintainer tick reads this file. A rule kept anywhere
+else (a session's memory, a chat message) does not reach the agent doing the merge.
+That is how #137 went in without either gate.
+
 ## If an agent is doing the work
 
 An LLM session re-sends its whole context on every turn, so the price of a change is
