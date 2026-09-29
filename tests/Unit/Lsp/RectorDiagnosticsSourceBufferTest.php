@@ -43,9 +43,31 @@ final class RectorDiagnosticsSourceBufferTest extends TestCase
                 continue;
             }
             $path = $dir . '/' . $entry;
-            is_dir($path) ? $this->removeTree($path) : unlink($path);
+            if (is_link($path)) {
+                self::removeLink($path);
+            } elseif (is_dir($path)) {
+                $this->removeTree($path);
+            } else {
+                unlink($path);
+            }
         }
         rmdir($dir);
+    }
+
+    /**
+     * Removes a symlink itself, never its target. On Windows a link to a
+     * directory is a directory entry: unlink() refuses it ("Is a
+     * directory") and rmdir() is what removes the link -- still without
+     * touching the target. rmdir() is tried first there because a link
+     * whose target is already gone no longer answers is_dir(). Elsewhere
+     * unlink() removes the link.
+     */
+    private static function removeLink(string $path): void
+    {
+        if (PHP_OS_FAMILY === 'Windows' && @rmdir($path)) {
+            return;
+        }
+        unlink($path);
     }
 
     /**
@@ -273,10 +295,10 @@ final class RectorDiagnosticsSourceBufferTest extends TestCase
             // which is the thing this test guards.
             self::assertSame("<?php\n\nclass Sample\n{\n}\n", file_get_contents($this->original));
         } finally {
-            // Removed as a link, never recursed into: tearDown()'s
-            // removeTree() is not symlink-safe, and following this link a
-            // second time would be the exact bug under test.
-            @unlink($symlinkPath);
+            // Removed as a link, never recursed into (following it a second
+            // time would be the exact bug under test), and before its target
+            // is removed: on Windows a link to a directory needs rmdir().
+            self::removeLink($symlinkPath);
             $this->removeTree($externalDir);
         }
     }

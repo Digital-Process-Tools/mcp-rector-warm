@@ -35,9 +35,31 @@ final class TempCopySweeperTest extends TestCase
                 continue;
             }
             $path = $dir . '/' . $entry;
-            is_dir($path) ? self::removeTree($path) : unlink($path);
+            if (is_link($path)) {
+                self::removeLink($path);
+            } elseif (is_dir($path)) {
+                self::removeTree($path);
+            } else {
+                unlink($path);
+            }
         }
         rmdir($dir);
+    }
+
+    /**
+     * Removes a symlink itself, never its target. On Windows a link to a
+     * directory is a directory entry: unlink() refuses it ("Is a
+     * directory") and rmdir() is what removes the link -- still without
+     * touching the target. rmdir() is tried first there because a link
+     * whose target is already gone no longer answers is_dir(). Elsewhere
+     * unlink() removes the link.
+     */
+    private static function removeLink(string $path): void
+    {
+        if (PHP_OS_FAMILY === 'Windows' && @rmdir($path)) {
+            return;
+        }
+        unlink($path);
     }
 
     /** A pid that belonged to a process which has already exited. */
@@ -145,10 +167,10 @@ final class TempCopySweeperTest extends TestCase
             self::assertFileExists($externalFile, 'a symlinked candidate must not have its target swept');
             self::assertDirectoryDoesNotExist($realStale, 'a real stale directory (no symlink) must still be removed');
         } finally {
-            // Removed as a link, never recursed into: the teardown helper
-            // below is not symlink-safe, and following this link a second
-            // time would be the exact bug under test.
-            @unlink($symlinkPath);
+            // Removed as a link, never recursed into (following it a second
+            // time would be the exact bug under test), and before its target
+            // is removed: on Windows a link to a directory needs rmdir().
+            self::removeLink($symlinkPath);
             self::removeTree($externalRoot);
         }
     }
