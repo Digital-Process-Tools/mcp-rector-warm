@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-"""Extract one marked fenced code block from README.md.
+"""Extract one marked fenced code block from a Markdown file (docs/lsp.md).
 
-#109: the README's editor snippets (Neovim's native config, its
+#109: docs/lsp.md's editor snippets (Neovim's native config, its
 `vim.lsp.enable` line, Helix's languages.toml) rot silently unless something
 runs them for real. This is the "something" that pulls the exact bytes a
-headless editor is then driven with, straight out of README.md, via a
+headless editor is then driven with, straight out of docs/lsp.md, via a
 `<!-- snippet:NAME -->` / `<!-- /snippet:NAME -->` marker pair -- so the
-smoke test exercises what the README actually says today, not a copy of it
+smoke test exercises what the docs actually say today, not a copy of it
 that can drift.
 
 Usage: extract_snippet.py <marker> <readme_path>

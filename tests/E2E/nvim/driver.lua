@@ -3,13 +3,13 @@
 -- Run via `nvim --headless -u NONE -l driver.lua <config_dir> <target_file> <min_diagnostics>`.
 --
 -- `config_dir` is a directory extract_snippet.py has already populated with
--- README.md's own snippets:
+-- docs/lsp.md's own snippets:
 --   config_dir/lsp/rector.lua   -- the native `vim.lsp.config` snippet, put
 --                                  where Neovim's own lazy-loading convention
 --                                  auto-discovers it once it is on 'runtimepath'
 --   config_dir/enable.lua       -- the `vim.lsp.enable('rector')` snippet,
 --                                  dofile'd rather than hardcoded here, so
---                                  this driver runs what the README says
+--                                  this driver runs what docs/lsp.md says
 --                                  today, not a copy of it
 --
 -- Attach -> save -> diagnostics -> codeAction, the same order the manual

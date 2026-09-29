@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# #109: minimal Helix smoke check of README.md's own languages.toml snippet.
+# #109: minimal Helix smoke check of docs/lsp.md's own languages.toml snippet.
 #
 #   tests/E2E/nvim/run_helix_health.sh
 #
-# Extracts the `helix-languages` snippet straight out of README.md, points a
+# Extracts the `helix-languages` snippet straight out of docs/lsp.md, points a
 # scratch XDG_CONFIG_HOME at it, and runs `hx --health php`. Helix's own
 # `--health` never sets a non-zero exit code either way (verified by hand:
 # a working and a broken PATH both exit 0), so the assertion has to be on
@@ -30,7 +30,7 @@ scratch="$(mktemp -d)"
 trap 'rm -rf "$scratch"' EXIT
 
 mkdir -p "$scratch/helix"
-"$python" "$here/extract_snippet.py" helix-languages "$repo/README.md" > "$scratch/helix/languages.toml"
+"$python" "$here/extract_snippet.py" helix-languages "$repo/docs/lsp.md" > "$scratch/helix/languages.toml"
 
 export PATH="$repo/bin:$PATH"
 export XDG_CONFIG_HOME="$scratch"
