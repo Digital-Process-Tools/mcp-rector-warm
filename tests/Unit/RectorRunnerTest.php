@@ -1688,6 +1688,17 @@ final class RectorRunnerTest extends TestCase
                 // writeFrame() this worker attempts from here on fails with a
                 // broken pipe, starting with the boot handshake itself.
                 fclose($parentSocket);
+                // Self-review finding: a socket-pair write only fails once
+                // EVERY fd referencing the read side is closed -- this
+                // process's own copy, closed just above, AND the parent
+                // test process's original, closed a few lines below (after
+                // this branch returns control to it). Without this pause the
+                // ordering between those two closes is genuinely
+                // unguaranteed, though bootInPlace() below (a real container
+                // build) already dwarfs it in practice. A short, one-sided
+                // wait here removes the race outright rather than relying on
+                // that asymmetry.
+                usleep(50_000);
 
                 $runner = new RectorRunner(0);
                 $method = new \ReflectionMethod(RectorRunner::class, 'serveWorker');
