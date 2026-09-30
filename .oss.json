@@ -18,7 +18,50 @@
     "priority": ["priority-high", "priority-medium", "priority-low"],
     "lanes": ["lane-warm-state", "lane-protocol", "lane-tests"],
     "filed_by_loop": "filed-by-loop",
-    "lane_other": "lane-other"
+    "lane_other": "lane-other",
+    "lane_patterns": {
+      "lane-warm-state": [
+        "src/RectorRunner.php",
+        "src/RectorTool.php",
+        "src/RectorCallTimeoutException.php",
+        "src/RunnerInterface.php",
+        "src/Support",
+        "bin/mcp-rector-warm",
+        "bin/rector-cold-call.php",
+        "bin/rector-warm-worker.php",
+        "bin/rector-warm-orphan-watchdog.php",
+        "tests/Unit/RectorRunner*.php",
+        "tests/Unit/RectorTool*.php",
+        "tests/Unit/ServerVersionTest.php",
+        "tests/Integration"
+      ],
+      "lane-protocol": [
+        "src/Lsp",
+        "bin/rector-warm-lsp",
+        "tests/Unit/Lsp",
+        "tests/Unit/LspServerTest.php",
+        "tests/Unit/StdioLspTransportTest.php",
+        "tests/Fixtures/lsp-*",
+        "tests/E2E/test_lsp_*.py",
+        "tests/E2E/nvim"
+      ],
+      "lane-tests": [
+        "tests/E2E/mcp_harness.py",
+        "tests/E2E/stdio_tap.py",
+        "tests/E2E/scenarios",
+        "tests/E2E/test_scenarios.py",
+        "tests/E2E/test_mcp_client.py",
+        "tests/E2E/test_process_descendants_windows.py",
+        "tests/E2E/test_warm_vs_cold_tool.py",
+        "tests/E2E/run.sh",
+        "tests/E2E/pytest.ini",
+        "tests/E2E/requirements.txt",
+        "tests/Fixtures/project",
+        "tests/Unit/TrapDNoHostPathsTest.php",
+        "tools",
+        ".github/workflows"
+      ]
+    }
   },
   "milestones": [],
   "_milestones_note": "Declined, not merely absent: this repo does not use GitHub milestones. Recorded so a triage sweep reads this note instead of re-flagging the empty list as a fresh finding.",
