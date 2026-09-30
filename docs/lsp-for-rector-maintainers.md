@@ -167,12 +167,13 @@ for the command).
   rule was applied but never produced a hunk of its own, the current
   "exactly one unattributed hunk + exactly one leftover rule" gate cannot
   tell that case apart from the genuinely-unambiguous one, and can attribute
-  the wrong rule name to the hunk (recorded in
-  `trap.d/100.leftover-rule-ambiguity.md`). This is a presentation-layer
-  severity (a diagnostic label), not a correctness or security issue, and
-  Rector's own JSON report does not currently expose enough per-rule hunk
-  detail to close it without a report format change (see **Asks for
-  upstream** below).
+  the wrong rule name to the hunk (originally recorded in
+  `trap.d/100.leftover-rule-ambiguity.md`, since filed as #154 and the trap
+  fragment removed; #154 is now pinned by a test). This is a
+  presentation-layer severity (a diagnostic label), not a correctness or
+  security issue, and Rector's own JSON report does not currently expose
+  enough per-rule hunk detail to close it without a report format change
+  (see **Asks for upstream** below).
 
 ## Numbers
 

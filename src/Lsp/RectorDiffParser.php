@@ -31,6 +31,25 @@ final class RectorDiffParser
      *   oldCount-1` span whenever the hunk carries unified-diff context
      *   lines (3 on each side, by default) -- both null when `hasChange` is
      *   false.
+     *
+     *   #160 self-review reversal: a per-hunk line-ending ("eol") detector
+     *   used to live here, rejoining `hunkNewText()`'s output with the
+     *   ORIGINAL file's own CRLF convention instead of a hardcoded "\n".
+     *   PR review caught it BEFORE merge: CI's own warm-vs-cold oracle test
+     *   (tests/E2E/test_lsp_execute_command.py::
+     *   test_fix_workspace_matches_a_cold_rector_apply_across_every_changed_file)
+     *   failed on the CrlfFixable.php fixture, because a COLD, real
+     *   `vendor/bin/rector process` apply on a CRLF file ALSO writes its
+     *   replacement lines with a bare "\n" (Rector's own pretty-printer
+     *   output, never normalized to the file's original convention) --
+     *   the "mixed CRLF context / LF replacement" result #160 called a bug
+     *   is Rector's own real, upstream behaviour, and this server's entire
+     *   contract (CLAUDE.md's warm-vs-cold oracle) is to match cold BYTE
+     *   FOR BYTE, not to improve on it. The per-hunk eol fix made warm
+     *   diverge from cold instead. Reverted; #160 is closed by the E2E
+     *   test added alongside this reversal, which asserts warm equals cold
+     *   for this exact fixture instead of asserting a uniform-CRLF result
+     *   that cold itself does not produce.
      */
     public static function parseHunks(string $diff): array
     {
@@ -208,8 +227,13 @@ final class RectorDiffParser
         // the genuinely-unambiguous one-hunk/one-rule case this guard is
         // for. Narrowing further (e.g. cross-checking against hunk COUNT
         // per rule, which Rector's JSON report does not currently expose
-        // per-hunk) is a real follow-up, tracked as a trap.d fragment
-        // rather than attempted here.
+        // per-hunk) is a real follow-up -- tracked as #154, which pinned
+        // this exact ambiguity as a test (see
+        // RectorDiffParserTest::testBuildFixesPinsTheKnownAmbiguousLeftoverAttributionFromIssue154)
+        // and, per #154's own resolution, accepted the residual
+        // false-positive rate as a presentation-layer (diagnostic label)
+        // risk rather than a correctness/security one -- narrowing further
+        // needs data Rector's own report does not expose today.
         $attributed = [];
         foreach ($rectorsByHunk as $matched) {
             foreach ($matched as $rector) {
@@ -298,6 +322,11 @@ final class RectorDiffParser
             return '';
         }
 
+        // #160 self-review reversal: see parseHunks()'s docblock. A cold,
+        // real `vendor/bin/rector process` apply on a CRLF file ALSO
+        // rejoins its replacement lines with a bare "\n" -- this hardcoded
+        // join matches that byte for byte, which is this server's actual
+        // contract (CLAUDE.md's warm-vs-cold oracle).
         return implode("\n", $hunk['newLines']) . "\n";
     }
 }
