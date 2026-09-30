@@ -30,28 +30,38 @@ final class RectorDiffParser
      *   lines actually touch, narrower than the full `oldStart..oldStart+
      *   oldCount-1` span whenever the hunk carries unified-diff context
      *   lines (3 on each side, by default) -- both null when `hasChange` is
-     *   false. `eol` (#160) is the ORIGINAL file's own line-ending
-     *   convention -- "\r\n" when any kept `-`/` ` line in the raw diff
-     *   still carries a trailing `\r` (this function only explodes on
-     *   "\n", so a CRLF source file's own lines keep it), "\n" otherwise.
+     *   false. `eol` (#160) is THIS HUNK's own line-ending convention --
+     *   "\r\n" when any of ITS OWN kept `-`/` ` lines still carries a
+     *   trailing `\r` (this function only explodes on "\n", so a CRLF
+     *   source file's own lines keep it), "\n" when it has at least one
+     *   kept line and none of them do. A hunk with NO kept lines at all
+     *   (e.g. a pure insertion with no surrounding context) has no signal
+     *   of its own, so it falls back to whatever the REST of the diff's
+     *   kept lines say (self-review: reviewed independently and found to
+     *   default to a bare "\n" even for a CRLF file otherwise, silently
+     *   reproducing #160 in that narrow shape -- the file-wide fallback
+     *   closes it for every diff that has at least one hunk with context).
      *   Rector's pretty-printer emits newly ADDED (`+`) lines with a bare
      *   "\n" regardless of the source file's convention, so `+` lines
      *   cannot be used to detect it -- only `-`/` ` lines, which are
-     *   verbatim copies of the original file, can.
+     *   verbatim copies of the original file, can. Per-hunk (rather than
+     *   file-wide only) so a source file with genuinely mixed line
+     *   endings does not have one hunk's convention bleed into another's.
      */
     public static function parseHunks(string $diff): array
     {
-        // #160: detect the file's own line-ending convention once, from
-        // kept (`-`/` `) lines only -- see the `eol` doc above for why `+`
-        // lines are excluded.
-        $eol = preg_match('/^[- ].*\r$/m', $diff) === 1 ? "\r\n" : "\n";
+        // #160: a file-wide FALLBACK only, used for a hunk with no kept
+        // line of its own to read -- see the `eol` doc above.
+        $fallbackEol = preg_match('/^[- ].*\r$/m', $diff) === 1 ? "\r\n" : "\n";
 
         $hunks = [];
         $current = null;
         $oldLine = 0;
         $rawNew = [];
+        $hunkHasKeptLine = false;
+        $hunkKeptLineIsCrlf = false;
 
-        $finalize = static function () use (&$current, &$rawNew): ?array {
+        $finalize = static function () use (&$current, &$rawNew, &$hunkHasKeptLine, &$hunkKeptLineIsCrlf, $fallbackEol): ?array {
             if ($current === null) {
                 return null;
             }
@@ -83,6 +93,7 @@ final class RectorDiffParser
                 }
             }
             $current['newLines'] = $core;
+            $current['eol'] = $hunkHasKeptLine ? ($hunkKeptLineIsCrlf ? "\r\n" : "\n") : $fallbackEol;
 
             return $current;
         };
@@ -101,10 +112,12 @@ final class RectorDiffParser
                     'hasChange' => false,
                     'changeFrom' => null,
                     'changeToExclusive' => null,
-                    'eol' => $eol,
+                    'eol' => $fallbackEol,
                 ];
                 $rawNew = [];
                 $oldLine = $oldStart;
+                $hunkHasKeptLine = false;
+                $hunkKeptLineIsCrlf = false;
                 continue;
             }
 
@@ -118,21 +131,43 @@ final class RectorDiffParser
                 $current['changeFrom'] ??= $oldLine;
                 $oldLine++;
                 $current['changeToExclusive'] = $oldLine;
+                $hunkHasKeptLine = true;
+                if (str_ends_with($line, "\r")) {
+                    $hunkKeptLineIsCrlf = true;
+                }
                 continue;
             }
             if ($marker === '+') {
                 $current['hasChange'] = true;
                 $current['changeFrom'] ??= $oldLine;
                 $current['changeToExclusive'] = max($current['changeToExclusive'] ?? $oldLine, $oldLine);
-                // #160: strip any trailing \r a CRLF source line still
+                // #160: strip a single trailing \r a CRLF source line still
                 // carries (see the `eol` doc above) -- newLines stores bare
-                // text, and hunkNewText() re-adds the detected $eol itself,
+                // text, and hunkNewText() re-adds the detected `eol` itself,
                 // so a kept trailing \r here would double up into \r\r\n.
-                $rawNew[] = ['pos' => $oldLine, 'text' => rtrim(substr($line, 1), "\r"), 'isAdd' => true];
+                // Self-review (independent Explore review pass): `rtrim`
+                // used to strip here, which removes EVERY trailing \r --
+                // wrong for a line whose real content genuinely ends in one,
+                // however rare. Only ever one \r to remove (this function's
+                // own explode("\n", ...) leaves at most one), so strip
+                // exactly that one instead.
+                $text = substr($line, 1);
+                if (str_ends_with($text, "\r")) {
+                    $text = substr($text, 0, -1);
+                }
+                $rawNew[] = ['pos' => $oldLine, 'text' => $text, 'isAdd' => true];
                 continue;
             }
             if ($marker === ' ') {
-                $rawNew[] = ['pos' => $oldLine, 'text' => rtrim(substr($line, 1), "\r"), 'isAdd' => false];
+                $hunkHasKeptLine = true;
+                if (str_ends_with($line, "\r")) {
+                    $hunkKeptLineIsCrlf = true;
+                }
+                $text = substr($line, 1);
+                if (str_ends_with($text, "\r")) {
+                    $text = substr($text, 0, -1);
+                }
+                $rawNew[] = ['pos' => $oldLine, 'text' => $text, 'isAdd' => false];
                 $oldLine++;
             }
         }

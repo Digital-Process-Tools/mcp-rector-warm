@@ -296,6 +296,77 @@ final class RectorDiffParserTest extends TestCase
         self::assertSame([], $fixes[1]['rectors']);
     }
 
+    public function testHunkNewTextUsesCrlfWhenTheKeptLinesInTheHunkAreCrlf(): void
+    {
+        // #160 unit-level coverage (self-review: independent Explore review
+        // pass flagged that only the slow, full-stack E2E test exercised
+        // this at all): context lines carry a trailing \r, exactly the
+        // shape a real CRLF file's diff has -- Rector's own printer still
+        // emits the `+` line with a bare "\n".
+        $diff = "--- Original\n+++ New\n@@ -1,3 +1,3 @@\n <?php\r\n-old\r\n+new\n <?php\r\n";
+
+        $fixes = RectorDiffParser::buildFixes($diff, ['SomeRector'], []);
+
+        self::assertSame("new\r\n", $fixes[0]['newText']);
+    }
+
+    public function testParseHunksDetectsEolPerHunkNotFileWide(): void
+    {
+        // Self-review (independent Explore review pass): a single
+        // file-wide `eol` used to be stamped onto every hunk -- wrong for a
+        // source file with genuinely mixed line endings (a real, if rare,
+        // shape after a partial bad conversion). Hunk 1's own kept lines
+        // are CRLF; hunk 2's own kept lines are plain LF -- each hunk must
+        // keep its OWN convention rather than one bleeding into the other.
+        $diff = "--- Original\n+++ New\n"
+            . "@@ -1,3 +1,3 @@\n <?php\r\n-old1\r\n+new1\n <?php\r\n"
+            . "@@ -10,3 +10,3 @@\n <?php\n-old2\n+new2\n <?php\n";
+
+        $hunks = RectorDiffParser::parseHunks($diff);
+
+        self::assertCount(2, $hunks);
+        self::assertSame("\r\n", $hunks[0]['eol']);
+        self::assertSame("\n", $hunks[1]['eol']);
+    }
+
+    public function testParseHunksFallsBackToTheFileWideEolWhenAHunkHasNoKeptLineOfItsOwn(): void
+    {
+        // Self-review (independent auditor pass): a pure-insertion hunk
+        // with no surrounding context has no `-`/` ` line of its own to
+        // read -- it must fall back to what the REST of the diff's kept
+        // lines say (here: CRLF, from hunk 1) rather than defaulting to a
+        // bare "\n" and silently reproducing #160 in this narrow shape.
+        $diff = "--- Original\n+++ New\n"
+            . "@@ -1,3 +1,3 @@\n <?php\r\n-old1\r\n+new1\n <?php\r\n"
+            . "@@ -20,0 +20,1 @@\n+inserted\n";
+
+        $hunks = RectorDiffParser::parseHunks($diff);
+
+        self::assertCount(2, $hunks);
+        self::assertSame("\r\n", $hunks[0]['eol']);
+        // Hunk 2 has no kept line of its own -- falls back to the
+        // file-wide signal from hunk 1, not a hardcoded "\n".
+        self::assertSame("\r\n", $hunks[1]['eol']);
+    }
+
+    public function testParseHunksDoesNotOverStripARealTrailingCarriageReturn(): void
+    {
+        // Self-review (independent Explore review pass): the CRLF fix used
+        // to strip stored line text with `rtrim($text, "\r")`, which
+        // removes EVERY trailing \r rather than just the single one a
+        // CRLF-terminated diff line carries -- wrong for a line whose real
+        // content genuinely ends in a literal \r (rare, but this function's
+        // whole purpose is byte-exact fidelity). Two trailing \r bytes
+        // here: one is the line's own content, the other is the CRLF
+        // terminator this function's `explode("\n", ...)` leaves attached.
+        // Only the terminator must be stripped.
+        $diff = "--- Original\n+++ New\n@@ -1,1 +1,1 @@\n-old\r\n+line ending in a real carriage return\r\r\n";
+
+        $hunks = RectorDiffParser::parseHunks($diff);
+
+        self::assertSame("line ending in a real carriage return\r", $hunks[0]['newLines'][0]);
+    }
+
     public function testBuildFixesAttributesTheSoleAppliedRuleToEveryUnattributedHunk(): void
     {
         // #100 reopen (PR #103 did not fix this): a single rule can produce
