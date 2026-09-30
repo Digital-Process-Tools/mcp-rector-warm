@@ -1,6 +1,6 @@
 # Benchmark
 
-**7–9.7× faster per file on Laravel and Symfony**, with the warm session on (`MCP_RECTOR_WARM_SESSION=1`). Every warm answer was byte-identical to a cold `rector process`.
+**Up to 10× faster per file on Laravel and Symfony**, with the warm session on (`MCP_RECTOR_WARM_SESSION=1`). Every warm answer was byte-identical to a cold `rector process`.
 
 ## Numbers
 

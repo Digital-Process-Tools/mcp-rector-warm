@@ -6,7 +6,7 @@
 
 > **[Rector](https://getrector.com/) is great. Its cold start is not.**
 > Every `rector process` boots Rector from scratch before a single rule fires, on every file.
-> Keep Rector warm and pay that boot once. Same output as cold. **7–9.7× faster per file** on Laravel and Symfony.
+> Keep Rector warm and pay that boot once. Same output as cold. **up to 10× faster per file** on Laravel and Symfony.
 
 Two ways in, one warm engine:
 
@@ -34,7 +34,7 @@ Both ship in one package. Run one, or both side by side.
 
 ## Same answers. Just faster.
 
-- **7–9.7× faster per file** on Laravel and Symfony, at the median.
+- **Up to 10× faster per file** on Laravel and Symfony, at the median.
 - **Identical output.** Every warm answer in the benchmark was byte-identical to a cold `rector process`, and CI checks warm output against a fresh cold Rector run. Nothing to re-check.
 - **One-time boot.** The first call boots Rector, once per server. An idle server costs nothing.
 - **Edit `rector.php` freely.** Config changes apply on the next call. No restart.
@@ -113,7 +113,7 @@ mcp-rector-warm --working-dir=/path/to/project --config=/path/to/project/rector.
 
 ## The numbers
 
-**7–9.7× faster per file** on Laravel and Symfony with `MCP_RECTOR_WARM_SESSION=1`, **3.3–4.1×** without it. Every warm answer was byte-identical to cold.
+**Up to 10× faster per file** on Laravel and Symfony with `MCP_RECTOR_WARM_SESSION=1`, **3.3–4.1×** without it. Every warm answer was byte-identical to cold.
 
 **[Machine, method, full table, reproduce it on your project →](docs/benchmark.md)**
 
