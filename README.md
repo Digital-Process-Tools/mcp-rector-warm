@@ -5,8 +5,8 @@
 # mcp-rector-warm
 
 > **[Rector](https://getrector.com/) is great. Its cold start is not.**
-> Every `rector process` rebuilds its container before a single rule fires: **7 seconds per file** on a real production codebase.
-> Keep Rector warm, and every call after the first takes **0.68s**. Same output as cold. **~10× faster.**
+> Every `rector process` boots Rector from scratch before a single rule fires, on every file.
+> Keep Rector warm and pay that boot once. Same output as cold. **up to 10× faster per file** on Laravel and Symfony.
 
 Two ways in, one warm engine:
 
@@ -34,10 +34,12 @@ Both ship in one package. Run one, or both side by side.
 
 ## Same answers. Just faster.
 
-- **~10× faster per call.** 0.68s warm against 7.02s cold, at the median.
-- **Identical output.** All 20 benchmark files gave the same answer warm and cold, and CI checks warm output against a fresh cold Rector run. Nothing to re-check.
-- **One-time boot.** The first call costs about one cold run (~6.4s), once per session. An idle server costs nothing.
+- **Up to 10× faster per file** on Laravel and Symfony, at the median.
+- **Identical output.** Every warm answer in the benchmark was byte-identical to a cold `rector process`, and CI checks warm output against a fresh cold Rector run. Nothing to re-check.
+- **One-time boot.** The first call boots Rector, once per server. An idle server costs nothing.
 - **Edit `rector.php` freely.** Config changes apply on the next call. No restart.
+
+The fastest mode is opt-in: start the server with `MCP_RECTOR_WARM_SESSION=1` ([numbers](docs/benchmark.md), [what it watches](docs/how-it-works.md#1b-one-session-child-keeps-the-analysis-warm-between-calls-185)).
 
 ## Get started
 
@@ -51,7 +53,7 @@ That's the install. PHP 8.2+, Rector ^2.4 comes along as a normal Composer depen
 
 **For:** anyone who lets Claude, Copilot agent mode, Cursor, Cline or another agent refactor PHP.
 
-- **Your agent runs Rector after every edit**, without waiting 7 seconds each time.
+- **Your agent runs Rector after every edit**, without waiting for Rector to boot each time.
 - **Preview first.** The agent sees the diff; files change only when it asks to write.
 - **Stays inside your project.** Paths outside the working directory are refused.
 - **Any MCP client.** Claude Desktop, VS Code, Cursor, Cline, Continue, Zed.
@@ -111,17 +113,9 @@ mcp-rector-warm --working-dir=/path/to/project --config=/path/to/project/rector.
 
 ## The numbers
 
-**~10× faster per call.** The first call boots Rector once, costing about the same as one cold run (6.4s). Every call after that takes 0.68s (median) instead of 7.0s cold.
+**Up to 10× faster per file** on Laravel and Symfony with `MCP_RECTOR_WARM_SESSION=1`, **3.3–4.1×** without it. Every warm answer was byte-identical to cold.
 
-| Setup | median | p95 |
-|-------|--------|-----|
-| Cold `rector process`, every call | 7.02s | 9.00s |
-| Warm, first call (one-time boot, once per session) | 6.4s | |
-| **Warm, every later call** | **0.68s** | **2.40s** |
-
-20 files from a real production codebase: **144s cold, 30s warm** including the one-time boot. All 20 warm answers matched the cold ones.
-
-**[Method, caveats, reproduce it on your project →](docs/benchmark.md)**
+**[Machine, method, full table, reproduce it on your project →](docs/benchmark.md)**
 
 ## Install
 

@@ -184,15 +184,18 @@ for the command).
 ## Numbers
 
 The [Benchmark](benchmark.md) page has the
-maintained, reproducible baseline (`tools/warm-vs-cold.py`, v0.5.0 on a real
-production codebase): **7.02s cold vs 0.68s warm per call at the median** --
-about 10x, first call included. Reproduce it on any project:
+maintained, reproducible baseline (`tools/warm-vs-cold.py`, 30 files each of
+laravel/framework and symfony/symfony, first call excluded): with
+`MCP_RECTOR_WARM_SESSION=1`, **740 ms cold vs 76 ms warm per file on Laravel,
+696 ms vs 100 ms on Symfony, at the median**; 224 ms and 159 ms warm in the
+default mode. Every warm answer was byte-identical to cold. Reproduce it on any
+project:
 
 ```bash
-python3 tools/warm-vs-cold.py --project /path/to/project --files 'src/**/*.php' --limit 20 --jobs 1 --out /tmp/wvc
+python3 tools/warm-vs-cold.py --project /path/to/project --files 'src/**/*.php' --limit 30 --jobs 1 --out /tmp/wvc
 ```
 
-A newer, LSP-focused round of measurements (2026-09-28, server at
+A separate, LSP-focused round of measurements (2026-09-28, server at
 `main@67b0134`, reported by the issue author in #110 and not yet
 independently re-run by this page's author) puts numbers to the same effect
 via the language server directly (latency = `didSave` until

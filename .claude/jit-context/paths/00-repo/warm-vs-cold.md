@@ -36,19 +36,18 @@ One warm session (official Python `mcp` client, `rector_process` with `dryRun: t
   calls". Compare "warm, later calls" p50/p95 with cold per call.
 - **For a speed number, run `--jobs 1`.** Parallel cold runs share CPU, which makes each cold call slower and inflates the ratio.
 
-**Speed baseline** (v0.5.0 `4902c3d`, real production project, PHP 8.2.0, Darwin arm64, 20 files, `--jobs 1`, 20/20 match). This is the number behind the README Benchmark table:
+**Speed baseline** (2026-09-30, Apple M3 Pro, PHP 8.3.11 NTS, no OPcache, 30 files per project, `--jobs 1`, 30/30 match). This is the number behind the README and docs/benchmark.md; method and file sampling are there:
 
-| side | p50 | p95 |
-| --- | --- | --- |
-| cold, per file | 7.02s | 9.00s |
-| warm, later calls | 0.68s | 2.40s |
-| warm, start + handshake | 0.09-0.12s | 3 sessions |
-| warm, first call, small file | 6.37-6.42s | 3 sessions; same file cold 5.9-7.3s |
-| warm, next call, other file | 0.28-0.31s | 3 sessions |
+| project, mode | warm later p50 / p95 | cold p50 / p95 | warm first call |
+| --- | --- | --- | --- |
+| laravel v13.34.0, `MCP_RECTOR_WARM_SESSION=1` | 76 / 1243 ms | 740 / 2271 ms | 1531 ms |
+| laravel, default | 224 / 1672 ms | 749 / 2008 ms | 1570 ms |
+| symfony v7.4.20, `MCP_RECTOR_WARM_SESSION=1` | 100 / 447 ms | 696 / 1286 ms | 2255 ms |
+| symfony, default | 159 / 557 ms | 659 / 1172 ms | 1872 ms |
 
-- The container is built **lazily, on the first `rector_process` call**, not at start. First call ≈ one cold run.
+- The container is built **lazily, on the first `rector_process` call**, not at start. The first call costs the boot plus the first file: two to three cold runs on Laravel and Symfony.
 - `warm_first` in `report.json` is **not the boot cost**. The timer (`started` in `run_warm`) starts after `session.initialize()`, and the first file's own work is included. With a heavy first file it read 10.1s. To measure boot, start each session on a small file, repeat over fresh sessions, and time spawn-to-initialize separately.
-- Only the `warm_later` p50 against the `cold` p50 is a like-for-like comparison. If warm later-call p50 goes well above ~1s on a similar project, treat it as a regression. Update the README table and this baseline together.
+- Only the `warm_later` p50 against the `cold` p50 is a like-for-like comparison. If warm later-call p50 on Laravel or Symfony goes well above the table's, treat it as a regression. Update the README table and this baseline together.
 
 **A mismatch means** the warm server answered differently from a fresh process on the same bytes. Reduce it:
 1. Re-run that one file cold and warm-alone (`--files @one.txt`). If warm-alone matches, earlier files in the session are poisoning it: bisect the prefix of `files.txt`.
