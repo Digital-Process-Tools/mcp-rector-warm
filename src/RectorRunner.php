@@ -3223,6 +3223,18 @@ class RectorRunner implements RunnerInterface
      * this only ever runs once per process, but the guard costs nothing and matches the
      * upstream behaviour it mirrors).
      *
+     * #195: skipped entirely when the project ships its own vendor/rector/rector --
+     * see projectShipsOwnRector(). AutoloadIncluder::autoloadRectorInstalledAsGlobalDependency()
+     * (rector/rector's bin/rector.php) checks the exact same thing and returns early rather
+     * than loading getcwd() . '/vendor/autoload.php' when it is true, because that signal means
+     * Rector is being run standalone against a foreign project that already has its own Rector
+     * install -- a genuine cold `vendor/bin/rector process` run in that situation never touches
+     * the project's autoloader either. Without this guard, warm loaded the project's real
+     * Composer autoloader unconditionally and could resolve classes/types a matching cold run
+     * never sees, so warm inferred strictly more than cold on every mismatching file (checkout
+     * mode against laravel/framework and symfony/symfony, both of which carry their own
+     * vendor/rector/rector as a dev dependency).
+     *
      * Known limitation, not silently ignored: this loads the project autoloader once, at
      * boot, in a worker process that then serves every warm call for the rest of its
      * session. A `composer dump-autoload` mid-session (a newly generated class in the
@@ -3236,7 +3248,11 @@ class RectorRunner implements RunnerInterface
      */
     private function ensureProjectAutoloaded(): void
     {
-        $projectAutoload = getcwd() . '/vendor/autoload.php';
+        $cwd = (string) getcwd();
+        if ($this->projectShipsOwnRector($cwd)) {
+            return;
+        }
+        $projectAutoload = $cwd . '/vendor/autoload.php';
         if (!is_file($projectAutoload)) {
             return;
         }
@@ -3245,6 +3261,23 @@ class RectorRunner implements RunnerInterface
             return;
         }
         require_once $projectAutoload;
+    }
+
+    /**
+     * #195: true when $cwd (the analysed project) has its own vendor/rector/rector -- the
+     * exact directory rector/rector's own bin/rector.php AutoloadIncluder checks
+     * (`is_dir('vendor/rector/rector')`, relative to getcwd()) before deciding NOT to load
+     * `vendor/autoload.php` in autoloadRectorInstalledAsGlobalDependency(). mcp-rector-warm is
+     * never that project's own installed Rector (it always analyses through its own bundled
+     * copy, ensureRectorAutoloaded()), so a project with its own vendor/rector/rector is exactly
+     * the "checkout mode against a project that ships its own Rector" case: cold's own
+     * `vendor/bin/rector process` run there never loads the project's autoloader, so neither
+     * should warm. Protected (rather than a free function) so a test can override it without
+     * needing a real vendor/rector/rector directory on disk.
+     */
+    protected function projectShipsOwnRector(string $cwd): bool
+    {
+        return is_dir($cwd . '/vendor/rector/rector');
     }
 
     /**

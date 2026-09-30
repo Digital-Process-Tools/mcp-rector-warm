@@ -2185,6 +2185,123 @@ final class RectorRunnerTest extends TestCase
             $property->setValue($runner, $value);
         }
     }
+
+    /**
+     * #195: the signal rector/rector's own bin/rector.php AutoloadIncluder uses
+     * (`is_dir('vendor/rector/rector')`, relative to getcwd()) before deciding whether to
+     * load `vendor/autoload.php` in autoloadRectorInstalledAsGlobalDependency() -- mirrored
+     * here so ensureProjectAutoloaded() can skip a foreign project's autoloader the same way
+     * a genuine cold `vendor/bin/rector process` run against that project would.
+     */
+    public function testProjectShipsOwnRectorTrueWhenVendorRectorRectorDirExists(): void
+    {
+        $dir = sys_get_temp_dir() . '/rector-runner-test-' . uniqid('', true);
+        mkdir($dir . '/vendor/rector/rector', 0777, true);
+        try {
+            $runner = new RectorRunner();
+            $method = new \ReflectionMethod(RectorRunner::class, 'projectShipsOwnRector');
+            self::assertTrue($method->invoke($runner, $dir));
+        } finally {
+            self::rmrf($dir);
+        }
+    }
+
+    public function testProjectShipsOwnRectorFalseWhenNoVendorRectorRectorDir(): void
+    {
+        $dir = sys_get_temp_dir() . '/rector-runner-test-' . uniqid('', true);
+        mkdir($dir . '/vendor', 0777, true);
+        try {
+            $runner = new RectorRunner();
+            $method = new \ReflectionMethod(RectorRunner::class, 'projectShipsOwnRector');
+            self::assertFalse($method->invoke($runner, $dir));
+        } finally {
+            self::rmrf($dir);
+        }
+    }
+
+    /**
+     * #195: warm must not load the analysed project's own vendor/autoload.php when that
+     * project ships its own vendor/rector/rector -- see projectShipsOwnRector()'s docblock.
+     * Before this guard, ensureProjectAutoloaded() required it unconditionally, so warm could
+     * resolve real project classes/types through the project's real Composer autoloader that a
+     * matching cold `vendor/bin/rector process` run (which never touches that autoloader in
+     * this situation) could not -- the exact mechanism behind #195's "warm infers more types
+     * than cold" reports on laravel/framework and symfony/symfony in checkout mode. Confirmed
+     * via get_included_files() rather than a defined constant, so re-running this test in the
+     * same process never collides with itself.
+     */
+    public function testEnsureProjectAutoloadedSkipsProjectWithOwnRector(): void
+    {
+        $dir = sys_get_temp_dir() . '/rector-runner-test-' . uniqid('', true);
+        mkdir($dir . '/vendor/rector/rector', 0777, true);
+        file_put_contents($dir . '/vendor/autoload.php', "<?php\nreturn true;\n");
+        $originalCwd = (string) getcwd();
+        chdir($dir);
+        try {
+            $runner = new RectorRunner();
+            $method = new \ReflectionMethod(RectorRunner::class, 'ensureProjectAutoloaded');
+            $method->invoke($runner);
+            $realPath = realpath($dir . '/vendor/autoload.php');
+            self::assertNotFalse($realPath);
+            self::assertNotContains(
+                $realPath,
+                get_included_files(),
+                'a project shipping its own Rector must not have its autoloader loaded by warm (#195)',
+            );
+        } finally {
+            chdir($originalCwd);
+            self::rmrf($dir);
+        }
+    }
+
+    /**
+     * Control: a project with NO vendor/rector/rector of its own must still get its
+     * autoloader loaded -- the #30 behaviour projectShipsOwnRector() must not disturb. Without
+     * this case, a projectShipsOwnRector() that always returned true would pass the mismatch
+     * test above for the wrong reason.
+     */
+    public function testEnsureProjectAutoloadedLoadsProjectWithoutOwnRector(): void
+    {
+        $dir = sys_get_temp_dir() . '/rector-runner-test-' . uniqid('', true);
+        mkdir($dir . '/vendor', 0777, true);
+        file_put_contents($dir . '/vendor/autoload.php', "<?php\nreturn true;\n");
+        $originalCwd = (string) getcwd();
+        chdir($dir);
+        try {
+            $runner = new RectorRunner();
+            $method = new \ReflectionMethod(RectorRunner::class, 'ensureProjectAutoloaded');
+            $method->invoke($runner);
+            $realPath = realpath($dir . '/vendor/autoload.php');
+            self::assertNotFalse($realPath);
+            self::assertContains($realPath, get_included_files());
+        } finally {
+            chdir($originalCwd);
+            self::rmrf($dir);
+        }
+    }
+
+    private static function rmrf(string $dir): void
+    {
+        if (!is_dir($dir)) {
+            return;
+        }
+        $items = scandir($dir);
+        if ($items === false) {
+            return;
+        }
+        foreach ($items as $item) {
+            if ($item === '.' || $item === '..') {
+                continue;
+            }
+            $path = $dir . '/' . $item;
+            if (is_dir($path)) {
+                self::rmrf($path);
+            } else {
+                unlink($path);
+            }
+        }
+        rmdir($dir);
+    }
 }
 
 /**
