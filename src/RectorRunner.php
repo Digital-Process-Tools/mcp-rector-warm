@@ -60,13 +60,13 @@ class RectorRunner implements RunnerInterface
      */
     public const SESSION_WATCH_ENV = 'MCP_RECTOR_WARM_SESSION_WATCH';
 
-    /** #185: the session child retires after a call once its own memory passes this many MB (default 512). */
+    /** #185: the session child retires after a call once its own memory passes this many MB (default 1024). */
     public const SESSION_MAX_MB_ENV = 'MCP_RECTOR_WARM_SESSION_MAX_MB';
 
     /** #185: the session child retires after this many calls it served itself (default 250). */
     public const SESSION_MAX_CALLS_ENV = 'MCP_RECTOR_WARM_SESSION_MAX_CALLS';
 
-    private const SESSION_DEFAULT_MAX_MB = 512;
+    private const SESSION_DEFAULT_MAX_MB = 1024;
     private const SESSION_DEFAULT_MAX_CALLS = 250;
 
     /**
