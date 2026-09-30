@@ -1535,8 +1535,22 @@ class RectorRunner implements RunnerInterface
      * Stop the current worker now. $tree: kill its whole process tree first (#112) --
      * the call-timeout path; otherwise the worker alone, which holds nothing worth a
      * graceful shutdown.
+     *
+     * $deadlineNs (#153): proc_close() blocks unconditionally until the OS reports
+     * the child dead, with no timeout of its own. Sending it a kill signal first
+     * makes that wait bounded IN PRACTICE almost everywhere -- the same reasoning
+     * killAndReap() above already relies on for the pcntl path -- but a worker
+     * killed while still mid-boot (loading its own PHP extensions) can rarely take
+     * Windows noticeably longer to actually die than an already-connected one
+     * does, because TerminateProcess() there can be deferred behind that process's
+     * own DLL loader lock. Given a deadline, this polls instead of blocking
+     * unconditionally and, past the deadline, returns without proc_close()ing --
+     * a real resource "leak" (the handle -- not the OS process, which is still
+     * being torn down) that only matters if this instance keeps running
+     * afterwards. $deadlineNs is null everywhere except __destruct(), where the
+     * whole PHP process is exiting anyway and the OS reclaims it regardless.
      */
-    private function discardProcWorker(bool $tree): void
+    private function discardProcWorker(bool $tree, ?int $deadlineNs = null): void
     {
         if ($this->procWorker === null) {
             return;
@@ -1557,8 +1571,36 @@ class RectorRunner implements RunnerInterface
             // 9, not \SIGKILL: that constant belongs to pcntl, absent here.
             \proc_terminate($worker['proc'], 9);
         }
+        if ($deadlineNs !== null && !$this->awaitProcExitOrDeadline($worker['proc'], $deadlineNs)) {
+            // Still running past the deadline: do not let proc_close() hold this
+            // caller's own exit hostage waiting for it (#153). Its stderr temp
+            // file is left behind too -- unlinking it while the process might
+            // still have it open is itself platform-risky on Windows.
+            return;
+        }
         \proc_close($worker['proc']);
         @\unlink($worker['stderr']);
+    }
+
+    /**
+     * Poll $proc's status until it is no longer running or $deadlineNs passes,
+     * whichever comes first -- never a single unconditional blocking wait.
+     * Extracted so #153's regression test can drive it directly with a process
+     * that is deliberately never signalled, independent of how fast SIGKILL/
+     * TerminateProcess actually resolves on whatever platform the test runs on.
+     *
+     * @param resource $proc
+     */
+    private function awaitProcExitOrDeadline($proc, int $deadlineNs): bool
+    {
+        while (\proc_get_status($proc)['running']) {
+            if (\hrtime(true) >= $deadlineNs) {
+                return false;
+            }
+            \usleep(10_000);
+        }
+
+        return true;
     }
 
     private function reapRetiredProcWorkers(): void
@@ -1577,10 +1619,17 @@ class RectorRunner implements RunnerInterface
     /**
      * The daemon exiting must not leave a booted standby behind -- on Windows a child
      * holding inherited handles can also keep the host's pipes open.
+     *
+     * Bounded (#153): the standby this discards may still be mid-boot -- the
+     * client closing stdin right after a call that forced a config-change
+     * reboot (runViaStandbyWorker()'s finally block always starts a fresh one,
+     * fire-and-forget) races exactly this destructor. 2s is generous next to
+     * how fast a kill signal normally resolves; see discardProcWorker()'s own
+     * docblock for why it is not unconditional.
      */
     public function __destruct()
     {
-        $this->discardProcWorker(false);
+        $this->discardProcWorker(false, \hrtime(true) + 2_000_000_000);
         $this->stopRetiredProcWorkers();
     }
 
