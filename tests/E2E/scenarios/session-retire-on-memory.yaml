@@ -1,0 +1,35 @@
+description: "#185 (PR #189 finding C): a session child whose own memory passes MCP_RECTOR_WARM_SESSION_MAX_MB retires after the call although memory_limit is -1; re-analysing the same file keeps giving the cold answer from a fresh session each time."
+session: true
+env: {MCP_RECTOR_WARM_SESSION_MAX_MB: "1"}
+files:
+  src/Base.php: |
+    <?php
+
+    declare(strict_types=1);
+
+    class Base
+    {
+        public function run(): void
+        {
+            echo 'base';
+        }
+    }
+  src/Child.php: |
+    <?php
+
+    declare(strict_types=1);
+
+    final class Child extends Base
+    {
+        public function run(): void
+        {
+            echo 'child';
+        }
+    }
+steps:
+  - call: src/Child.php
+    expect: {changed: 1, session: spawned}
+  - call: src/Child.php
+    expect: {changed: 1, session: spawned}
+  - call: src/Child.php
+    expect: {changed: 1, session: spawned}

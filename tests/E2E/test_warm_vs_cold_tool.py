@@ -13,11 +13,14 @@ import argparse
 import importlib.util
 import json
 import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
 
-from mcp_harness import FIXTURE_PROJECT, REPO, php_binary
+import pytest
+
+from mcp_harness import FIXTURE_PROJECT, NO_PCNTL_PLATFORM, REPO, SESSION_OPT_OUT, php_binary
 
 TOOL = REPO / "tools" / "warm-vs-cold.py"
 
@@ -199,7 +202,7 @@ def test_foreign_php_parser_fixture_is_live():
     assert message == FOREIGN_MARKER
 
 
-def run_tool_from_empty_tmpdir(tmp_path: Path, project: Path) -> tuple[dict, str]:
+def run_tool_from_empty_tmpdir(tmp_path: Path, project: Path, extra_env: dict[str, str] | None = None) -> tuple[dict, str]:
     """Run the tool on every src/*.php of `project` with TMPDIR (TMP/TEMP on Windows)
     pointing at a fresh empty directory -- a first run on a new machine or CI runner:
     PHPStan's own cache lives under sys_get_temp_dir()/cache/PHPStan, and the tool
@@ -207,7 +210,7 @@ def run_tool_from_empty_tmpdir(tmp_path: Path, project: Path) -> tuple[dict, str
     markdown; asserts the run happened at all, so a caller's 'must not' is not vacuous."""
     empty_tmp = tmp_path / "tmp"
     empty_tmp.mkdir()
-    env = {**os.environ, "TMPDIR": str(empty_tmp), "TMP": str(empty_tmp), "TEMP": str(empty_tmp)}
+    env = {**os.environ, "TMPDIR": str(empty_tmp), "TMP": str(empty_tmp), "TEMP": str(empty_tmp), **(extra_env or {})}
     out = tmp_path / "out"
     done = subprocess.run(
         [sys.executable, str(TOOL), "--project", str(project),
@@ -258,3 +261,30 @@ def test_std_stream_constants_stay_open_in_the_analysing_process_from_empty_tmpd
     report, report_md = run_tool_from_empty_tmpdir(tmp_path, STD_STREAMS_PROJECT)
     assert "Invalid value" not in report_md, report_md
     assert_all_match_with_a_real_diff(report, report_md)
+
+
+@pytest.mark.parametrize("fixture", [STD_STREAMS_PROJECT, FOREIGN_PHP_PARSER_PROJECT], ids=["std-streams", "foreign-php-parser"])
+def test_the_session_child_follows_the_192_rules_from_empty_tmpdir(tmp_path, fixture):
+    """#185 on top of #192: the two cases above, served INSIDE the session child
+    (MCP_RECTOR_WARM_SESSION=1, and withAutoloadPaths so the session accepts the
+    file instead of declining it to the pristine fork). The session must keep the
+    std stream constants open too, and inherit the worker's php-parser preload."""
+    if NO_PCNTL_PLATFORM or SESSION_OPT_OUT:
+        pytest.skip("no session child here (no pcntl, or MCP_RECTOR_WARM_SESSION=0)")
+    project = tmp_path / "project"
+    shutil.copytree(fixture, project)
+    config = project / "rector.php"
+    text = config.read_text(encoding="utf-8")
+    assert "->withPaths([__DIR__ . '/src'])" in text
+    config.write_text(text.replace(
+        "->withPaths([__DIR__ . '/src'])",
+        "->withPaths([__DIR__ . '/src'])\n    ->withAutoloadPaths([__DIR__ . '/src'])",
+    ), encoding="utf-8")
+    report, report_md = run_tool_from_empty_tmpdir(
+        tmp_path, project, {"MCP_RECTOR_WARM_SESSION": "1", "MCP_RECTOR_WARM_SESSION_LOG": "1"},
+    )
+    assert "Invalid value" not in report_md and FOREIGN_MARKER not in report_md, report_md
+    assert_all_match_with_a_real_diff(report, report_md)
+    # Positive control: the session really analysed the file (not a decline).
+    log = (tmp_path / "out" / "warm-server.stderr").read_text(encoding="utf-8")
+    assert "mcp-rector-warm: session serve:" in log, log

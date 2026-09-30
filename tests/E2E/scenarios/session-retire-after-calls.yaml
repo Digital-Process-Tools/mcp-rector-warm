@@ -1,0 +1,38 @@
+description: "#185 (PR #189 finding C): the session child retires after MCP_RECTOR_WARM_SESSION_MAX_CALLS calls whatever memory_limit says (both bins set -1), and the next call starts a fresh one; every answer still equals cold."
+session: true
+env: {MCP_RECTOR_WARM_SESSION_MAX_CALLS: "2"}
+files:
+  src/Base.php: |
+    <?php
+
+    declare(strict_types=1);
+
+    class Base
+    {
+        public function run(): void
+        {
+            echo 'base';
+        }
+    }
+  src/Child.php: |
+    <?php
+
+    declare(strict_types=1);
+
+    final class Child extends Base
+    {
+        public function run(): void
+        {
+            echo 'child';
+        }
+    }
+steps:
+  - call: src/Child.php
+    expect: {changed: 1, session: spawned}
+  - call: src/Child.php
+    expect: {changed: 1, session: reused}
+  # Must fire: two calls served, so this one runs in a fresh session.
+  - call: src/Child.php
+    expect: {changed: 1, session: spawned}
+  - call: src/Child.php
+    expect: {changed: 1, session: reused}

@@ -1,0 +1,143 @@
+description: "#185: the session child keeps PHPStan state across calls, and a parent class, an interface and a trait edited on disk each force a fresh session (must fire), while a repeat call and an unrelated edit do not (must not fire)."
+session: true
+config: |
+  <?php
+
+  declare(strict_types=1);
+
+  use Rector\Config\RectorConfig;
+  use Rector\Php83\Rector\ClassMethod\AddOverrideAttributeToOverriddenMethodsRector;
+  use Rector\ValueObject\PhpVersion;
+
+  // No withAutoloadPaths on purpose: every class resolves through the project
+  // autoloader (PHPStan's standard locator chain), so an edit can only be seen
+  // through the session's dependency tracking, not through a scanned directory.
+  return RectorConfig::configure()
+      ->withPaths([__DIR__ . '/src'])
+      ->withPhpVersion(PhpVersion::PHP_83)
+      ->withConfiguredRule(AddOverrideAttributeToOverriddenMethodsRector::class, [
+          AddOverrideAttributeToOverriddenMethodsRector::ADD_TO_INTERFACE_METHODS => true,
+      ]);
+files:
+  # A PSR-4-shaped project autoloader: App\X -> src/X.php when that file exists.
+  vendor/autoload.php: |
+    <?php
+
+    spl_autoload_register(static function (string $class): void {
+        if (str_starts_with($class, 'App\\')) {
+            $file = __DIR__ . '/../src/' . str_replace('\\', '/', substr($class, 4)) . '.php';
+            if (is_file($file)) {
+                require $file;
+            }
+        }
+    });
+  src/Greets.php: |
+    <?php
+
+    declare(strict_types=1);
+
+    namespace App;
+
+    trait Greets
+    {
+    }
+  src/Contract.php: |
+    <?php
+
+    declare(strict_types=1);
+
+    namespace App;
+
+    interface Contract
+    {
+    }
+  src/Base.php: |
+    <?php
+
+    declare(strict_types=1);
+
+    namespace App;
+
+    class Base
+    {
+        use Greets;
+    }
+  src/Unrelated.php: |
+    <?php
+
+    declare(strict_types=1);
+
+    namespace App;
+
+    final class Unrelated
+    {
+    }
+  src/Child.php: |
+    <?php
+
+    declare(strict_types=1);
+
+    namespace App;
+
+    final class Child extends Base implements Contract
+    {
+        public function run(): void
+        {
+            echo 'run';
+        }
+
+        public function handle(): void
+        {
+            echo 'handle';
+        }
+
+        public function hello(): string
+        {
+            return 'hello';
+        }
+    }
+steps:
+  - call: src/Child.php
+    expect: {changed: 0, session: spawned}
+  # Must not fire: nothing changed, so the same session serves the repeat.
+  - call: src/Child.php
+    expect: {changed: 0, session: reused}
+  # Must not fire: a file Child does not depend on changed.
+  - edit:
+      path: src/Unrelated.php
+      old: "final class Unrelated\n{\n}"
+      new: "final class Unrelated\n{\n    public const X = 1;\n}"
+  - call: src/Child.php
+    expect: {changed: 0, session: reused}
+  # Must fire: the parent class gains run().
+  - edit:
+      path: src/Base.php
+      old: "    use Greets;\n"
+      new: "    use Greets;\n\n    public function run(): void\n    {\n        echo 'base';\n    }\n"
+  - call: src/Child.php
+    expect:
+      changed: 1
+      diff_contains: "+    #[\\Override]\n     public function run(): void"
+      session: respawned
+  - call: src/Child.php
+    expect: {changed: 1, session: reused}
+  # Must fire: the interface gains handle().
+  - edit:
+      path: src/Contract.php
+      old: "interface Contract\n{\n}"
+      new: "interface Contract\n{\n    public function handle(): void;\n}"
+  - call: src/Child.php
+    expect:
+      changed: 1
+      diff_contains: "+    #[\\Override]\n     public function handle(): void"
+      session: respawned
+  # Must fire: the trait the parent uses gains hello().
+  - edit:
+      path: src/Greets.php
+      old: "trait Greets\n{\n}"
+      new: "trait Greets\n{\n    public function hello(): string\n    {\n        return 'trait';\n    }\n}"
+  - call: src/Child.php
+    expect:
+      changed: 1
+      diff_contains: "+    #[\\Override]\n     public function hello(): string"
+      session: respawned
