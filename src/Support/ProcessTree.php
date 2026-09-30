@@ -120,6 +120,32 @@ final class ProcessTree
     }
 
     /**
+     * #159: whether the most recent probe run() attempted (from isAlive() or
+     * parentOf(), this process only) actually managed to execute an external
+     * command at all, distinguishing "the environment cannot run our probe
+     * commands (`ps`/`tasklist`)" from "the probe ran fine and told us the
+     * pid/parent is simply gone" -- the two reasons isAlive()/parentOf()
+     * themselves collapse into a single null (see their own docblocks). Null
+     * until at least one probe has been attempted in this process; a caller
+     * treating that startup null the same as "cannot tell" is the same
+     * best-effort posture ProcessTree already asks for everywhere else.
+     *
+     * Global, order-dependent state (self-review finding): this reports on
+     * the SINGLE most recent probe in this whole process, not on whichever
+     * call the reader has in mind. Read it IMMEDIATELY after the probe
+     * (isAlive()/parentOf()) it is meant to explain, before any other such
+     * call runs -- see bin/rector-warm-orphan-watchdog.php's own comment for
+     * a worked example of getting this wrong (a diagnostic that read this
+     * flag after an unrelated, later probe on one platform branch, #159).
+     */
+    private static ?bool $lastProbeRanOk = null;
+
+    public static function lastProbeRanOk(): ?bool
+    {
+        return self::$lastProbeRanOk;
+    }
+
+    /**
      * Whether $pid is a live process: true, false, or null when that cannot be told
      * (no posix, no proc_open, no tasklist/ps). A caller deciding to give up on a
      * peer must treat null as "alive" -- this is a best-effort probe, never proof.
@@ -155,6 +181,11 @@ final class ProcessTree
      * dying immediately, the same guarantee posix_getppid() gives a process
      * checking its OWN parent (see RectorRunner::serveProcessWorker()'s and
      * forkAndExecute()'s own #127 comments for the zombie caveat this sidesteps).
+     *
+     * #159: the null return covers TWO different reasons -- $pid is simply
+     * gone, or `ps` itself could not be run at all -- and does not tell them
+     * apart; a caller that needs to (bin/rector-warm-orphan-watchdog.php does,
+     * to make the second one observable) reads lastProbeRanOk() right after.
      */
     public static function parentOf(int $pid): ?int
     {
@@ -202,17 +233,24 @@ final class ProcessTree
     private static function run(array $command): ?string
     {
         if (!\function_exists('proc_open')) {
+            self::$lastProbeRanOk = false;
+
             return null;
         }
         $null = \PHP_OS_FAMILY === 'Windows' ? 'NUL' : '/dev/null';
         $process = @\proc_open($command, [0 => ['file', $null, 'r'], 1 => ['pipe', 'w'], 2 => ['file', $null, 'w']], $pipes);
         if (!\is_resource($process)) {
+            self::$lastProbeRanOk = false;
+
             return null;
         }
         $out = \stream_get_contents($pipes[1]);
         \fclose($pipes[1]);
         $exit = \proc_close($process);
 
-        return $out === false || ($exit === 127 && $out === '') ? null : $out;
+        $couldNotRun = $out === false || ($exit === 127 && $out === '');
+        self::$lastProbeRanOk = !$couldNotRun;
+
+        return $couldNotRun ? null : $out;
     }
 }
