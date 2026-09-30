@@ -3225,15 +3225,20 @@ class RectorRunner implements RunnerInterface
      *
      * #195: skipped entirely when the project ships its own vendor/rector/rector --
      * see projectShipsOwnRector(). AutoloadIncluder::autoloadRectorInstalledAsGlobalDependency()
-     * (rector/rector's bin/rector.php) checks the exact same thing and returns early rather
-     * than loading getcwd() . '/vendor/autoload.php' when it is true, because that signal means
-     * Rector is being run standalone against a foreign project that already has its own Rector
-     * install -- a genuine cold `vendor/bin/rector process` run in that situation never touches
-     * the project's autoloader either. Without this guard, warm loaded the project's real
-     * Composer autoloader unconditionally and could resolve classes/types a matching cold run
-     * never sees, so warm inferred strictly more than cold on every mismatching file (checkout
-     * mode against laravel/framework and symfony/symfony, both of which carry their own
-     * vendor/rector/rector as a dev dependency).
+     * (rector/rector's bin/rector.php) has TWO early-return guards before it would load
+     * getcwd() . '/vendor/autoload.php'; projectShipsOwnRector() ports only the second
+     * (`is_dir('vendor/rector/rector')`), not the first (`dirname(__DIR__) === dirname(getcwd(),
+     * 2)`, a check comparing Rector's OWN package directory to a fixed offset from getcwd() --
+     * meaningful only when bin/rector.php itself is being run from inside Rector's own source
+     * checkout, which RectorRunner never is: it is a different class entirely, always invoked
+     * with getcwd() already chdir()'d to the analysed project, never to anything under Rector's
+     * own package tree). The ported guard means: when the project already has its own Rector
+     * install, that is exactly the signal a genuine cold `vendor/bin/rector process` run never
+     * touches the project's autoloader for either. Without this guard, warm loaded the project's
+     * real Composer autoloader unconditionally and could resolve classes/types a matching cold
+     * run never sees, so warm inferred strictly more than cold on every mismatching file
+     * (checkout mode against laravel/framework and symfony/symfony, both of which carry their
+     * own vendor/rector/rector as a dev dependency).
      *
      * Known limitation, not silently ignored: this loads the project autoloader once, at
      * boot, in a worker process that then serves every warm call for the rest of its
@@ -3272,8 +3277,10 @@ class RectorRunner implements RunnerInterface
      * copy, ensureRectorAutoloaded()), so a project with its own vendor/rector/rector is exactly
      * the "checkout mode against a project that ships its own Rector" case: cold's own
      * `vendor/bin/rector process` run there never loads the project's autoloader, so neither
-     * should warm. Protected (rather than a free function) so a test can override it without
-     * needing a real vendor/rector/rector directory on disk.
+     * should warm. This ports only one of upstream's two early-return guards -- see
+     * ensureProjectAutoloaded()'s docblock for why the other has no meaningful analog here.
+     * Protected (rather than a free function) so a test can override it without needing a real
+     * vendor/rector/rector directory on disk.
      */
     protected function projectShipsOwnRector(string $cwd): bool
     {
