@@ -196,8 +196,29 @@ final class TempCopySweeper
                 return true;
             }
 
-            // EPERM: the process exists but belongs to someone else.
-            return function_exists('posix_get_last_error') && posix_get_last_error() === 1 ? true : false;
+            // #168: posix_kill() failing tells us nothing on its own beyond
+            // "not delivered" -- the reason is only in posix_get_last_error().
+            // ESRCH (3) is genuinely dead; EPERM (1) means it exists but
+            // belongs to someone else; anything else (a transient failure, a
+            // sandboxed environment, or posix_get_last_error() itself being
+            // unavailable) is none of those and must read as "cannot tell",
+            // never collapse to "known dead" -- removeIfStale() only deletes
+            // on an explicit false.
+            if (!function_exists('posix_get_last_error')) {
+                return null;
+            }
+
+            $errno = posix_get_last_error();
+
+            if ($errno === 1) {
+                return true;
+            }
+
+            if ($errno === 3) {
+                return false;
+            }
+
+            return null;
         }
 
         if (PHP_OS_FAMILY === 'Windows') {
