@@ -13,8 +13,14 @@ use PHPUnit\Framework\TestCase;
  * exclusive `flock()` on a `.lock` file inside the directory: a directory
  * whose lock a live process still holds is kept; one whose lock can be
  * taken non-blocking (the owner is gone, and released it -- by the OS, on
- * every platform, including a kill -9) is removed. A directory with no
- * `.lock` yet is judged by mtime instead, inside a fixed grace period.
+ * every platform, including a kill -9) is removed, PROVIDED its full
+ * listing is exactly `.lock` plus the one buffer-copy basename recorded
+ * inside `.lock` -- release-audit finding: anything else present at all,
+ * including a directory whose NAME only shares the prefix, is left
+ * untouched entirely. A directory with no `.lock` yet is judged by mtime
+ * instead, inside a fixed grace period, and is expected to be genuinely
+ * empty (production creates `.lock` immediately after `mkdir()`, before
+ * writing anything else).
  */
 final class TempCopySweeperTest extends TestCase
 {
@@ -74,20 +80,33 @@ final class TempCopySweeperTest extends TestCase
         return $dir;
     }
 
+    /** A directory with nothing inside -- the shape a kill BEFORE `.lock` is ever created leaves. */
+    private function plantEmpty(string $relativeDir): string
+    {
+        $dir = $this->root . '/' . $relativeDir;
+        mkdir($dir, 0o700, true);
+
+        return $dir;
+    }
+
     /**
-     * Plants a `.rector-warm-<pid>`-shaped directory with a `.lock` file
-     * inside, held or free as asked. A held lock never releases on its
-     * own: the caller gets back the handle and must fclose() it (which
-     * also releases the lock) once the test is done asserting against it.
+     * Plants a `.rector-warm-<pid>`-shaped directory holding one buffer
+     * copy (`$file`) and a `.lock` file recording that same basename --
+     * matching production, which writes the copy's basename into `.lock`
+     * at creation time. Held or free as asked. A held lock never releases
+     * on its own: the caller gets back the handle and must fclose() it
+     * (which also releases the lock) once the test is done asserting
+     * against it.
      *
      * @return resource|null the open handle if $held, else null
      */
-    private function plantLocked(string $relativeDir, bool $held): mixed
+    private function plantLocked(string $relativeDir, bool $held, string $file = 'Clean.php'): mixed
     {
-        $dir = $this->plant($relativeDir);
+        $dir = $this->plant($relativeDir, $file);
         $lockPath = $dir . '/' . TempCopySweeper::LOCK_FILE_NAME;
         $handle = fopen($lockPath, 'c');
         self::assertIsResource($handle, 'could not open the test lock file');
+        fwrite($handle, $file);
 
         if ($held) {
             self::assertTrue(flock($handle, LOCK_EX | LOCK_NB), 'could not hold the test lock');
@@ -112,10 +131,8 @@ final class TempCopySweeperTest extends TestCase
         // owner released it, as any process does on exit, including a
         // kill -9) is removed -- proves the guard didn't just start
         // keeping every candidate.
-        $free = $this->plant('src/.rector-warm-1');
-        $freeHandle = fopen($free . '/' . TempCopySweeper::LOCK_FILE_NAME, 'c');
-        self::assertIsResource($freeHandle);
-        fclose($freeHandle);
+        $this->plantLocked('src/.rector-warm-1', held: false);
+        $free = $this->root . '/src/.rector-warm-1';
 
         $held = $this->plantLocked('src/.rector-warm-2', held: true);
 
@@ -133,7 +150,10 @@ final class TempCopySweeperTest extends TestCase
     /**
      * Pairs with the test above: after the "live" process is killed (its
      * handle closed, which releases the flock the same way the OS releases
-     * it on kill -9), the next sweep removes what it left behind.
+     * it on kill -9), the next sweep removes what it left behind. This is
+     * also the positive control for the two must-not-fire tests below: the
+     * SAME shape (digit-suffix name, `.lock` plus exactly its recorded
+     * basename) IS removed once the lock is free.
      */
     public function testADirectoryIsRemovedOnceTheProcessHoldingItsLockIsGone(): void
     {
@@ -154,8 +174,12 @@ final class TempCopySweeperTest extends TestCase
 
     public function testADirectoryWithNoLockYetIsKeptWithinTheGracePeriodAndRemovedAfterIt(): void
     {
-        $freshNoLock = $this->plant('src/.rector-warm-4');
-        $staleNoLock = $this->plant('src/.rector-warm-5');
+        // No `.lock` ever reaching here is expected to be genuinely EMPTY:
+        // production creates `.lock` immediately after `mkdir()`, before
+        // writing anything else, so this is the shape a kill in that
+        // narrow window leaves.
+        $freshNoLock = $this->plantEmpty('src/.rector-warm-4');
+        $staleNoLock = $this->plantEmpty('src/.rector-warm-5');
         self::backdate($staleNoLock);
 
         TempCopySweeper::sweepDirectory($this->root . '/src');
@@ -165,15 +189,59 @@ final class TempCopySweeperTest extends TestCase
     }
 
     /**
+     * Release-audit finding: glob(..., '.rector-warm-*') matches any name
+     * sharing the prefix, not only one this class ever created. A real
+     * project directory merely NAMED like the pattern -- but with a
+     * non-digit suffix, the shape this class never creates -- must survive
+     * a sweep untouched, byte for byte, however old it is and whatever it
+     * holds.
+     */
+    public function testADirectoryMerelySharingThePrefixIsNeverTouched(): void
+    {
+        $userDirectory = $this->plant('src/.rector-warm-cache', 'config.json');
+        self::backdate($userDirectory);
+
+        TempCopySweeper::sweepDirectory($this->root . '/src');
+
+        self::assertDirectoryExists($userDirectory, 'a directory whose name only shares the prefix must never be swept');
+        self::assertFileExists($userDirectory . '/config.json');
+        self::assertSame("<?php\n", file_get_contents($userDirectory . '/config.json'));
+    }
+
+    /**
+     * Release-audit finding: a stale, digit-suffix directory whose `.lock`
+     * is free is removed ONLY when its full listing is exactly `.lock`
+     * plus the one recorded basename -- see
+     * testADirectoryIsRemovedOnceTheProcessHoldingItsLockIsGone() above for
+     * the positive control this pairs with. An extra file alongside the
+     * expected two must leave the WHOLE directory untouched, never
+     * partially emptied.
+     */
+    public function testADirectoryHoldingAnExtraFileBesideItsExpectedContentsIsNeverTouched(): void
+    {
+        $handle = $this->plantLocked('src/.rector-warm-12', held: true);
+        $dir = $this->root . '/src/.rector-warm-12';
+        file_put_contents($dir . '/Extra.txt', "not expected here\n");
+        fclose($handle);
+
+        TempCopySweeper::sweepDirectory($this->root . '/src');
+
+        self::assertDirectoryExists($dir, 'a directory holding anything beyond .lock and its recorded basename must never be swept');
+        self::assertFileExists($dir . '/Clean.php');
+        self::assertFileExists($dir . '/Extra.txt');
+        self::assertFileExists($dir . '/' . TempCopySweeper::LOCK_FILE_NAME);
+    }
+
+    /**
      * The per-run sweep only ever looks at $directory's own direct
      * children, never anything deeper or beside it -- there is no startup
      * tree walk any more (#179 drops sweepTree() entirely).
      */
     public function testSweepingOneDirectoryRemovesOnlyItsOwnStaleSiblings(): void
     {
-        $here = $this->plant('vendor/pkg/.rector-warm-6');
+        $here = $this->plantEmpty('vendor/pkg/.rector-warm-6');
         self::backdate($here);
-        $elsewhere = $this->plant('src/.rector-warm-7');
+        $elsewhere = $this->plantEmpty('src/.rector-warm-7');
         self::backdate($elsewhere);
         $held = $this->plantLocked('vendor/pkg/.rector-warm-8', held: true);
 
@@ -209,8 +277,8 @@ final class TempCopySweeperTest extends TestCase
         // Positive control, same run: a real stale directory (no symlink
         // involved) is still removed -- proves the guard didn't just start
         // refusing every candidate.
-        $realStale = $this->plant('vendor/pkg2/.rector-warm-9');
-        self::backdate($realStale);
+        $this->plantLocked('vendor/pkg2/.rector-warm-9', held: false);
+        $realStale = $this->root . '/vendor/pkg2/.rector-warm-9';
 
         try {
             TempCopySweeper::sweepDirectory($this->root . '/vendor/pkg');
@@ -254,8 +322,8 @@ final class TempCopySweeperTest extends TestCase
         // Positive control, same run: a real stale directory (no junction
         // involved) is still removed -- proves the guard didn't just start
         // refusing every candidate.
-        $realStale = $this->plant('vendor/pkg2/.rector-warm-10');
-        self::backdate($realStale);
+        $this->plantLocked('vendor/pkg2/.rector-warm-10', held: false);
+        $realStale = $this->root . '/vendor/pkg2/.rector-warm-10';
 
         try {
             TempCopySweeper::sweepDirectory($this->root . '/vendor/pkg');

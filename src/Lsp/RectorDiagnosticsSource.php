@@ -306,6 +306,17 @@ final class RectorDiagnosticsSource implements BufferDiagnosticsSource, Workspac
                 return self::failure(sprintf('rector-warm-lsp: could not lock a temp directory in %s', $directory));
             }
 
+            // Release-audit finding: the sweeper's own removeKnownContents()
+            // now refuses to delete anything unless the directory's full
+            // listing is exactly `.lock` plus one other recorded name --
+            // recorded HERE, in `.lock` itself, rather than assumed from
+            // "whatever single file is inside", so a directory this process
+            // did not create (or one holding anything unexpected) is never
+            // guessed to be safe to empty.
+            @ftruncate($lockHandle, 0);
+            @fwrite($lockHandle, basename($tempPath));
+            @fflush($lockHandle);
+
             // #149: the directory-level guard above stops a symlinked or
             // junctioned `.rector-warm-<pid>` NAME from being entered, but a
             // genuinely real directory (e.g. one an attacker plants ahead of

@@ -201,12 +201,15 @@ final class RectorDiagnosticsSourceBufferTest extends TestCase
         $leftover = $this->workDir . '/src/.rector-warm-' . $deadPid;
         mkdir($leftover);
         file_put_contents($leftover . '/Sample.php', "<?php\n");
-        // #179: no `.lock` file exists in this leftover (the dead process
-        // never got to create one, or this test simply never planted it),
-        // so staleness is judged by mtime instead -- backdated past the
-        // grace period so this run's sweep removes it rather than treating
-        // it as a server that just started.
-        touch($leftover, time() - 700);
+        // #179: matching production's own shape -- `.lock` is always
+        // created immediately after mkdir(), before the buffer copy is
+        // ever written, so a leftover holding a buffer copy always has a
+        // `.lock` recording that copy's basename too. Release-audit
+        // finding: the sweeper now refuses to touch a directory whose
+        // full listing does not match exactly `.lock` plus its recorded
+        // basename, so this fixture must carry a real, free `.lock` for
+        // the sweep below to remove it at all.
+        file_put_contents($leftover . '/' . \Dpt\McpRectorWarm\Lsp\TempCopySweeper::LOCK_FILE_NAME, 'Sample.php');
 
         $this->source(fn (): string => '{"totals":{"changed_files":0,"errors":0}}')
             ->diagnoseBuffer($this->original, "<?php\n");

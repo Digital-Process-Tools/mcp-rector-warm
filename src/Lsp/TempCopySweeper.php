@@ -24,6 +24,15 @@ namespace Dpt\McpRectorWarm\Lsp;
  * per-directory sweep next to the file being diagnosed, which is already
  * where a leftover is visible to the user, and needs no depth or directory
  * caps because it only ever looks at one directory's own direct children.
+ *
+ * Release-audit finding: a candidate's NAME is checked too, not only its
+ * lock/mtime -- only `.rector-warm-<digits>` (the exact shape this class
+ * ever creates) is ever considered; a directory merely sharing the prefix
+ * (a real project directory named e.g. `.rector-warm-cache`) is left alone
+ * entirely, the same shape check the old pid-based design's own pidOf()
+ * already had. And a candidate's CONTENTS are checked against exactly what
+ * is recorded as belonging there before anything is deleted -- see
+ * removeKnownContents().
  */
 final class TempCopySweeper
 {
@@ -65,6 +74,17 @@ final class TempCopySweeper
             return false;
         }
 
+        // Release-audit finding: glob(..., '.rector-warm-*') above matches
+        // any name with the prefix, not only one this class ever created --
+        // a real user directory named e.g. `.rector-warm-cache` matches the
+        // glob too. The old pid-based design's own pidOf() only ever acted
+        // on a name whose suffix was entirely digits; that same shape check
+        // is restored here, independent of pid liveness, as the one thing
+        // that tells "ours" apart from "merely named like ours".
+        if (!self::isCandidateName(basename($path))) {
+            return false;
+        }
+
         $lockPath = $path . DIRECTORY_SEPARATOR . self::LOCK_FILE_NAME;
 
         if (is_file($lockPath)) {
@@ -82,7 +102,20 @@ final class TempCopySweeper
             return false;
         }
 
-        return self::removeKnownContents($path);
+        return self::removeKnownContents($path, $lockPath);
+    }
+
+    /** `.rector-warm-<pid>` exactly -- a digit suffix, nothing else. */
+    private static function isCandidateName(string $name): bool
+    {
+        $prefix = RectorDiagnosticsSource::TEMP_DIRECTORY_PREFIX;
+        if (!str_starts_with($name, $prefix)) {
+            return false;
+        }
+
+        $suffix = substr($name, strlen($prefix));
+
+        return $suffix !== '' && ctype_digit($suffix);
     }
 
     /**
@@ -125,36 +158,49 @@ final class TempCopySweeper
     }
 
     /**
-     * Removes every plain-file entry (the lock file, and the copy of one
-     * buffer, named after its original -- but not restricted to those two
-     * names specifically, only to "is a file"), then a non-recursive
-     * rmdir(). A subdirectory -- the one shape this is not expected to
-     * hold -- is left in place, and the rmdir() then fails harmlessly,
-     * leaving the whole directory untouched rather than partially
-     * emptied.
+     * The directory's full listing is checked FIRST, against exactly what
+     * it is expected to hold, before anything is deleted:
+     *
+     * - A `.lock` file present: RectorDiagnosticsSource writes the buffer
+     *   copy's own basename into it at creation time (see there), so the
+     *   one other name this directory is allowed to hold is read from
+     *   `.lock` itself rather than assumed. Anything else present at all --
+     *   an extra file, a subdirectory, or the recorded copy missing while
+     *   something else sits there instead -- and the whole directory is
+     *   left untouched, never partially emptied.
+     * - No `.lock` file: production only ever creates one immediately
+     *   after `mkdir()`, before writing anything else into the directory,
+     *   so the only shape reaching here with no `.lock` at all is one
+     *   killed in that narrow window -- genuinely empty. Anything present
+     *   with no `.lock` is not a shape production ever leaves and is
+     *   refused rather than guessed at.
      */
-    private static function removeKnownContents(string $path): bool
+    private static function removeKnownContents(string $path, string $lockPath): bool
     {
         $entries = @scandir($path);
         if ($entries === false) {
             return false;
         }
+        $names = array_values(array_diff($entries, ['.', '..']));
 
-        foreach ($entries as $entry) {
-            if ($entry === '.' || $entry === '..') {
-                continue;
-            }
-
-            $entryPath = $path . DIRECTORY_SEPARATOR . $entry;
-            if (!is_file($entryPath)) {
-                // An unexpected subdirectory (or anything not a plain
-                // file): refuse the whole directory rather than delete
-                // around it.
-                return false;
-            }
-
-            @unlink($entryPath);
+        if (!is_file($lockPath)) {
+            return $names === [] && @rmdir($path);
         }
+
+        $recordedBasename = @file_get_contents($lockPath);
+        if ($recordedBasename === false || $recordedBasename === '') {
+            return false;
+        }
+
+        $expected = [self::LOCK_FILE_NAME, $recordedBasename];
+        sort($names);
+        sort($expected);
+        if ($names !== $expected) {
+            return false;
+        }
+
+        @unlink($path . DIRECTORY_SEPARATOR . $recordedBasename);
+        @unlink($lockPath);
 
         return @rmdir($path);
     }
