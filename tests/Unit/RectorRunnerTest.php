@@ -1575,6 +1575,71 @@ final class RectorRunnerTest extends TestCase
     }
 
     /**
+     * Self-review finding on #157: spawnOrphanWatchdog() also reads
+     * \getmypid() raw (its own pid, passed as the watchdog's workerPid argv)
+     * -- a false there used to become an empty string, then (int) '' === 0,
+     * silently tripping the watchdog script's own <= 0 guard and exiting
+     * immediately with no signal (the same #134-inert shape #159 fixes one
+     * level further in). Fixed by skipping the spawn outright (matching the
+     * existing $daemonPid === null "best effort, no watchdog" shape already
+     * one branch up) instead of spawning one guaranteed to fail silently.
+     */
+    public function testSpawnOrphanWatchdogSkipsSpawningAndLogsWhenOwnPidIsFalse(): void
+    {
+        $runner = new class extends RectorRunner {
+            protected function currentPid()
+            {
+                return false;
+            }
+        };
+        $method = new \ReflectionMethod(RectorRunner::class, 'spawnOrphanWatchdog');
+        $method->setAccessible(true);
+
+        $result = 'not set';
+        $captured = self::captureStderr(function () use (&$result, $method, $runner): void {
+            $result = $method->invoke($runner, 12345);
+        });
+
+        self::assertNull($result, 'must fail open exactly like the existing $daemonPid === null branch: no watchdog spawned, never a thrown error');
+        self::assertStringContainsString(
+            '#157',
+            $captured,
+            'getmypid() returning false here must also be logged, not silently produce a watchdog doomed to exit immediately: got ' . var_export($captured, true),
+        );
+    }
+
+    /**
+     * Positive control for the test above: with a real, working pid, a
+     * watchdog must actually be spawned (a resource, not null) and nothing
+     * logged.
+     */
+    public function testSpawnOrphanWatchdogSpawnsNormallyWhenOwnPidIsReal(): void
+    {
+        if (!\function_exists('proc_open')) {
+            self::markTestSkipped('proc_open unavailable in this environment');
+        }
+
+        $runner = new RectorRunner();
+        $method = new \ReflectionMethod(RectorRunner::class, 'spawnOrphanWatchdog');
+        $method->setAccessible(true);
+
+        $result = 'not set';
+        $captured = self::captureStderr(function () use (&$result, $method, $runner): void {
+            $result = $method->invoke($runner, \getmypid());
+        });
+
+        try {
+            self::assertIsResource($result, 'a real, working pid must still spawn a watchdog exactly as before');
+            self::assertSame('', $captured, 'a real, successful getmypid() must not be logged as a failure');
+        } finally {
+            if (\is_resource($result)) {
+                @\proc_terminate($result, 9);
+                @\proc_close($result);
+            }
+        }
+    }
+
+    /**
      * #74: a non-UTF-8 bootstrap file path (#33) as a $this->bootstrapFileHashes
      * key made the boot handshake's plain json_encode() return false -- cast to
      * '' -- so boot() saw an empty/undecodable handshake and reported a
