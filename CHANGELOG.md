@@ -6,6 +6,16 @@ This project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-09-30
+
+### Added
+
+- Added #185, opt-in: with `MCP_RECTOR_WARM_SESSION=1`, warm single-file dry runs (MCP `rector_process` and LSP diagnostics) are served by one long-lived session child that keeps PHPStan's reflection and Rector's rule state between calls, instead of forking a fresh child from the pristine worker every time. The session tracks every file PHPStan parsed or PHP included (size, mtime, inode and ctime, plus a hash when racy), every file it analysed, and every project directory listing; any change starts a fresh session from the pristine worker. A file whose classes only it declares, and write calls, still fork from the pristine worker; an editor buffer's temp copy runs in a child forked from the session. Inputs a custom rule reads itself at call time (a JSON or template file kept in a static) are NOT watched unless declared with `MCP_RECTOR_WARM_SESSION_WATCH` (paths separated like `PATH`). The session retires after `MCP_RECTOR_WARM_SESSION_MAX_MB` of memory (default 1024) or `MCP_RECTOR_WARM_SESSION_MAX_CALLS` calls (default 250). `MCP_RECTOR_WARM_SESSION_LOG=1` logs what served each call on stderr. Off by default; no change without pcntl (Windows).
+
+### Fixed
+
+- A first warm call on a machine with no PHPStan cache yet (a fresh CI runner, a cleared `/tmp`) could fail with `Invalid value` where cold `rector process` returned a diff: the process that analyses a file closed `STDIN`/`STDOUT`/`STDERR`, and PHPStan reads those constants when it builds reflection for PHP's built-in stubs. They now stay open. Warm also loads Rector's own `nikic/php-parser` and `phpstan/phpdoc-parser` classes up front, as cold does, instead of whichever copy (the project's, `phpstan.phar`'s) the autoloader reached first. (#192)
+
 ## [0.7.2] - 2026-09-30
 
 ### Fixed
@@ -517,7 +527,8 @@ MCP `output` field now contains `file_diffs[].applied_rectors` + `diff` so consu
 - PHPUnit unit + integration tests covering boot, tool listing, warm reuse (`warm_boot: true` on second call).
 - Standalone CLI: `--working-dir`, `--config` flags pinned at server start.
 
-[Unreleased]: https://github.com/Digital-Process-Tools/mcp-rector-warm/compare/v0.7.2...HEAD
+[Unreleased]: https://github.com/Digital-Process-Tools/mcp-rector-warm/compare/v0.8.0...HEAD
+[0.8.0]: https://github.com/Digital-Process-Tools/mcp-rector-warm/releases/tag/v0.8.0
 [0.7.2]: https://github.com/Digital-Process-Tools/mcp-rector-warm/releases/tag/v0.7.2
 [0.7.1]: https://github.com/Digital-Process-Tools/mcp-rector-warm/releases/tag/v0.7.1
 [0.7.0]: https://github.com/Digital-Process-Tools/mcp-rector-warm/releases/tag/v0.7.0
