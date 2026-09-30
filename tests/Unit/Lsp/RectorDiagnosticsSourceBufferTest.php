@@ -201,6 +201,12 @@ final class RectorDiagnosticsSourceBufferTest extends TestCase
         $leftover = $this->workDir . '/src/.rector-warm-' . $deadPid;
         mkdir($leftover);
         file_put_contents($leftover . '/Sample.php', "<?php\n");
+        // #179: no `.lock` file exists in this leftover (the dead process
+        // never got to create one, or this test simply never planted it),
+        // so staleness is judged by mtime instead -- backdated past the
+        // grace period so this run's sweep removes it rather than treating
+        // it as a server that just started.
+        touch($leftover, time() - 700);
 
         $this->source(fn (): string => '{"totals":{"changed_files":0,"errors":0}}')
             ->diagnoseBuffer($this->original, "<?php\n");

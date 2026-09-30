@@ -24,7 +24,6 @@ use Dpt\McpRectorWarm\Lsp\LspLoop;
 use Dpt\McpRectorWarm\Lsp\LspServer;
 use Dpt\McpRectorWarm\Lsp\RectorDiagnosticsSource;
 use Dpt\McpRectorWarm\Lsp\StdioLspTransport;
-use Dpt\McpRectorWarm\Lsp\TempCopySweeper;
 use Dpt\McpRectorWarm\RectorTool;
 use Dpt\McpRectorWarm\Support\ServerVersion;
 
@@ -48,10 +47,6 @@ if ($workingDir !== null) {
     }
     chdir($workingDir);
 }
-
-// #106: a server killed mid-run (kill -9) left its unsaved-buffer temp
-// copy behind; remove any whose owning server is gone.
-TempCopySweeper::sweepTree(getcwd() ?: '.');
 
 $transport = new StdioLspTransport(STDIN, STDOUT);
 $diagnostics = new RectorDiagnosticsSource(new RectorTool());

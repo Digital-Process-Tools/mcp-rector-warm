@@ -273,6 +273,24 @@ final class RectorDiagnosticsSource implements BufferDiagnosticsSource, Workspac
                 return self::failure(sprintf('rector-warm-lsp: could not create a temp directory in %s', $directory));
             }
 
+            // #179: ownership of $tempDirectory for TempCopySweeper's
+            // purposes is this lock, held for the rest of this method's
+            // run. A server killed outright (kill -9) never releases it
+            // explicitly, but the OS releases every lock a dying process
+            // holds -- including on Windows, where flock() maps to
+            // LockFileEx -- so the next sweep's non-blocking LOCK_EX
+            // acquire attempt succeeds and reads the directory as stale.
+            $lockPath = $tempDirectory . DIRECTORY_SEPARATOR . TempCopySweeper::LOCK_FILE_NAME;
+            $lockHandle = @fopen($lockPath, 'c');
+            if ($lockHandle === false || !flock($lockHandle, LOCK_EX | LOCK_NB)) {
+                if (is_resource($lockHandle)) {
+                    fclose($lockHandle);
+                }
+                @rmdir($tempDirectory);
+
+                return self::failure(sprintf('rector-warm-lsp: could not lock a temp directory in %s', $directory));
+            }
+
             // #149: the directory-level guard above stops a symlinked or
             // junctioned `.rector-warm-<pid>` NAME from being entered, but a
             // genuinely real directory (e.g. one an attacker plants ahead of
@@ -367,6 +385,19 @@ final class RectorDiagnosticsSource implements BufferDiagnosticsSource, Workspac
             // from `try`, including the early return the guard above takes,
             // so unlink() must not be the one place a symlinked $tempPath
             // still gets followed.
+            // #179: the lock is released and its file removed before
+            // rmdir() -- rmdir() refuses a non-empty directory, and .lock
+            // is the one entry removeIfStale() does not otherwise expect
+            // (removeKnownContents() checks for it by name, but only ever
+            // reaches a directory this process no longer holds the lock
+            // on). $lockHandle may be unset if mkdir() or the lock guard
+            // above already returned before it was opened.
+            if (isset($lockHandle) && is_resource($lockHandle)) {
+                flock($lockHandle, LOCK_UN);
+                fclose($lockHandle);
+                @unlink($tempDirectory . DIRECTORY_SEPARATOR . TempCopySweeper::LOCK_FILE_NAME);
+            }
+
             if (!TempCopySweeper::isLinkOrJunction($tempDirectory) && !TempCopySweeper::isLinkOrJunction($tempPath)) {
                 @unlink($tempPath);
                 @rmdir($tempDirectory);
