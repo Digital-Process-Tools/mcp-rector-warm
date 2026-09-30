@@ -124,7 +124,41 @@ final class LspServerTest extends TestCase
      */
     private static function filePathToTestUri(string $absolutePath): string
     {
-        return 'file://' . str_replace('\\', '/', $absolutePath);
+        // #147 round-2 self-review finding, from a real windows-latest CI
+        // failure (not reasoned -- observed): this helper normalised
+        // backslash separators but did not reproduce
+        // LspServer::pathToUri()'s OTHER piece of Windows handling -- a
+        // leading '/' inserted before a drive letter, so `file://` plus a
+        // bare `C:/...` collapses the URI's authority component onto the
+        // drive letter instead of leaving it empty. `pathToUri()` itself
+        // produces `file:///C:/...` (three slashes: scheme, empty
+        // authority, then the drive-letter path) for exactly this shape;
+        // this helper produced `file://C:/...` (two slashes), a URI this
+        // test's own production-derived expectations never actually see
+        // pathToUri() emit. Every windows-latest failure this caused was a
+        // string-identity mismatch on the EXPECTED side, not a functional
+        // regression: isBufferDirty() itself skipped/fixed correctly in
+        // every case.
+        $normalized = str_replace('\\', '/', $absolutePath);
+        if (preg_match('#^[A-Za-z]:#', $normalized) === 1) {
+            $normalized = '/' . $normalized;
+        }
+
+        return 'file://' . $normalized;
+    }
+
+    /**
+     * #147 round-2 self-review finding, from the same windows-latest CI
+     * failure as filePathToTestUri() above -- pinned directly rather than
+     * only through the four higher-level fixWorkspace tests, so a future
+     * change to this helper's drive-letter handling fails here first
+     * rather than as a four-way array-identity mismatch on a platform
+     * this developer's own machine cannot reproduce.
+     */
+    public function testFilePathToTestUriMatchesPathToUrisDriveLetterHandling(): void
+    {
+        self::assertSame('file:///C:/Users/x/A.php', self::filePathToTestUri('C:\\Users\\x\\A.php'));
+        self::assertSame('file:///tmp/x/A.php', self::filePathToTestUri('/tmp/x/A.php'));
     }
 
     /**
@@ -2451,7 +2485,19 @@ final class LspServerTest extends TestCase
                 'params' => ['command' => 'rector-warm.fixWorkspace'],
             ]);
         } finally {
-            @unlink($link);
+            // #147 round-2 self-review finding, from the same windows-latest
+            // CI run as the URI fix above: PHP's unlink() on Windows cannot
+            // remove a directory symlink (rmdir() is required there
+            // instead; POSIX is the other way around -- rmdir() refuses a
+            // symlink even when it points at a directory). The @-silenced
+            // unlink() above used to no-op on Windows, leaving $link's
+            // directory entry behind after $real was removed and turning
+            // rmdir($base) into a "Directory not empty" warning on every
+            // run. Trying both, in either order, closes it on both
+            // platforms without branching on PHP_OS_FAMILY.
+            if (!@unlink($link)) {
+                @rmdir($link);
+            }
             unlink($target);
             rmdir($real);
             rmdir($base);
@@ -2522,7 +2568,19 @@ final class LspServerTest extends TestCase
                 'params' => ['command' => 'rector-warm.fixWorkspace'],
             ]);
         } finally {
-            @unlink($link);
+            // #147 round-2 self-review finding, from the same windows-latest
+            // CI run as the URI fix above: PHP's unlink() on Windows cannot
+            // remove a directory symlink (rmdir() is required there
+            // instead; POSIX is the other way around -- rmdir() refuses a
+            // symlink even when it points at a directory). The @-silenced
+            // unlink() above used to no-op on Windows, leaving $link's
+            // directory entry behind after $real was removed and turning
+            // rmdir($base) into a "Directory not empty" warning on every
+            // run. Trying both, in either order, closes it on both
+            // platforms without branching on PHP_OS_FAMILY.
+            if (!@unlink($link)) {
+                @rmdir($link);
+            }
             unlink($target);
             rmdir($real);
             rmdir($base);
