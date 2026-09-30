@@ -60,15 +60,23 @@ final class DependencyFileTrackerTest extends TestCase
     {
         $tracker = new DependencyFileTracker();
         $path = $this->write('a.php', '<?php // v1');
+
+        // Force the RECORDED mtime a full ten seconds into the past before
+        // record() ever sees it (review finding: the previous version of
+        // this test forced the mtime back only at the very end, right
+        // before checkStale() -- since that final touch() and record()'s
+        // own initial timestamp both land within the same fast test's
+        // execution, they can end up in the SAME wall-clock second, making
+        // the assertion pass via the racy same-second content-hash fallback
+        // instead of the stat-signature comparison the test's own name and
+        // intent are about; recording the OLD mtime up front instead, then
+        // letting the real edit below set a genuinely later mtime, removes
+        // that timing dependency entirely).
+        \touch($path, \time() - 10);
+        \clearstatcache();
         $tracker->record($path, \sha1_file($path));
 
-        // Force the mtime a full second into the past first so the racy
-        // same-second re-hash path is not what catches this -- the stat
-        // signature comparison (size unchanged, mtime changed) must be
-        // what fires here.
-        \touch($path, \time() - 2);
-        \file_put_contents($path, '<?php // v2'); // same length as v1
-        \touch($path, \time());
+        \file_put_contents($path, '<?php // v2'); // same length as v1 -- only mtime, not size, differs now
         \clearstatcache();
 
         self::assertSame($path, $tracker->checkStale());
@@ -90,9 +98,17 @@ final class DependencyFileTrackerTest extends TestCase
         \clearstatcache();
         $tracker->record($path, \sha1_file($path));
 
-        // Same second, same mtime once touch()'d back to it -- only the
-        // content differs.
-        \file_put_contents($path, '<?php // v1-edited-same-second');
+        // Same second, same mtime, and -- unlike
+        // testContentChangeSameLengthIsDetectedAsStale, which changes mtime
+        // and is genuinely pinning the stat-signature branch -- the SAME
+        // size too ('v1' -> 'v2', both one character): the stat signature
+        // (size, mtime, inode) must come out byte-for-byte identical to
+        // what was recorded, so this can only be caught by checkStale()'s
+        // separate same-second content-hash fallback, never by the
+        // stat-signature comparison above it (review finding: the previous
+        // version of this test used a longer replacement string, so a
+        // differing SIZE was silently what caught it instead).
+        \file_put_contents($path, '<?php // v2');
         \touch($path, $now);
         \clearstatcache();
 
@@ -201,5 +217,25 @@ final class DependencyFileTrackerTest extends TestCase
 
         self::assertSame(1, $tracker->count());
         self::assertTrue($tracker->isTracked($archivePath));
+    }
+
+    /**
+     * The false-positive twin of the test above (review finding): an
+     * ANCESTOR directory whose own name merely contains the substring
+     * ".phar" (without being the archive itself) must not be mistaken for
+     * the archive boundary. A naive first-occurrence-of-".phar" search
+     * collapses "phar:///opt/my.phar-cache/vendor/real.phar/src/One.php" to
+     * the nonexistent "/opt/my.phar" -- silently disabling staleness
+     * detection for the real archive from then on.
+     */
+    public function testAnAncestorDirectoryNamedLikeAPharIsNotMistakenForTheArchive(): void
+    {
+        $archivePath = $this->dir . '/my.phar-cache/vendor/real.phar';
+
+        $tracker = new DependencyFileTracker();
+        $tracker->record('phar://' . $archivePath . '/src/One.php', null);
+
+        self::assertTrue($tracker->isTracked($archivePath));
+        self::assertFalse($tracker->isTracked($this->dir . '/my.phar'));
     }
 }

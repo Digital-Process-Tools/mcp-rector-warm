@@ -94,7 +94,13 @@ final class DependencyFileTracker
 
         $now = $this->hash($path);
         if ($readSha !== null && $now !== $readSha) {
-            $this->pendingStale = $path;
+            // ??= rather than =: pendingStale is a single scalar slot, and
+            // checkStale()'s own contract is "the FIRST path found to
+            // disagree" -- a second, later TOCTOU hit (a different path,
+            // another record() call before checkStale() is ever asked)
+            // must not silently overwrite and lose the first one (review
+            // finding).
+            $this->pendingStale ??= $path;
         }
 
         $this->tracked[$path] = [$this->sig($path), $now, \time()];
@@ -153,12 +159,23 @@ final class DependencyFileTracker
             return $path;
         }
 
-        $pharSuffix = \strpos($path, '.phar');
-        if ($pharSuffix === false) {
+        // Anchored to a trailing '/' or end-of-string, and preferring the
+        // RIGHTMOST such boundary (a greedy capture group's own backtracking
+        // default): the previous approach (the first '.phar' substring
+        // anywhere in the whole URI) collapsed to a nonexistent, truncated
+        // path whenever an ANCESTOR directory merely contained the
+        // substring '.phar' without being the archive itself -- e.g.
+        // "phar:///opt/my.phar-cache/vendor/real.phar/src/One.php" wrongly
+        // collapsed to "/opt/my.phar", silently disabling staleness
+        // detection for the real archive from then on (review finding).
+        // phar:// URIs use '/' throughout regardless of host OS (PHP's own
+        // stream-wrapper convention, the same as file://) -- reasoned, not
+        // verified on an actual Windows runner.
+        if (\preg_match('#^phar://(.+\.phar)(?:/.*)?$#', $path, $matches) !== 1) {
             return $path;
         }
 
-        $archivePath = \substr($path, 7, $pharSuffix - 7 + 5);
+        $archivePath = $matches[1];
         if (isset($this->tracked[$archivePath])) {
             $alreadyTracked = true;
         }
@@ -166,7 +183,20 @@ final class DependencyFileTracker
         return $archivePath;
     }
 
-    /** @return array{int, int, int}|null */
+    /**
+     * Reasoned, not observed on an actual Windows runner: PHP's stat() does
+     * not populate a meaningful inode on Windows (no POSIX inode exists
+     * there), so the third element of this signature is a constant on that
+     * platform and cannot discriminate a same-size, same-mtime content swap
+     * done more than one second after the read there -- only the
+     * same-second content-hash fallback in checkStale() would still catch
+     * that specific case, and only within its own one-second window (review
+     * finding; not designed out here -- the class is not yet wired into any
+     * call path, and a Windows-specific discriminator is deferred to
+     * whoever does that wiring).
+     *
+     * @return array{int, int, int}|null
+     */
     private function sig(string $path): ?array
     {
         $stat = @\stat($path);
