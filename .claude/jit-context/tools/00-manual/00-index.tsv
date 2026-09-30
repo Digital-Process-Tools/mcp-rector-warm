@@ -1,3 +1,4 @@
+Agent	~oss:auditor	agent-brief-sentinel.md	remind			
 Bash	~gh-pr-merge	feature-and-lsp-merge-gate.md	remind			
 Bash	~(edit:@-|paste:@-)	supertool-write-op-payload-pitfalls.md	remind			
 Bash	git worktree add	worktree-missing-supertool-config.md	remind			
