@@ -320,6 +320,29 @@ final class RectorDiagnosticsSourceBufferTest extends TestCase
      * left unguarded: swapping $tempDirectory for a symlink to somewhere
      * else DURING the run (not before it, which the tests above already
      * cover) must not have a same-named `.lock` deleted through it.
+     *
+     * POSIX-only (CI finding, round 2): this test's OWN setup unlinks the
+     * real `.lock` file while this method's `try` block is still running
+     * -- $lockHandle is still open at that point, held by the code under
+     * test, since `finally` has not run yet. On POSIX, unlink() succeeds
+     * on a file another handle has open (the inode is removed from the
+     * directory; the open fd keeps it alive until closed) -- the attack
+     * this test simulates is real there. On Windows, deleting a file
+     * while ANY handle has it open without FILE_SHARE_DELETE (which PHP's
+     * fopen() does not request) is refused at the OS level -- so this
+     * test's own unlink() of `.lock` fails, the directory is never
+     * emptied, the symlink is never created (symlink() refuses when a
+     * real directory already sits at the target path), and the method's
+     * own `finally` block later hits a real, non-symlinked directory it
+     * correctly empties and removes -- producing an rmdir() "Directory
+     * not empty" warning from THIS TEST's own teardown (removeLink()
+     * assuming a link where a real directory was left instead), not from
+     * production. This is a genuine platform difference in what the
+     * attack this test guards against even IS on Windows: the same
+     * FILE_SHARE_DELETE restriction that defeats this test's setup also
+     * defeats the real attacker, for as long as this process holds its
+     * own lock open -- the race this test exercises is POSIX-only by
+     * construction, not merely untested on Windows.
      */
     /**
      * #179 self-review finding (platform audit): the lock file this
@@ -351,6 +374,10 @@ final class RectorDiagnosticsSourceBufferTest extends TestCase
 
     public function testTheLockFileIsNotUnlinkedThroughATempDirectorySwappedForASymlinkMidRun(): void
     {
+        if (PHP_OS_FAMILY === 'Windows') {
+            self::markTestSkipped('This race needs deleting a .lock file this same process still has open; Windows refuses that (no FILE_SHARE_DELETE), so the setup itself -- not just the guard under test -- cannot be constructed there. See this test\'s own docblock.');
+        }
+
         $externalDir = sys_get_temp_dir() . '/mcp-rector-lsp-external-' . bin2hex(random_bytes(4));
         mkdir($externalDir, 0o700, true);
         $externalLock = $externalDir . '/.lock';
