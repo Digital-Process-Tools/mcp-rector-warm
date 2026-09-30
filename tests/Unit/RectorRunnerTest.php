@@ -2107,6 +2107,57 @@ final class RectorRunnerTest extends TestCase
         }
     }
 
+    /**
+     * #184, restore-to-unset half: the auditor's own review of this fix (recorded in
+     * the pull request) flagged that the sibling test above only ever primes a
+     * concrete sentinel before the call, so it only ever exercises the
+     * `putenv('NAME=' . $prior)` branch of the restore -- never the
+     * `$origAllowXdebugEnv === false` branch, which is the ordinary real-world case
+     * for anyone who has not already worked around #184 by setting the env
+     * themselves. This test starts from "definitely unset" (unsetting first, rather
+     * than trusting the ambient environment to already be that way) and asserts the
+     * env is unset again afterward, so a regression that leaves it as an empty
+     * string instead of truly absent (a documented historical quirk of some
+     * putenv() implementations) is caught rather than silently accepted.
+     */
+    public function testExecuteRestoresXdebugEnvToUnsetWhenItWasUnsetBeforeTheCall(): void
+    {
+        $previous = getenv('RECTOR_ALLOW_XDEBUG');
+        putenv('RECTOR_ALLOW_XDEBUG');
+        self::assertFalse(
+            getenv('RECTOR_ALLOW_XDEBUG'),
+            'test precondition: the env must genuinely be unset before the call, not merely absent from this test\'s own knowledge of it',
+        );
+
+        try {
+            $runner = new RectorRunner();
+            $application = new class () {
+                public function run(object $input, object $output): int
+                {
+                    return 0;
+                }
+            };
+
+            $this->setPrivateRunnerState($runner, $application);
+
+            $method = new \ReflectionMethod(RectorRunner::class, 'execute');
+            $method->setAccessible(true);
+            $method->invoke($runner, ['rector', 'process', '--dry-run'], true);
+
+            self::assertFalse(
+                getenv('RECTOR_ALLOW_XDEBUG'),
+                'execute() must leave RECTOR_ALLOW_XDEBUG genuinely unset (getenv() === false) '
+                . 'after the call when it was unset before -- not merely set to an empty string',
+            );
+        } finally {
+            if ($previous === false) {
+                putenv('RECTOR_ALLOW_XDEBUG');
+            } else {
+                putenv('RECTOR_ALLOW_XDEBUG=' . $previous);
+            }
+        }
+    }
+
     private function setPrivateRunnerState(RectorRunner $runner, object $application): void
     {
         foreach ([
