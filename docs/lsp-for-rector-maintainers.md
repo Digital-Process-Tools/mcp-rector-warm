@@ -71,8 +71,8 @@ warm worker per `rector.php` root).
 ## How
 
 **The forked warm worker.** Every call to Rector -- from the MCP tool or the
-LSP -- runs inside a forked child process (`RectorRunner::boot()`,
-`src/RectorRunner.php:358`), never in the long-lived daemon itself. The
+LSP -- runs inside a forked child process (`RectorRunner::boot()`, in
+`src/RectorRunner.php`), never in the long-lived daemon itself. The
 parent blocks on a socket read until the child answers or times out. This
 means re-editing `rector.php` between calls, or a warm container that
 corrupts mid-session, can never crash the daemon -- only the forked child,
@@ -80,10 +80,13 @@ which the daemon then reboots.
 
 **Windows / no-`pcntl` fallback.** Where `pcntl_fork()` is unavailable
 (Windows always; `#18`'s `disable_functions` case elsewhere), there is no
-OS-process boundary to isolate a reboot in, so warming is not attempted:
-every call boots and runs Rector in its own fresh `php` subprocess
-(`runCold()`) -- correct, but without the warm speedup. See
-`src/RectorRunner.php:25-28`.
+copy-on-write snapshot of a booted container to isolate each call in, so by
+default each call gets a fresh, pre-booted standby `php` subprocess started
+right after the previous call returns (`runViaStandbyWorker()`, #108),
+letting the caller pay only for the analysis. `runCold()` -- boot and run in
+one fresh subprocess per call, with no pre-boot -- is now only the fallback
+when `MCP_RECTOR_WARM_NO_PCNTL=cold` restores the pre-#108 behaviour. See
+`RectorRunner`'s class docblock, in `src/RectorRunner.php`.
 
 **JSON-RPC over stdio, hand-rolled.** [ADR
 0001](decisions/0001-lsp-library-choice.md) is the full record; in short:
@@ -115,7 +118,7 @@ runs `RectorTool::process($path, dryRun: true)` and reads Rector's own
 `RectorTool::process()` calls Rector with `--debug` for speed (parallel mode
 adds ~14s of boot overhead per single-file call) -- re-verified against
 `rector/rector ^2.4` that `--debug` does not suppress `file_diffs[]` in this
-version (`src/RectorTool.php:92-96`).
+version (see the re-verification comment in `src/RectorTool.php`).
 
 ## Correctness
 
