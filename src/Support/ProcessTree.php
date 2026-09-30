@@ -129,6 +129,14 @@ final class ProcessTree
      * until at least one probe has been attempted in this process; a caller
      * treating that startup null the same as "cannot tell" is the same
      * best-effort posture ProcessTree already asks for everywhere else.
+     *
+     * Global, order-dependent state (self-review finding): this reports on
+     * the SINGLE most recent probe in this whole process, not on whichever
+     * call the reader has in mind. Read it IMMEDIATELY after the probe
+     * (isAlive()/parentOf()) it is meant to explain, before any other such
+     * call runs -- see bin/rector-warm-orphan-watchdog.php's own comment for
+     * a worked example of getting this wrong (a diagnostic that read this
+     * flag after an unrelated, later probe on one platform branch, #159).
      */
     private static ?bool $lastProbeRanOk = null;
 
