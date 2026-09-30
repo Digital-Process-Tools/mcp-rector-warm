@@ -1640,6 +1640,75 @@ final class RectorRunnerTest extends TestCase
     }
 
     /**
+     * Second-review-round finding: spawnProcWorker() (the no-pcntl standby
+     * worker's own spawn) also went through logGetmypidFailure() in the same
+     * commit as spawnOrphanWatchdog()'s fix, but had no test of its own --
+     * only spawnOrphanWatchdog()'s branch was covered. This is that missing
+     * test: spawnProcWorker() itself only spawns (does not wait for the
+     * worker to connect back -- that is awaitProcWorkerReady()'s job), so it
+     * is cheap to isolate via Reflection and clean up with
+     * discardProcWorker() afterward.
+     */
+    public function testSpawnProcWorkerLogsWhenOwnPidIsFalse(): void
+    {
+        if (!\function_exists('proc_open')) {
+            self::markTestSkipped('proc_open unavailable in this environment');
+        }
+
+        $runner = new class extends RectorRunner {
+            protected function currentPid()
+            {
+                return false;
+            }
+        };
+        $method = new \ReflectionMethod(RectorRunner::class, 'spawnProcWorker');
+        $method->setAccessible(true);
+        $discard = new \ReflectionMethod(RectorRunner::class, 'discardProcWorker');
+        $discard->setAccessible(true);
+
+        try {
+            $captured = self::captureStderr(function () use ($method, $runner): void {
+                $method->invoke($runner);
+            });
+
+            self::assertStringContainsString(
+                '#157',
+                $captured,
+                'getmypid() returning false in spawnProcWorker() must also be logged: got ' . var_export($captured, true),
+            );
+        } finally {
+            $discard->invoke($runner, true);
+        }
+    }
+
+    /**
+     * Positive control for the test above: a real, successful getmypid()
+     * must not be logged as a failure.
+     */
+    public function testSpawnProcWorkerDoesNotLogWhenOwnPidIsReal(): void
+    {
+        if (!\function_exists('proc_open')) {
+            self::markTestSkipped('proc_open unavailable in this environment');
+        }
+
+        $runner = new RectorRunner();
+        $method = new \ReflectionMethod(RectorRunner::class, 'spawnProcWorker');
+        $method->setAccessible(true);
+        $discard = new \ReflectionMethod(RectorRunner::class, 'discardProcWorker');
+        $discard->setAccessible(true);
+
+        try {
+            $captured = self::captureStderr(function () use ($method, $runner): void {
+                $method->invoke($runner);
+            });
+
+            self::assertSame('', $captured, 'a real, successful getmypid() must not be logged as a failure');
+        } finally {
+            $discard->invoke($runner, true);
+        }
+    }
+
+    /**
      * #74: a non-UTF-8 bootstrap file path (#33) as a $this->bootstrapFileHashes
      * key made the boot handshake's plain json_encode() return false -- cast to
      * '' -- so boot() saw an empty/undecodable handshake and reported a
