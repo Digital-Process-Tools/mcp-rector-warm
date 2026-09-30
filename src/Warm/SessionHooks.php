@@ -378,8 +378,8 @@ final class SessionHooks implements SymbolResolver
             if (!\is_string($path) || $path === '' || \str_starts_with($path, 'phar://')) {
                 continue;
             }
-            $real = \realpath($path);
-            if ($real !== false) {
+            $real = Path::real($path);
+            if ($real !== null) {
                 $existing[] = $real;
             }
         }
@@ -393,7 +393,7 @@ final class SessionHooks implements SymbolResolver
     private static function isUnderAny(string $path, array $parents): bool
     {
         foreach ($parents as $parent) {
-            if ($path === $parent || \str_starts_with($path, \rtrim($parent, '/') . '/')) {
+            if (Path::isUnder(Path::normalise($path), Path::normalise($parent))) {
                 return true;
             }
         }
@@ -407,7 +407,7 @@ final class SessionHooks implements SymbolResolver
     private static function containsAny(string $directory, array $paths): bool
     {
         foreach ($paths as $path) {
-            if (self::isUnderAny((\realpath($path) ?: $path), [$directory])) {
+            if (self::isUnderAny(Path::real($path) ?? $path, [$directory])) {
                 return true;
             }
         }

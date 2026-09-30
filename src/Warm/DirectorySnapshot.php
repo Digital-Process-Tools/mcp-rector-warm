@@ -213,7 +213,7 @@ final class DirectorySnapshot
     private function isExcluded(string $path): bool
     {
         foreach ($this->excluded as $excluded) {
-            if ($path === $excluded || \str_starts_with($path, $excluded . '/')) {
+            if (Path::isUnder($path, $excluded)) {
                 return true;
             }
         }
@@ -224,7 +224,7 @@ final class DirectorySnapshot
     private function isUnderFullRoot(string $path): bool
     {
         foreach ($this->fullRoots as $root) {
-            if ($path === $root || \str_starts_with($path, $root . '/')) {
+            if (Path::isUnder($path, $root)) {
                 return true;
             }
         }
@@ -240,9 +240,11 @@ final class DirectorySnapshot
     {
         $normalised = [];
         foreach ($paths as $path) {
-            $real = \realpath($path);
-            if ($real !== false) {
-                $normalised[] = \rtrim($real, '/') ?: '/';
+            // Path::real() gives '/' separators everywhere, so the paths
+            // walk() and scan() build from these with '/' compare equal.
+            $real = Path::real($path);
+            if ($real !== null) {
+                $normalised[] = $real;
             }
         }
 

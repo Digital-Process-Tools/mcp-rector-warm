@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Dpt\McpRectorWarm\Tests\Unit\Warm;
 
 use Dpt\McpRectorWarm\Warm\DirectorySnapshot;
+use Dpt\McpRectorWarm\Warm\Path;
 use PHPUnit\Framework\TestCase;
 
 /**
@@ -23,8 +24,9 @@ final class DirectorySnapshotTest extends TestCase
     {
         $this->root = \sys_get_temp_dir() . '/dir-snapshot-test-' . \bin2hex(\random_bytes(8));
         \mkdir($this->root . '/src/Deep', 0o777, true);
-        // The snapshot reports real paths (/var is /private/var on macOS).
-        $this->root = (string) \realpath($this->root);
+        // The snapshot reports real paths (/var is /private/var on macOS) with
+        // '/' separators, also on Windows: build expectations the same way.
+        $this->root = (string) Path::real($this->root);
         \file_put_contents($this->root . '/src/A.php', '<?php class A {}');
         \file_put_contents($this->root . '/src/Deep/B.php', '<?php class B {}');
     }

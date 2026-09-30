@@ -78,17 +78,17 @@ final class WarmSession
         array $autoloadDirectories,
         array $cacheDirectories = [],
     ) {
-        $this->includedBaseline = \array_fill_keys($includedBaseline, true);
+        $this->includedBaseline = \array_fill_keys(\array_map(Path::normalise(...), $includedBaseline), true);
         foreach ($cacheDirectories as $directory) {
-            $real = \realpath($directory);
-            if ($real !== false) {
-                $this->cacheDirectories[] = \rtrim($real, '/');
+            $real = Path::real($directory);
+            if ($real !== null) {
+                $this->cacheDirectories[] = $real;
             }
         }
         foreach ($autoloadDirectories as $directory) {
-            $real = \realpath($directory);
-            if ($real !== false && \is_dir($real)) {
-                $this->autoloadDirectories[] = \rtrim($real, '/');
+            $real = Path::real($directory);
+            if ($real !== null && \is_dir($real)) {
+                $this->autoloadDirectories[] = $real;
             }
         }
     }
@@ -136,8 +136,8 @@ final class WarmSession
             $this->recording = true;
         }
 
-        $real = \realpath($path);
-        $underAutoloadPath = !$bufferCopy && $real !== false && $this->isUnderAutoloadDirectory($real);
+        $real = Path::real($path);
+        $underAutoloadPath = !$bufferCopy && $real !== null && $this->isUnderAutoloadDirectory($real);
         foreach ($declared as [$kind, $name]) {
             if ($this->symbols->resolveStandard($kind, $name) !== null) {
                 continue;
@@ -159,8 +159,9 @@ final class WarmSession
     public function afterInSessionCall(string $path): void
     {
         ++$this->calls;
-        $this->recordRead(\realpath($path) ?: $path);
+        $this->recordRead(Path::real($path) ?? Path::normalise($path));
         foreach (\get_included_files() as $included) {
+            $included = Path::normalise($included);
             if (!isset($this->includedBaseline[$included]) && !$this->isUnder($included, $this->cacheDirectories)) {
                 $this->recordRead($included);
             }
@@ -190,9 +191,9 @@ final class WarmSession
         if ($directories === []) {
             return false;
         }
-        $real = \realpath($path) ?: $path;
+        $real = Path::real($path) ?? Path::normalise($path);
         foreach ($directories as $directory) {
-            if (\str_starts_with($real, $directory . '/')) {
+            if ($real !== $directory && Path::isUnder($real, $directory)) {
                 return true;
             }
         }
@@ -206,6 +207,6 @@ final class WarmSession
             return false;
         }
 
-        return (\realpath($a) ?: $a) === $b;
+        return (Path::real($a) ?? Path::normalise($a)) === Path::normalise($b);
     }
 }

@@ -6,6 +6,7 @@ namespace Dpt\McpRectorWarm\Tests\Unit\Warm;
 
 use Dpt\McpRectorWarm\Warm\DependencyFileTracker;
 use Dpt\McpRectorWarm\Warm\DirectorySnapshot;
+use Dpt\McpRectorWarm\Warm\Path;
 use Dpt\McpRectorWarm\Warm\SymbolResolver;
 use Dpt\McpRectorWarm\Warm\WarmSession;
 use PHPUnit\Framework\TestCase;
@@ -24,7 +25,8 @@ final class WarmSessionTest extends TestCase
         $this->dir = \sys_get_temp_dir() . '/warm-session-test-' . \bin2hex(\random_bytes(8));
         \mkdir($this->dir . '/src', 0o777, true);
         \mkdir($this->dir . '/lib', 0o777, true);
-        $this->dir = (string) \realpath($this->dir);
+        // Real, '/'-separated: the form WarmSession compares paths in.
+        $this->dir = (string) Path::real($this->dir);
     }
 
     protected function tearDown(): void
