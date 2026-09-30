@@ -56,6 +56,10 @@ Scenario format (YAML) -- see CONTRIBUTING.md for a worked example:
         is_error: false            # the MCP isError flag
         error_class: SecurityError # the tool's error_class
         error_contains: 'no rules' # substring of the tool's 'error' message
+        session: reused            # #185, pcntl + session on only: what served THIS
+                                   #   call, from the server's session log --
+                                   #   spawned | reused | respawned | declined | forked
+                                   #   (see check_session() below).
         no_zombie_children: true   # #48: right after THIS call, snapshot the daemon's
                                     #   process tree (`ps -eo pid,ppid,stat`) and fail if any
                                     #   descendant is a zombie, or if more than one live
@@ -92,12 +96,17 @@ import yaml
 from mcp_harness import (
     EXPECT_COLD_EVERY_CALL,
     REPO,
+    SESSION_EXPECTED,
+    SESSION_LOG_ENV,
+    SESSION_TERMINAL_EVENTS,
     assert_no_zombie_descendants,
     exit_record,
     non_jsonrpc_lines,
     normalise,
     open_server,
     run_cold,
+    session_events,
+    stderr_size,
     stderr_tail,
     stdout_lines,
     structured,
@@ -135,8 +144,9 @@ STEP_KINDS = {"write", "edit", "delete", "rename", "call"}
 CALL_KEYS = {"call", "dry_run", "expect"}
 EXPECT_KEYS = {
     "changed", "changed_files", "diff_contains", "diff_excludes", "is_error", "error_class", "error_contains",
-    "no_zombie_children",
+    "no_zombie_children", "session",
 }
+SESSION_OUTCOMES = {"spawned", "reused", "respawned", "declined", "forked"}
 
 
 def load(path: Path) -> dict[str, Any]:
@@ -168,6 +178,9 @@ def load(path: Path) -> dict[str, Any]:
             extra = set(step.get("expect") or {}) - EXPECT_KEYS
             if extra:
                 raise ValueError(f"{where} step {i}: unknown expect keys {sorted(extra)}")
+            outcome = (step.get("expect") or {}).get("session")
+            if outcome is not None and outcome not in SESSION_OUTCOMES:
+                raise ValueError(f"{where} step {i}: session must be one of {sorted(SESSION_OUTCOMES)}, got {outcome!r}")
         elif len(step) != 1:
             raise ValueError(f"{where} step {i}: a '{kinds.pop()}' step takes no sibling keys")
     if not any("call" in step for step in data["steps"]):
@@ -275,6 +288,29 @@ def step_touches_config(step: dict[str, Any], watched: set[str]) -> bool:
     return False
 
 
+def check_session(events: list[tuple[str, str]], expected: str, where: str) -> None:
+    """#185: what the server's session log says served one call. Each routed call
+    logs exactly one terminal event (serve / fork / decline), preceded by
+    'respawn' when the previous session went stale and by 'spawn' whenever a new
+    session child was forked. 'reused' is the must-not-fire outcome: its positive
+    control is the terminal 'serve' line itself, so a silent log (a broken switch,
+    a server that never routed the call) cannot pass as "nothing respawned"."""
+    names = [event for event, _ in events]
+    terminal = [event for event in names if event in SESSION_TERMINAL_EVENTS]
+    detail = f"{where}: session log for this call: {events!r}"
+    assert len(terminal) == 1, f"{detail} -- expected exactly one terminal event"
+    if expected == "spawned":
+        assert names.count("spawn") == 1 and "respawn" not in names and terminal == ["serve"], detail
+    elif expected == "reused":
+        assert "spawn" not in names and "respawn" not in names and terminal == ["serve"], detail
+    elif expected == "respawned":
+        assert "respawn" in names and names.count("spawn") == 1 and terminal == ["serve"], detail
+    elif expected == "declined":
+        assert "respawn" not in names and terminal == ["decline"], detail
+    elif expected == "forked":
+        assert "respawn" not in names and terminal == ["fork"], detail
+
+
 async def call_step(
     server: Any,
     step: dict[str, Any],
@@ -287,6 +323,7 @@ async def call_step(
     """One rector_process call, checked against the cold oracle and the step's 'expect'."""
     rel = step["call"]
     dry_run = step.get("dry_run", True)
+    log_offset = stderr_size(server.record_dir)
 
     result = await server.process(rel if cold_tree is None else warm_root / rel, dry_run=dry_run)
     payload = structured(result)
@@ -317,6 +354,15 @@ async def call_step(
             assert tree_contents(warm_root) == tree_contents(cold_tree), f"{where}: applied files differ warm vs cold"
 
     expect = step.get("expect") or {}
+    if "session" in expect:
+        if SESSION_EXPECTED:
+            check_session(session_events(server.record_dir, log_offset, wait_for_terminal=True), expect["session"], where)
+        else:
+            # No pcntl, or MCP_RECTOR_WARM_SESSION=0: the switch must really be
+            # off, so not one session line may appear.
+            assert session_events(server.record_dir, log_offset, wait_for_terminal=False) == [], (
+                f"{where}: the session is off here, yet the server logged session events"
+            )
     diffs = "\n".join((warm.get("diffs") or {}).values())
     if "changed" in expect:
         assert len(warm.get("changed_files", [])) == expect["changed"], f"{where}: {warm}"
@@ -342,8 +388,8 @@ async def call_step(
         # happens to leave behind. max_live=1: this daemon keeps exactly one
         # persistent worker for its whole life (RectorRunner's own class
         # docblock), so more than one live descendant here is itself a finding,
-        # not only a zombie one.
-        assert_no_zombie_descendants(server.record_dir, max_live=1)
+        # not only a zombie one. #185: plus the worker's one session child.
+        assert_no_zombie_descendants(server.record_dir, max_live=2 if SESSION_EXPECTED else 1)
 
 
 @pytest.mark.parametrize(("scenario_file", "data"), collect())
@@ -361,6 +407,7 @@ def test_scenario(scenario_file: Path, data: dict[str, Any], tmp_path: Path) -> 
         config_touched_since_last_call = False
         async with open_server(
             tree.root, record, config if config.exists() else None, data.get("php_ini"), data.get("call_timeout"),
+            extra_env=SESSION_LOG_ENV,
         ) as server:
             for i, step in enumerate(data["steps"]):
                 where = f"{scenario_file.name} step {i}"

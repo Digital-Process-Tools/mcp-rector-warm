@@ -5,6 +5,10 @@ declare(strict_types=1);
 namespace Dpt\McpRectorWarm;
 
 use Dpt\McpRectorWarm\Support\ProcessTree;
+use Dpt\McpRectorWarm\Warm\DependencyFileTracker;
+use Dpt\McpRectorWarm\Warm\DirectorySnapshot;
+use Dpt\McpRectorWarm\Warm\SessionHooks;
+use Dpt\McpRectorWarm\Warm\WarmSession;
 use Rector\Bootstrap\RectorConfigsResolver;
 use Rector\DependencyInjection\RectorContainerFactory;
 
@@ -37,6 +41,41 @@ class RectorRunner implements RunnerInterface
      * strips it and applies the original path's skip rules to the copy.
      */
     public const SKIP_AS_OPTION = '--rector-warm-skip-as';
+
+    /**
+     * #185: MCP_RECTOR_WARM_SESSION=0 (or off / false / no) turns the session
+     * child off, so every call forks from the pristine worker as it did before
+     * #185. On by default. No effect without pcntl: there is no session there.
+     */
+    public const SESSION_ENV = 'MCP_RECTOR_WARM_SESSION';
+
+    /**
+     * #185: MCP_RECTOR_WARM_SESSION_LOG=1 makes the warm worker log on stderr
+     * what served each analysis call -- see sessionLog().
+     */
+    public const SESSION_LOG_ENV = 'MCP_RECTOR_WARM_SESSION_LOG';
+
+    /** #185: a session child retires after a call once it holds this share of memory_limit. */
+    private const SESSION_MEMORY_SHARE = 0.75;
+
+    /** #185, worker side: pid of the live session child, or null. */
+    private ?int $sessionPid = null;
+
+    /** @var resource|null #185, worker side: the worker's end of its session child's socket. */
+    private $sessionSocket = null;
+
+    /** #185, worker side: set once a session child could not start; fork per call from then on. */
+    private bool $sessionUnavailable = false;
+
+    /** #185, worker side: the project's directory listings, refreshed before each session child is forked. */
+    private ?DirectorySnapshot $sessionDirectories = null;
+
+    /**
+     * @var resource|null #185, worker side: the worker's own end of the
+     * daemon<->worker socket. A session child closes its inherited copy, or the
+     * daemon would never read EOF from a worker that died while the child lived.
+     */
+    private $workerDaemonSocket = null;
 
     private ?object $application = null;
     private ?object $container = null;
@@ -572,6 +611,7 @@ class RectorRunner implements RunnerInterface
         // what actually closes this: this worker process must NEVER return or
         // unwind into its caller, no matter what throws or when.
         $exitCode = 0;
+        $this->workerDaemonSocket = $socket;
         try {
             try {
                 $this->bootInPlace();
@@ -604,7 +644,7 @@ class RectorRunner implements RunnerInterface
                 // killed", never toward "silently unkillable" (#72).
                 $dryRun = !\is_array($request) || ($request['dry_run'] ?? true) === true;
                 try {
-                    $result = $this->forkAndExecute($argv, $warmBoot, $dryRun, $daemonPid);
+                    $result = $this->serveRequest($argv, $warmBoot, $dryRun, $daemonPid);
                 } catch (\Throwable $e) {
                     $result = ['error' => $e->getMessage(), 'error_class' => $e::class];
                 }
@@ -617,6 +657,8 @@ class RectorRunner implements RunnerInterface
             // still exits cleanly rather than escaping into boot()'s caller.
             $exitCode = 1;
         } finally {
+            // #185: the session child dies with its worker, never outlives it.
+            $this->stopSession();
             @\fclose($socket);
             exit($exitCode);
         }
@@ -733,7 +775,7 @@ class RectorRunner implements RunnerInterface
      *   on the DAEMON socket would otherwise be noticed.
      * @return array{exit_code: int, output: string, warm_boot: bool}
      */
-    private function forkAndExecute(array $argv, bool $warmBoot, bool $dryRun, ?int $daemonPid = null): array
+    private function forkAndExecute(array $argv, bool $warmBoot, bool $dryRun, ?int $daemonPid = null, ?int $deadlineNs = null): array
     {
         $sockets = \stream_socket_pair(\STREAM_PF_UNIX, \STREAM_SOCK_STREAM, \STREAM_IPPROTO_IP);
         if ($sockets === false) {
@@ -776,11 +818,7 @@ class RectorRunner implements RunnerInterface
             // directly -- the same channel Rector's SymfonyStyle already had, since
             // it opens php://stdout in the worker, before this fork.
             \fclose($parentSocket);
-            \ob_start(static fn (): string => '');
-            \ini_set('log_errors', '0');
-            if (\strtolower((string) \ini_get('display_errors')) === 'stderr') {
-                \ini_set('display_errors', '0');
-            }
+            self::silenceChildOutput();
 
             $exitCode = 0;
             try {
@@ -816,8 +854,9 @@ class RectorRunner implements RunnerInterface
         // play: with $callTimeoutSeconds == 0 (unlimited), OR $dryRun false
         // (#72 correction: a write call is never killed), leave the socket on
         // whatever default_socket_timeout already governs, unchanged from before
-        // #58.
-        $deadline = $dryRun ? $this->callDeadlineNs() : null;
+        // #58. #185: serveRequest() passes the call's deadline in, so a session
+        // attempt that falls back to this fork does not restart the budget.
+        $deadline = $dryRun ? ($deadlineNs ?? $this->callDeadlineNs()) : null;
         // #127: a 1s per-read timeout now runs UNCONDITIONALLY, not only when a
         // deadline is armed -- this loop must wake up periodically to poll
         // $daemonPid below even when $deadline is null ($callTimeoutSeconds ==
@@ -896,6 +935,530 @@ class RectorRunner implements RunnerInterface
 
         /** @var array{exit_code: int, output: string, warm_boot: bool} $decoded */
         return $decoded;
+    }
+
+    /**
+     * Keep a forked child's output off the daemon's stdio -- a stray PHP
+     * warning during analysis must never land on the MCP/LSP protocol stream --
+     * WITHOUT closing the STDIN/STDOUT/STDERR constants (#192): PHPStan reads
+     * their values when it builds PhpStorm-stub reflection on a cache miss, and
+     * a closed stream there throws "Invalid value". Every byte PHP's output
+     * layer would write goes into a buffer that discards it (execute()'s own
+     * ob_start() nests inside it, and a fatal's flush at shutdown lands here
+     * too), and PHP's own error messages bound for fd 2 are switched off. Not
+     * covered: code writing to STDOUT/STDERR or php://stdout directly. Used by
+     * forkAndExecute()'s grandchild (as #193 introduced it) and by the #185
+     * session child; a grandchild forked from the session applies it again.
+     *
+     * @param int $chunkSize 0 for the grandchild, which exits after one call; a
+     *   size for the long-lived session child, so it discards stray output as it
+     *   goes instead of holding it until it exits.
+     */
+    private static function silenceChildOutput(int $chunkSize = 0): void
+    {
+        \ob_start(static fn (): string => '', $chunkSize);
+        \ini_set('log_errors', '0');
+        if (\strtolower((string) \ini_get('display_errors')) === 'stderr') {
+            \ini_set('display_errors', '0');
+        }
+    }
+
+    // ------------------------------------------------------------------------
+    // #185: the session child
+    //
+    // Forking every call from the pristine worker (#8) throws away everything a
+    // call learns: on a large project most of a warm call is PHPStan reflecting
+    // the same dependency classes, and project rules rebuilding the same
+    // indexes, every time. The worker now forks ONE long-lived session child
+    // and routes single-file analysis calls to it; the session analyses them
+    // in-process and keeps those caches between calls. WarmSession decides when
+    // that is safe: before each call it checks every input it has read (and
+    // every project directory listing) and, on any change, exits so the worker
+    // forks a fresh session from the still-pristine worker. Anything the
+    // session cannot serve exactly as a cold run would -- a write call, a
+    // directory, a file whose classes only it declares -- still forks from the
+    // pristine worker, as before.
+    // ------------------------------------------------------------------------
+
+    /**
+     * #185: one request, inside the worker. A single-file analysis call goes to
+     * the session child when there is one it accepts; everything else -- a write
+     * call, a directory, the session switched off, declined or lost -- forks
+     * from the pristine worker exactly as before (#8).
+     *
+     * @param list<string> $argv
+     * @return array{exit_code: int, output: string, warm_boot: bool}
+     */
+    private function serveRequest(array $argv, bool $warmBoot, bool $dryRun, ?int $daemonPid): array
+    {
+        // One deadline for the whole call: a session attempt that falls back to
+        // a fork must not restart the --call-timeout budget.
+        $deadline = $dryRun ? $this->callDeadlineNs() : null;
+        $path = $this->sessionCandidate($argv, $dryRun);
+        if ($path !== null) {
+            $result = $this->runInSession($argv, $warmBoot, $path, $daemonPid, $deadline);
+            if ($result !== null) {
+                return $result;
+            }
+        }
+
+        return $this->forkAndExecute($argv, $warmBoot, $dryRun, $daemonPid, $deadline);
+    }
+
+    /**
+     * The one existing file a call analyses, when the session may take it: a
+     * dry run (#72: a write call is never routed away from the path that has
+     * always guarded it) on exactly one file.
+     *
+     * @param list<string> $argv
+     */
+    private function sessionCandidate(array $argv, bool $dryRun): ?string
+    {
+        if (!$dryRun || $this->sessionUnavailable || self::sessionSwitchedOff()) {
+            return null;
+        }
+        [$argv] = self::extractSkipAs($argv);
+        $end = \array_search('--', $argv, true);
+        if ($end === false) {
+            return null;
+        }
+        $paths = \array_slice($argv, (int) $end + 1);
+        if (\count($paths) !== 1 || !\is_file($paths[0])) {
+            return null;
+        }
+
+        return $paths[0];
+    }
+
+    public static function sessionSwitchedOff(): bool
+    {
+        $value = \getenv(self::SESSION_ENV);
+
+        return \is_string($value) && \in_array(\strtolower(\trim($value)), ['0', 'off', 'false', 'no'], true);
+    }
+
+    /**
+     * Serve one call through the session child, forking a fresh one when there
+     * is none or the current one reports itself stale. Null when the call must
+     * fork from the pristine worker instead -- the session declined it, or could
+     * not be started, or died mid-call (a crash there is not trusted to be the
+     * call's own fault; the fork answers it).
+     *
+     * @param list<string> $argv
+     * @return array{exit_code: int, output: string, warm_boot: bool}|null
+     */
+    private function runInSession(array $argv, bool $warmBoot, string $path, ?int $daemonPid, ?int $deadline): ?array
+    {
+        $request = [
+            'argv' => $argv,
+            'warm_boot' => $warmBoot,
+            'path' => $path,
+            'buffer_copy' => self::extractSkipAs($argv)[1] !== null,
+            'deadline_ns' => $deadline,
+        ];
+        for ($attempt = 0; $attempt < 2; ++$attempt) {
+            if ($this->sessionPid !== null && $this->sessionExited()) {
+                $this->sessionLog('respawn', 'the session child exited between calls');
+            }
+            if ($this->sessionPid === null && !$this->spawnSession($deadline)) {
+                $this->sessionLog('decline', 'no session child could be started');
+
+                return null;
+            }
+            $reply = $this->askSession($request, $deadline, $daemonPid);
+            if ($reply === null) {
+                $this->killSession();
+                $this->sessionLog('decline', 'the session child exited during the call; forked from the worker instead');
+
+                return null;
+            }
+            $kind = $reply['kind'] ?? null;
+            if ($kind === 'stale') {
+                $this->reapSession();
+                $this->sessionLog('respawn', (string) ($reply['reason'] ?? 'stale'));
+
+                continue;
+            }
+            if ($kind === 'decline') {
+                $this->sessionLog('decline', (string) ($reply['reason'] ?? ''));
+
+                return null;
+            }
+            if ($kind === 'result' && \is_array($reply['result'] ?? null)) {
+                $this->sessionLog(
+                    ($reply['route'] ?? '') === WarmSession::FORK ? 'fork' : 'serve',
+                    \sprintf(
+                        'pid %d, call %d, %d files tracked',
+                        (int) $this->sessionPid,
+                        (int) ($reply['calls'] ?? 0),
+                        (int) ($reply['tracked'] ?? 0),
+                    ),
+                );
+                if (($reply['retire'] ?? false) === true) {
+                    // The session exits by itself right after this reply.
+                    $this->reapSession();
+                }
+
+                /** @var array{exit_code: int, output: string, warm_boot: bool} */
+                return $reply['result'];
+            }
+            $this->killSession();
+            $this->sessionLog('decline', 'unreadable reply from the session child');
+
+            return null;
+        }
+        $this->sessionLog('decline', 'a freshly started session child was already stale');
+
+        return null;
+    }
+
+    /**
+     * Fork a session child from this (pristine) worker and wait for it to
+     * report that its hooks are in place. The directory snapshot is refreshed
+     * here, in the worker, so each new session inherits an up-to-date one.
+     * False when no session can run: a hook that no longer fits this Rector or
+     * PHPStan disables the session for this worker's lifetime (and says so on
+     * stderr); a transient failure (fork, socket) only skips this call.
+     */
+    private function spawnSession(?int $deadline): bool
+    {
+        try {
+            $this->sessionDirectories ??= (new SessionHooks($this->container))->directorySnapshot((string) \getcwd());
+            $this->sessionDirectories->refresh();
+        } catch (\Throwable $e) {
+            $this->disableSession('cannot watch the project directories: ' . $e->getMessage());
+
+            return false;
+        }
+        $workerPid = $this->currentPid();
+        $sockets = \stream_socket_pair(\STREAM_PF_UNIX, \STREAM_SOCK_STREAM, \STREAM_IPPROTO_IP);
+        if ($workerPid === false || $sockets === false) {
+            return false;
+        }
+        [$workerEnd, $sessionEnd] = $sockets;
+        $pid = \pcntl_fork();
+        if ($pid === -1) {
+            \fclose($workerEnd);
+            \fclose($sessionEnd);
+
+            return false;
+        }
+        if ($pid === 0) {
+            \fclose($workerEnd);
+            $this->serveSession($sessionEnd, $workerPid);
+            // serveSession() always exit()s; this line is unreachable.
+        }
+        \fclose($sessionEnd);
+        \stream_set_timeout($workerEnd, 1);
+        try {
+            $handshake = $this->readFrame($workerEnd, $deadline);
+        } catch (RectorCallTimeoutException) {
+            $this->killAndReap($pid);
+            \fclose($workerEnd);
+
+            throw new \RuntimeException(
+                "rector call exceeded {$this->callTimeoutSeconds}s (--call-timeout); the analysis was killed",
+            );
+        }
+        $decoded = $handshake === null ? null : \json_decode($handshake, true);
+        if (!\is_array($decoded) || ($decoded['ok'] ?? false) !== true) {
+            \fclose($workerEnd);
+            $this->killAndReap($pid);
+            $this->disableSession(\is_array($decoded) ? (string) ($decoded['error'] ?? 'unknown error') : 'no handshake');
+
+            return false;
+        }
+        $this->sessionPid = $pid;
+        $this->sessionSocket = $workerEnd;
+        $this->sessionLog('spawn', \sprintf(
+            'pid %d, %d files and %d directories tracked',
+            $pid,
+            (int) ($decoded['tracked'] ?? 0),
+            (int) ($decoded['directories'] ?? 0),
+        ));
+
+        return true;
+    }
+
+    /**
+     * Send one request to the session child and wait for its reply, under the
+     * call's deadline, polling the daemon's liveness the way forkAndExecute()'s
+     * own wait loop does (#127). Null when the child is gone (EOF, or the write
+     * failed). Throws, after killing the child, on the deadline or a dead daemon
+     * -- with forkAndExecute()'s own messages, so every caller and test that
+     * recognises those kill sites recognises this one.
+     *
+     * @param array<string, mixed> $request
+     * @return array<string, mixed>|null
+     */
+    private function askSession(array $request, ?int $deadline, ?int $daemonPid): ?array
+    {
+        \assert($this->sessionSocket !== null);
+        try {
+            $this->writeFrame($this->sessionSocket, (string) \json_encode($request, \JSON_INVALID_UTF8_SUBSTITUTE));
+        } catch (\RuntimeException) {
+            return null;
+        }
+        $orphaned = false;
+        $nextOrphanCheckNs = \hrtime(true) + self::ORPHAN_POLL_SECONDS * 1_000_000_000;
+        $onIdle = static function () use ($daemonPid, &$orphaned, &$nextOrphanCheckNs): void {
+            if ($daemonPid === null || \hrtime(true) < $nextOrphanCheckNs) {
+                return;
+            }
+            $orphaned = \function_exists('posix_getppid')
+                ? \posix_getppid() !== $daemonPid
+                : ProcessTree::isAlive($daemonPid) === false;
+            if ($orphaned) {
+                throw new \RuntimeException('orphaned');
+            }
+            $nextOrphanCheckNs = \hrtime(true) + self::ORPHAN_POLL_SECONDS * 1_000_000_000;
+        };
+        try {
+            $raw = $this->readFrame($this->sessionSocket, $deadline, $onIdle);
+        } catch (RectorCallTimeoutException) {
+            $this->killSession();
+
+            throw new \RuntimeException(
+                "rector call exceeded {$this->callTimeoutSeconds}s (--call-timeout); the analysis was killed",
+            );
+        } catch (\RuntimeException $e) {
+            if (!$orphaned) {
+                throw $e;
+            }
+            $this->killSession();
+
+            throw new \RuntimeException(
+                'the daemon that started this warm worker is gone; the in-flight analysis was killed (#127)',
+            );
+        }
+        if ($raw === null) {
+            return null;
+        }
+        $decoded = \json_decode($raw, true);
+
+        return \is_array($decoded) ? $decoded : ['kind' => 'unreadable'];
+    }
+
+    /**
+     * The session child's main loop -- see the section comment above and
+     * WarmSession. Like serveWorker(), it never returns: whatever happens, the
+     * process exits here and never unwinds into the worker's call stack (#133).
+     *
+     * @param resource $socket
+     */
+    private function serveSession($socket, int $workerPid): void
+    {
+        $exitCode = 0;
+        try {
+            // The daemon must read EOF from a dead worker even while this child
+            // lives, and nothing here may ever write to the daemon's stdio (the
+            // std constants themselves stay open, #192).
+            if (\is_resource($this->workerDaemonSocket)) {
+                @\fclose($this->workerDaemonSocket);
+            }
+            $this->workerDaemonSocket = null;
+            self::silenceChildOutput(4096);
+            try {
+                $hooks = new SessionHooks($this->container);
+                $session = new WarmSession(
+                    $hooks,
+                    new DependencyFileTracker(),
+                    $this->sessionDirectories,
+                    \get_included_files(),
+                    $hooks->autoloadPathList(),
+                    $hooks->cacheDirectories(),
+                );
+                $hooks->installParserHook(static function (string $file) use ($session): void {
+                    $session->recordRead($file);
+                });
+                foreach ($hooks->staticInputFiles() as $file) {
+                    $session->recordRead($file);
+                }
+            } catch (\Throwable $e) {
+                $this->writeFrame($socket, $this->encodeHandshakeFrame(['ok' => false, 'error' => $e->getMessage()]));
+                $exitCode = 1;
+
+                return;
+            }
+            $this->writeFrame($socket, $this->encodeHandshakeFrame([
+                'ok' => true,
+                'tracked' => $session->trackedFiles(),
+                'directories' => $this->sessionDirectories?->count() ?? 0,
+            ]));
+
+            while (true) {
+                $frame = $this->readFrame($socket);
+                if ($frame === null) {
+                    break;
+                }
+                $request = \json_decode($frame, true);
+                $argv = \is_array($request) && \is_array($request['argv'] ?? null) ? $request['argv'] : [];
+                $path = \is_array($request) ? (string) ($request['path'] ?? '') : '';
+                $warmBoot = \is_array($request) && ($request['warm_boot'] ?? false) === true;
+                $bufferCopy = \is_array($request) && ($request['buffer_copy'] ?? false) === true;
+                $deadline = \is_array($request) && \is_int($request['deadline_ns'] ?? null) ? $request['deadline_ns'] : null;
+
+                $stale = $session->staleReason();
+                if ($stale !== null) {
+                    $this->writeFrame($socket, $this->encodeForkResult(['kind' => 'stale', 'reason' => $stale]));
+
+                    break;
+                }
+                try {
+                    [$route, $reason] = $session->route($path, $bufferCopy);
+                } catch (\Throwable $e) {
+                    [$route, $reason] = [WarmSession::DECLINE, 'could not inspect the file: ' . $e->getMessage()];
+                }
+                if ($route === WarmSession::DECLINE) {
+                    $this->writeFrame($socket, $this->encodeForkResult(['kind' => 'decline', 'reason' => $reason]));
+
+                    continue;
+                }
+                if ($route === WarmSession::FORK) {
+                    // Warm caches inherited, and whatever the buffer adds dies
+                    // with the grandchild. Its orphan check watches this
+                    // session's own parent, the worker.
+                    try {
+                        $result = $this->forkAndExecute($argv, $warmBoot, true, $workerPid, $deadline);
+                    } catch (\Throwable $e) {
+                        $result = ['error' => $e->getMessage(), 'error_class' => $e::class];
+                    }
+                    $this->writeFrame($socket, $this->encodeForkResult([
+                        'kind' => 'result',
+                        'route' => WarmSession::FORK,
+                        'result' => $result,
+                        'calls' => $session->calls(),
+                        'tracked' => $session->trackedFiles(),
+                    ]));
+
+                    continue;
+                }
+
+                $retire = false;
+                try {
+                    $result = $this->execute($argv, $warmBoot);
+                } catch (\Throwable $e) {
+                    // A throw out of Rector may leave half-built state behind:
+                    // report it, then let the next call start a fresh session.
+                    $result = ['error' => $e->getMessage(), 'error_class' => $e::class];
+                    $retire = true;
+                }
+                $session->afterInSessionCall($path);
+                $retire = $retire || self::memoryNearLimit();
+                $this->writeFrame($socket, $this->encodeForkResult([
+                    'kind' => 'result',
+                    'route' => WarmSession::SERVE,
+                    'result' => $result,
+                    'retire' => $retire,
+                    'calls' => $session->calls(),
+                    'tracked' => $session->trackedFiles(),
+                ]));
+                if ($retire) {
+                    break;
+                }
+            }
+        } catch (\Throwable) {
+            $exitCode = 1;
+        } finally {
+            @\fclose($socket);
+            exit($exitCode);
+        }
+    }
+
+    /**
+     * True, with the child reaped and forgotten, when the session child is no
+     * longer running.
+     */
+    private function sessionExited(): bool
+    {
+        if ($this->sessionPid === null) {
+            return false;
+        }
+        $status = 0;
+        if (\pcntl_waitpid($this->sessionPid, $status, \WNOHANG) === 0) {
+            return false;
+        }
+        $this->forgetSessionSocket();
+        $this->sessionPid = null;
+
+        return true;
+    }
+
+    /** Wait for a session child that is exiting on its own (stale, retired). */
+    private function reapSession(): void
+    {
+        $this->forgetSessionSocket();
+        if ($this->sessionPid !== null) {
+            $status = 0;
+            \pcntl_waitpid($this->sessionPid, $status);
+        }
+        $this->sessionPid = null;
+    }
+
+    /** SIGKILL and reap the session child (and whatever it forked). */
+    private function killSession(): void
+    {
+        $this->forgetSessionSocket();
+        if ($this->sessionPid !== null) {
+            $this->killAndReap($this->sessionPid);
+        }
+        $this->sessionPid = null;
+    }
+
+    /** The worker is exiting: its session child goes with it. */
+    private function stopSession(): void
+    {
+        $this->killSession();
+    }
+
+    private function forgetSessionSocket(): void
+    {
+        if (\is_resource($this->sessionSocket)) {
+            @\fclose($this->sessionSocket);
+        }
+        $this->sessionSocket = null;
+    }
+
+    private function disableSession(string $reason): void
+    {
+        $this->sessionUnavailable = true;
+        $this->sessionLog('disable', $reason . '; every call forks from the warm worker instead');
+    }
+
+    /**
+     * One line on the worker's stderr: `mcp-rector-warm: session <event>: <detail>`.
+     * Every call the session was asked about logs exactly one terminal event --
+     * serve (analysed in the session), fork (in a child forked from it), or
+     * decline (forked from the pristine worker) -- after `respawn` when the
+     * previous session went stale and `spawn` when a new one started. Only with
+     * MCP_RECTOR_WARM_SESSION_LOG set, except `disable`, which is always worth
+     * knowing: the session is off for the rest of this worker's life.
+     */
+    private function sessionLog(string $event, string $detail): void
+    {
+        $enabled = $event === 'disable'
+            || \in_array(\strtolower(\trim((string) \getenv(self::SESSION_LOG_ENV))), ['1', 'true', 'yes', 'on'], true);
+        if ($enabled && \defined('STDERR') && \is_resource(\STDERR)) {
+            @\fwrite(\STDERR, "mcp-rector-warm: session {$event}: {$detail}\n");
+        }
+    }
+
+    private static function memoryNearLimit(): bool
+    {
+        $limit = \trim((string) \ini_get('memory_limit'));
+        if ($limit === '' || $limit === '-1') {
+            return false;
+        }
+        $bytes = (int) $limit;
+        $unit = \strtolower(\substr($limit, -1));
+        $bytes *= match ($unit) {
+            'g' => 1024 ** 3,
+            'm' => 1024 ** 2,
+            'k' => 1024,
+            default => 1,
+        };
+
+        return $bytes > 0 && \memory_get_usage(true) > $bytes * self::SESSION_MEMORY_SHARE;
     }
 
     /**
@@ -1994,9 +2557,9 @@ class RectorRunner implements RunnerInterface
      *
      * @param resource $socket
      */
-    private function readFrame($socket, ?int $deadlineNs = null): ?string
+    private function readFrame($socket, ?int $deadlineNs = null, ?\Closure $onIdle = null): ?string
     {
-        $header = $this->readExactly($socket, 4, $deadlineNs);
+        $header = $this->readExactly($socket, 4, $deadlineNs, $onIdle);
         if ($header === null) {
             return null;
         }
@@ -2006,7 +2569,7 @@ class RectorRunner implements RunnerInterface
             return '';
         }
 
-        return $this->readExactly($socket, $length, $deadlineNs);
+        return $this->readExactly($socket, $length, $deadlineNs, $onIdle);
     }
 
     /**
@@ -2025,7 +2588,7 @@ class RectorRunner implements RunnerInterface
      *   from the daemon, which is not a call in progress and has no
      *   --call-timeout budget to spend while idle.
      */
-    private function readExactly($socket, int $length, ?int $deadlineNs = null): ?string
+    private function readExactly($socket, int $length, ?int $deadlineNs = null, ?\Closure $onIdle = null): ?string
     {
         $buffer = '';
         while (\strlen($buffer) < $length) {
@@ -2049,6 +2612,11 @@ class RectorRunner implements RunnerInterface
                         throw new RectorCallTimeoutException(
                             'rector call exceeded its configured --call-timeout waiting on the warm worker',
                         );
+                    }
+                    // #185: the worker's wait on its session child polls the
+                    // daemon's liveness here, as forkAndExecute()'s loop does (#127).
+                    if ($onIdle !== null) {
+                        $onIdle();
                     }
                     continue;
                 }

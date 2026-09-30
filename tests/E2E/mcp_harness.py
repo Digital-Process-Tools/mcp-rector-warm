@@ -13,6 +13,7 @@ import os
 import shutil
 import subprocess
 import sys
+import time
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -59,6 +60,19 @@ NO_PCNTL_PLATFORM = sys.platform.startswith("win") or DISABLE_PCNTL
 # environment) brings back "every call is a cold boot".
 EXPECT_COLD_EVERY_CALL = NO_PCNTL_PLATFORM and os.environ.get("MCP_RECTOR_WARM_NO_PCNTL", "").strip().lower() == "cold"
 
+# #185: with pcntl, analysis calls are served by one long-lived session child
+# (RectorRunner::serveSession()) unless MCP_RECTOR_WARM_SESSION=0 turns it off.
+# Without pcntl there is no session at all (the #108 standby worker per call).
+# Running the whole suite once with MCP_RECTOR_WARM_SESSION=0 compares the old
+# fork-per-call path against the same cold oracle.
+SESSION_OPT_OUT = os.environ.get("MCP_RECTOR_WARM_SESSION", "").strip().lower() in {"0", "off", "false", "no"}
+SESSION_EXPECTED = not NO_PCNTL_PLATFORM and not SESSION_OPT_OUT
+
+# The server's own debug log of what served each call (RectorRunner::sessionLog()).
+SESSION_LOG_ENV = {"MCP_RECTOR_WARM_SESSION_LOG": "1"}
+SESSION_LOG_PREFIX = "mcp-rector-warm: session "
+SESSION_TERMINAL_EVENTS = {"serve", "fork", "decline"}
+
 
 def php_binary() -> str:
     """The PHP interpreter. Invoked explicitly rather than through the bin's
@@ -93,6 +107,7 @@ async def open_server(
     config: Path | None = None,
     php_ini: dict[str, Any] | None = None,
     call_timeout: int | None = None,
+    extra_env: dict[str, str] | None = None,
 ) -> AsyncIterator[ServerRun]:
     """Launch bin/mcp-rector-warm over stdio and complete the initialize handshake.
 
@@ -113,9 +128,10 @@ async def open_server(
     # The SDK hands the server only a short whitelist of the environment (HOME, PATH,
     # ...) unless told otherwise, so the #108 strategy switch has to be forwarded
     # explicitly, or MCP_RECTOR_WARM_NO_PCNTL set for this suite never reaches it.
-    env = None
-    if "MCP_RECTOR_WARM_NO_PCNTL" in os.environ:
-        env = {**get_default_environment(), "MCP_RECTOR_WARM_NO_PCNTL": os.environ["MCP_RECTOR_WARM_NO_PCNTL"]}
+    # Same for #185's session switch, and for any variable a test asks for.
+    forwarded = {name: os.environ[name] for name in ("MCP_RECTOR_WARM_NO_PCNTL", "MCP_RECTOR_WARM_SESSION") if name in os.environ}
+    forwarded.update(extra_env or {})
+    env = {**get_default_environment(), **forwarded} if forwarded else None
     params = StdioServerParameters(command=sys.executable, args=args, cwd=str(project), env=env)
 
     transport_errors: list[Exception] = []
@@ -166,6 +182,31 @@ def stderr_tail(record_dir: Path, limit: int = 2000) -> str:
     path = record_dir / "server.stderr"
     text = path.read_bytes().decode("utf-8", errors="replace") if path.exists() else ""
     return text[-limit:]
+
+
+def stderr_size(record_dir: Path) -> int:
+    path = record_dir / "server.stderr"
+    return path.stat().st_size if path.exists() else 0
+
+
+def session_events(record_dir: Path, since: int, *, wait_for_terminal: bool, timeout: float = 5.0) -> list[tuple[str, str]]:
+    """#185: the (event, detail) pairs the server logged since byte offset `since`
+    of its stderr. The log reaches server.stderr through the MCP client's own
+    stderr pump, which can lag the tool result by a moment, so when a call is
+    known to have been routed (wait_for_terminal) this polls until the call's
+    terminal event (serve / fork / decline) shows up or `timeout` passes."""
+    deadline = time.monotonic() + timeout
+    while True:
+        path = record_dir / "server.stderr"
+        raw = path.read_bytes()[since:] if path.exists() else b""
+        events = []
+        for line in raw.decode("utf-8", "replace").splitlines():
+            if line.startswith(SESSION_LOG_PREFIX):
+                event, _, detail = line[len(SESSION_LOG_PREFIX):].partition(":")
+                events.append((event.strip(), detail.strip()))
+        if not wait_for_terminal or any(e in SESSION_TERMINAL_EVENTS for e, _ in events) or time.monotonic() >= deadline:
+            return events
+        time.sleep(0.05)
 
 
 # ----------------------------------------------------------------- process tree

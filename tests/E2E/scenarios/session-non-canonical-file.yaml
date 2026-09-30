@@ -1,0 +1,49 @@
+description: "#185: a file whose class no locator would find without it (outside the autoload paths, no autoloader entry) is run from the pristine worker, never inside the session, so its class cannot leak into a later call."
+files:
+  src/Base.php: |
+    <?php
+
+    declare(strict_types=1);
+
+    class Base
+    {
+        public function run(): void
+        {
+            echo "base";
+        }
+    }
+  lib/Tool.php: |
+    <?php
+
+    declare(strict_types=1);
+
+    class Tool extends Base
+    {
+        public function run(): void
+        {
+            echo "tool";
+        }
+    }
+  src/UsesTool.php: |
+    <?php
+
+    declare(strict_types=1);
+
+    final class UsesTool extends Tool
+    {
+        public function run(): void
+        {
+            echo "uses tool";
+        }
+    }
+steps:
+  - call: src/UsesTool.php
+    expect: {changed: 0, session: spawned}
+  - call: lib/Tool.php
+    expect:
+      changed: 1
+      diff_contains: '+    #[\Override]'
+      session: declined
+  # Tool must still be unknown here, exactly as for a cold run on this file.
+  - call: src/UsesTool.php
+    expect: {changed: 0, session: reused}

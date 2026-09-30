@@ -1,0 +1,103 @@
+description: "#185: a parent class the session looked up and did not find is created later, in an existing directory and then in a new one, and the unchanged child must see it (must fire on a negative lookup)."
+config: |
+  <?php
+
+  declare(strict_types=1);
+
+  use Rector\Config\RectorConfig;
+  use Rector\Php83\Rector\ClassMethod\AddOverrideAttributeToOverriddenMethodsRector;
+  use Rector\ValueObject\PhpVersion;
+
+  return RectorConfig::configure()
+      ->withPaths([__DIR__ . '/src'])
+      ->withPhpVersion(PhpVersion::PHP_83)
+      ->withRules([AddOverrideAttributeToOverriddenMethodsRector::class]);
+files:
+  vendor/autoload.php: |
+    <?php
+
+    spl_autoload_register(static function (string $class): void {
+        if (str_starts_with($class, 'App\\')) {
+            $file = __DIR__ . '/../src/' . str_replace('\\', '/', substr($class, 4)) . '.php';
+            if (is_file($file)) {
+                require $file;
+            }
+        }
+    });
+  src/Child.php: |
+    <?php
+
+    declare(strict_types=1);
+
+    namespace App;
+
+    final class Child extends Base
+    {
+        public function run(): void
+        {
+            echo 'child';
+        }
+    }
+  src/Other.php: |
+    <?php
+
+    declare(strict_types=1);
+
+    namespace App;
+
+    final class Other extends Deep\Base
+    {
+        public function run(): void
+        {
+            echo 'other';
+        }
+    }
+steps:
+  - call: src/Child.php
+    expect: {changed: 0, session: spawned}
+  - call: src/Child.php
+    expect: {changed: 0, session: reused}
+  - write:
+      path: src/Base.php
+      content: |
+        <?php
+
+        declare(strict_types=1);
+
+        namespace App;
+
+        class Base
+        {
+            public function run(): void
+            {
+                echo 'base';
+            }
+        }
+  - call: src/Child.php
+    expect:
+      changed: 1
+      diff_contains: '+    #[\Override]'
+      session: respawned
+  - call: src/Other.php
+    expect: {changed: 0, session: reused}
+  - write:
+      path: src/Deep/Base.php
+      content: |
+        <?php
+
+        declare(strict_types=1);
+
+        namespace App\Deep;
+
+        class Base
+        {
+            public function run(): void
+            {
+                echo 'deep base';
+            }
+        }
+  - call: src/Other.php
+    expect:
+      changed: 1
+      diff_contains: '+    #[\Override]'
+      session: respawned
