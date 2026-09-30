@@ -71,8 +71,8 @@ warm worker per `rector.php` root).
 ## How
 
 **The forked warm worker.** Every call to Rector -- from the MCP tool or the
-LSP -- runs inside a forked child process (`RectorRunner::boot()`,
-`src/RectorRunner.php:358`), never in the long-lived daemon itself. The
+LSP -- runs inside a forked child process (`RectorRunner::boot()`, in
+`src/RectorRunner.php`), never in the long-lived daemon itself. The
 parent blocks on a socket read until the child answers or times out. This
 means re-editing `rector.php` between calls, or a warm container that
 corrupts mid-session, can never crash the daemon -- only the forked child,
@@ -115,7 +115,7 @@ runs `RectorTool::process($path, dryRun: true)` and reads Rector's own
 `RectorTool::process()` calls Rector with `--debug` for speed (parallel mode
 adds ~14s of boot overhead per single-file call) -- re-verified against
 `rector/rector ^2.4` that `--debug` does not suppress `file_diffs[]` in this
-version (`src/RectorTool.php:92-96`).
+version (see the re-verification comment in `src/RectorTool.php`).
 
 ## Correctness
 
