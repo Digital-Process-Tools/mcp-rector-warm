@@ -43,6 +43,10 @@ if ($daemonPid <= 0 || $workerPid <= 0) {
     exit(1);
 }
 
+// #159: logged at most once -- run() (inside isAlive()/parentOf()) can fail
+// this way on EVERY poll in an environment with no `ps`, and this loop polls
+// every $pollSeconds forever; one line is the signal, not a stream of them.
+$loggedProbeFailure = false;
 while (true) {
     if (ProcessTree::isAlive($workerPid) === false) {
         // The call already finished (or the worker died some other way) -- nothing
@@ -59,6 +63,20 @@ while (true) {
     // Windows has no such reparenting concept to read: isAlive($daemonPid) is the
     // only signal there, same as the rest of this no-pcntl path.
     $parent = ProcessTree::parentOf($workerPid);
+    // #159: a null $parent means either "the worker's parent is simply not
+    // $daemonPid any more" (the case the Windows fallback below already
+    // handles) or "`ps` itself could not be run at all" -- on POSIX, the
+    // fallback is unconditionally false, so the second case used to read as
+    // "not orphaned" forever with no signal. lastProbeRanOk() distinguishes
+    // them without changing that fallback's behaviour.
+    if ($parent === null && ProcessTree::lastProbeRanOk() === false && !$loggedProbeFailure) {
+        $loggedProbeFailure = true;
+        if (\defined('STDERR') && \is_resource(\STDERR)) {
+            @\fwrite(\STDERR, 'rector-warm-orphan-watchdog: could not run the process-table probe '
+                . "(`ps`/`tasklist`) to check whether worker {$workerPid} is orphaned; "
+                . "#134's kill-detection is degraded to best-effort here until this recovers (#159)\n");
+        }
+    }
     $orphaned = $parent !== null
         ? $parent !== $daemonPid
         : (\PHP_OS_FAMILY === 'Windows' && ProcessTree::isAlive($daemonPid) === false);

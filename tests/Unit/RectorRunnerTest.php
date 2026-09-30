@@ -1454,6 +1454,127 @@ final class RectorRunnerTest extends TestCase
     }
 
     /**
+     * Same stderr-capture technique as testBootstrapFileHashResolutionFailureIsLoggedNotSilent()
+     * above, generalised so the #156/#157 tests below do not each need their own
+     * named filter class.
+     */
+    private static function captureStderr(callable $body): string
+    {
+        if (!\in_array('rrtGenericCapture', \stream_get_filters(), true)) {
+            \stream_filter_register('rrtGenericCapture', RectorRunnerTestGenericCaptureFilter::class);
+        }
+        RectorRunnerTestGenericCaptureFilter::$captured = '';
+        $filter = \stream_filter_append(\STDERR, 'rrtGenericCapture', \STREAM_FILTER_WRITE);
+        self::assertNotFalse($filter);
+        try {
+            $body();
+        } finally {
+            \stream_filter_remove($filter);
+        }
+
+        return RectorRunnerTestGenericCaptureFilter::$captured;
+    }
+
+    /**
+     * #157: getmypid() returning false must not silently disable #127's mid-call
+     * orphan-kill detection with no signal. Forcing the real builtin itself to
+     * return false is not achievable from a test (a documented-but-essentially-
+     * never-seen PHP edge case, per the issue's own text) -- exercised via
+     * currentPid(), the same overridable-method test seam canFork()/
+     * hasPosixKill() already use, isolating the ONE decision boot() makes with
+     * it (daemonPidOrWarn()) through Reflection, independent of a real fork.
+     */
+    public function testGetmypidFailureIsLoggedNotSilentlyDisablingOrphanDetection(): void
+    {
+        $runner = new class extends RectorRunner {
+            protected function currentPid()
+            {
+                return false;
+            }
+        };
+        $method = new \ReflectionMethod(RectorRunner::class, 'daemonPidOrWarn');
+        $method->setAccessible(true);
+
+        $result = null;
+        $captured = self::captureStderr(function () use (&$result, $method, $runner): void {
+            $result = $method->invoke($runner);
+        });
+
+        self::assertNull($result, 'must still fail open: a null daemonPid is the existing, correct fallback -- this only adds a signal');
+        self::assertStringContainsString(
+            '#157',
+            $captured,
+            'getmypid() returning false must write a diagnostic to stderr instead of silently disabling orphan-kill detection: got ' . var_export($captured, true),
+        );
+    }
+
+    /**
+     * Positive control for the test above: the ordinary case (getmypid()
+     * succeeds) must NOT log anything -- otherwise the assertion above would
+     * pass even if every call logged unconditionally.
+     */
+    public function testGetmypidSuccessIsNotLogged(): void
+    {
+        $runner = new RectorRunner();
+        $method = new \ReflectionMethod(RectorRunner::class, 'daemonPidOrWarn');
+        $method->setAccessible(true);
+
+        $result = null;
+        $captured = self::captureStderr(function () use (&$result, $method, $runner): void {
+            $result = $method->invoke($runner);
+        });
+
+        self::assertIsInt($result, 'a real, successful getmypid() must still return the pid unchanged');
+        self::assertSame('', $captured, 'a real, successful getmypid() must not be logged as a failure');
+    }
+
+    /**
+     * #156: ini_get_all() itself returning false (could not enumerate
+     * directives at all) must not read identically to "genuinely nothing to
+     * forward" -- previously collapsed by a `?: []`. No concrete trigger for
+     * the real builtin returning false has been constructed in this daemon's
+     * own runtime (issue's own stated limit), so this is exercised directly
+     * against collectIniOverrideArgsFrom(), the branch #156 extracted for
+     * exactly this, passing `false` the same way \ini_get_all(null, true)
+     * itself would on failure.
+     */
+    public function testIniGetAllFailureIsLoggedNotSilentlyTreatedAsNothingToForward(): void
+    {
+        $method = new \ReflectionMethod(RectorRunner::class, 'collectIniOverrideArgsFrom');
+        $method->setAccessible(true);
+
+        $result = null;
+        $captured = self::captureStderr(function () use (&$result, $method): void {
+            $result = $method->invoke(null, false);
+        });
+
+        self::assertSame([], $result, 'must still fail open: no ini_get_all() means no -d overrides forwarded, never a thrown error');
+        self::assertStringContainsString(
+            '#156',
+            $captured,
+            'ini_get_all() returning false must write a diagnostic to stderr instead of silently reading as "nothing to forward": got ' . var_export($captured, true),
+        );
+    }
+
+    /**
+     * Positive control for the test above: a genuinely-empty result (the
+     * ordinary, common case) must NOT trip the new warning.
+     */
+    public function testIniGetAllGenuineEmptyResultIsNotLogged(): void
+    {
+        $method = new \ReflectionMethod(RectorRunner::class, 'collectIniOverrideArgsFrom');
+        $method->setAccessible(true);
+
+        $result = null;
+        $captured = self::captureStderr(function () use (&$result, $method): void {
+            $result = $method->invoke(null, []);
+        });
+
+        self::assertSame([], $result);
+        self::assertSame('', $captured, 'a genuinely-empty ini_get_all() result must not be logged as a failure');
+    }
+
+    /**
      * #74: a non-UTF-8 bootstrap file path (#33) as a $this->bootstrapFileHashes
      * key made the boot handshake's plain json_encode() return false -- cast to
      * '' -- so boot() saw an empty/undecodable handshake and reported a
@@ -1766,6 +1887,26 @@ final class RectorRunnerTest extends TestCase
  * appended, without touching the real fd -- see testBootstrapFileHashResolutionFailureIsLoggedNotSilent().
  */
 final class RectorRunnerTest63CaptureFilter extends \php_user_filter
+{
+    public static string $captured = '';
+
+    public function filter($in, $out, &$consumed, bool $closing): int
+    {
+        while ($bucket = stream_bucket_make_writeable($in)) {
+            self::$captured .= $bucket->data;
+            $consumed += $bucket->datalen;
+            stream_bucket_append($out, $bucket);
+        }
+
+        return PSFS_PASS_ON;
+    }
+}
+
+/**
+ * @internal test-only stream filter, same mechanism as RectorRunnerTest63CaptureFilter
+ * above but registered once and reused -- see captureStderr().
+ */
+final class RectorRunnerTestGenericCaptureFilter extends \php_user_filter
 {
     public static string $captured = '';
 

@@ -307,6 +307,38 @@ class RectorRunner implements RunnerInterface
             && \function_exists('stream_socket_pair');
     }
 
+    /**
+     * #157: this process's own pid, taken the same way boot() always has --
+     * but logged, not silently folded into null, when \getmypid() itself
+     * returns false (a documented-but-essentially-never-seen PHP edge case).
+     * A null $daemonPid makes forkAndExecute()'s wait loop skip #127's whole
+     * mid-call orphan-kill check with no signal that it did; this is the one
+     * place that decision is made, so it is the one place that can log it.
+     * \getmypid() is wrapped in its own overridable method (protected, same
+     * seam canFork()/hasPosixKill() already use) purely so a test can force
+     * the branch: forcing the real builtin to return false is not achievable
+     * from a test, matching the issue's own stated limit.
+     */
+    protected function currentPid()
+    {
+        return \getmypid();
+    }
+
+    private function daemonPidOrWarn(): ?int
+    {
+        $pid = $this->currentPid();
+        if ($pid === false) {
+            if (\defined('STDERR') && \is_resource(\STDERR)) {
+                @\fwrite(\STDERR, 'mcp-rector-warm: getmypid() returned false; '
+                    . "#127's mid-call orphan-kill detection is disabled for this warm worker (#157)\n");
+            }
+
+            return null;
+        }
+
+        return $pid;
+    }
+
     /** Extra seconds runForked()'s own (daemon-side) deadline gets on top of
      *  $callTimeoutSeconds, so forkAndExecute()'s deadline (inside the worker,
      *  same $callTimeoutSeconds, no grace) reliably fires FIRST and gets the
@@ -415,7 +447,7 @@ class RectorRunner implements RunnerInterface
         // kill -9 closes no fd the worker is waiting on mid-call -- see
         // forkAndExecute()'s orphan check) rather than only when it happens
         // to be idle between calls (where EOF on $socket already covers it).
-        $daemonPid = \getmypid();
+        $daemonPid = $this->daemonPidOrWarn();
 
         $pid = \pcntl_fork();
         if ($pid === -1) {
@@ -426,7 +458,7 @@ class RectorRunner implements RunnerInterface
 
         if ($pid === 0) {
             \fclose($parentSocket);
-            $this->serveWorker($childSocket, $daemonPid !== false ? $daemonPid : null);
+            $this->serveWorker($childSocket, $daemonPid);
             // serveWorker() always exit()s; this line is unreachable.
         }
 
@@ -1232,9 +1264,38 @@ class RectorRunner implements RunnerInterface
      */
     private static function collectIniOverrideArgs(): array
     {
+        return self::collectIniOverrideArgsFrom(\ini_get_all(null, true));
+    }
+
+    /**
+     * Split out from collectIniOverrideArgs() so a test can force the
+     * ini_get_all()-failed branch directly, without needing the real builtin
+     * itself to return false (#156: no concrete trigger for that has been
+     * constructed in this daemon's own runtime -- plain CLI SAPI, no
+     * extension-name argument passed). $iniAll is exactly what
+     * \ini_get_all(null, true) returns: an array of directives, or false when
+     * it could not enumerate them at all -- previously collapsed by the
+     * caller's own `?: []` into "nothing to forward", indistinguishable from
+     * the genuinely-empty case.
+     *
+     * @param array<string, array<string, mixed>>|false $iniAll
+     * @return list<string>
+     */
+    private static function collectIniOverrideArgsFrom($iniAll): array
+    {
+        if ($iniAll === false) {
+            // Fail open (still forward nothing): a worker that boots with no
+            // -d overrides is better than one that fails to boot at all, but
+            // this must never look identical to the genuinely-empty case.
+            if (\defined('STDERR') && \is_resource(\STDERR)) {
+                @\fwrite(\STDERR, 'mcp-rector-warm: ini_get_all() could not enumerate ini directives; '
+                    . "no -d overrides will be forwarded to this warm worker (#156)\n");
+            }
+            $iniAll = [];
+        }
         $baseline = self::loadPristineIniBaseline();
         $args = [];
-        foreach (\ini_get_all(null, true) ?: [] as $name => $info) {
+        foreach ($iniAll as $name => $info) {
             if (!\is_array($info)) {
                 continue;
             }
