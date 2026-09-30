@@ -80,10 +80,13 @@ which the daemon then reboots.
 
 **Windows / no-`pcntl` fallback.** Where `pcntl_fork()` is unavailable
 (Windows always; `#18`'s `disable_functions` case elsewhere), there is no
-OS-process boundary to isolate a reboot in, so warming is not attempted:
-every call boots and runs Rector in its own fresh `php` subprocess
-(`runCold()`) -- correct, but without the warm speedup. See
-`src/RectorRunner.php:25-28`.
+copy-on-write snapshot of a booted container to isolate each call in, so by
+default each call gets a fresh, pre-booted standby `php` subprocess started
+right after the previous call returns (`runViaStandbyWorker()`, #108),
+letting the caller pay only for the analysis. `runCold()` -- boot and run in
+one fresh subprocess per call, with no pre-boot -- is now only the fallback
+when `MCP_RECTOR_WARM_NO_PCNTL=cold` restores the pre-#108 behaviour. See
+`RectorRunner`'s class docblock, in `src/RectorRunner.php`.
 
 **JSON-RPC over stdio, hand-rolled.** [ADR
 0001](decisions/0001-lsp-library-choice.md) is the full record; in short:
