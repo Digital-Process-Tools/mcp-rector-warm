@@ -6,6 +6,15 @@ This project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.7.2] - 2026-09-30
+
+### Fixed
+
+- TempCopySweeper (the `.rector-warm-<pid>` leftover cleanup) no longer decides staleness by pid liveness (`posix_kill`, a `tasklist` shell-out, or `/proc`) and no longer walks the whole project tree at server startup. A directory is now judged stale when its `.lock` file (held for the whole life of a run) can be taken non-blocking -- the OS releases every lock a dying process held, on every platform, including a `kill -9` -- or, if no `.lock` exists yet, once its mtime is older than a fixed grace period. This removes the pid-reuse and Windows `tasklist`-fragility class (#168) entirely, and there is no more startup tree walk to hold the depth/size caps or most of the symlink/junction checks that existed for it (#179). The sweep only ever considers a directory named exactly `.rector-warm-<digits>` (never a real project directory that merely shares the prefix), and only ever deletes one whose full contents are exactly its `.lock` file plus the one buffer-copy name recorded inside it -- anything else present leaves the whole directory untouched.
+- Upgrade note: temp directories left by a crashed server before this version (no `.lock`, or a `.lock` with no recorded basename) are never cleaned up by the new sweep -- delete `.rector-warm-<digits>` directories left next to an edited file by hand.
+
+- Fixed #184: with Xdebug loaded, a warm dry-run call could restart the PHP process using stale daemon argv (no `--dry-run`), running Rector for real over every path in the configured project and writing changes to disk. `RectorRunner::execute()` now sets `RECTOR_ALLOW_XDEBUG=1` for the duration of each call so Rector's own Xdebug restart never fires, restoring the prior value afterward. Affects the MCP tool call path and the LSP diagnostics path, which share the same runner.
+
 ## [0.7.1] - 2026-09-30
 
 ### Fixed
@@ -508,7 +517,8 @@ MCP `output` field now contains `file_diffs[].applied_rectors` + `diff` so consu
 - PHPUnit unit + integration tests covering boot, tool listing, warm reuse (`warm_boot: true` on second call).
 - Standalone CLI: `--working-dir`, `--config` flags pinned at server start.
 
-[Unreleased]: https://github.com/Digital-Process-Tools/mcp-rector-warm/compare/v0.7.1...HEAD
+[Unreleased]: https://github.com/Digital-Process-Tools/mcp-rector-warm/compare/v0.7.2...HEAD
+[0.7.2]: https://github.com/Digital-Process-Tools/mcp-rector-warm/releases/tag/v0.7.2
 [0.7.1]: https://github.com/Digital-Process-Tools/mcp-rector-warm/releases/tag/v0.7.1
 [0.7.0]: https://github.com/Digital-Process-Tools/mcp-rector-warm/releases/tag/v0.7.0
 [0.6.0]: https://github.com/Digital-Process-Tools/mcp-rector-warm/releases/tag/v0.6.0
