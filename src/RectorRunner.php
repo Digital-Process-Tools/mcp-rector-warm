@@ -752,31 +752,35 @@ class RectorRunner implements RunnerInterface
             // Grandchild: analyse in isolation, report the result over the socket, then
             // exit. This is a real forked OS process -- it owns a private
             // copy-on-write copy of the worker's memory, including the worker's
-            // stdio file descriptors -- which are NOT redirected (the worker itself
-            // still inherits the daemon's real stdin/stdout/stderr unredirected;
-            // attempted as a #31 follow-up and reverted after it interacted badly
-            // with PHP's own resource-refcount GC, see the commit that added this
-            // comment for the mechanism -- a real, open gap, not fixed here). A
-            // stray PHP warning/deprecation notice during analysis -- routine for
-            // PHPStan on real-world code -- must never land on a pipe something
-            // else is reading a protocol from. Close and reopen fd 0/1/2 onto
-            // /dev/null before running anything, in THIS grandchild at least: this
-            // process exits right after this call and never legitimately needs
-            // them, and $childSocket lives on its own fd above 2 so it is
-            // unaffected.
+            // stdio file descriptors, which are the daemon's real stdin/stdout/stderr
+            // (the worker inherits them unredirected; attempted as a #31 follow-up and
+            // reverted after it interacted badly with PHP's own resource-refcount GC).
+            // A stray PHP warning/deprecation notice during analysis -- routine for
+            // PHPStan on real-world code -- must never land on a pipe something else
+            // is reading a protocol from.
+            //
+            // The STDIN/STDOUT/STDERR constants must stay OPEN here, though (#192).
+            // PHPStan reads their runtime values when it builds PhpStorm-stub
+            // reflection for the stub file that declares them (on a PHPStan cache
+            // miss, e.g. the first run on a fresh machine): an open stream becomes
+            // constant('STDIN'), a closed one fails is_resource() and falls through
+            // to BuilderHelpers::normalizeValue(), which throws "Invalid value" --
+            // warm reported that where cold returned a diff. This grandchild used to
+            // fclose() all three and reopen fd 0/1/2 on /dev/null; PHP has no dup2(),
+            // so there is no way to move the fds without closing the constants.
+            // Instead: every byte PHP's output layer would write to fd 1 goes into a
+            // buffer that discards it (execute()'s own ob_start() nests inside it,
+            // and a fatal's flush at shutdown lands here too), and PHP's own error
+            // messages bound for fd 2 are switched off, as /dev/null had them. Not
+            // covered any more: code that writes to STDOUT/STDERR or php://stdout
+            // directly -- the same channel Rector's SymfonyStyle already had, since
+            // it opens php://stdout in the worker, before this fork.
             \fclose($parentSocket);
-            if (\defined('STDIN')) {
-                @\fclose(\STDIN);
+            \ob_start(static fn (): string => '');
+            \ini_set('log_errors', '0');
+            if (\strtolower((string) \ini_get('display_errors')) === 'stderr') {
+                \ini_set('display_errors', '0');
             }
-            if (\defined('STDOUT')) {
-                @\fclose(\STDOUT);
-            }
-            if (\defined('STDERR')) {
-                @\fclose(\STDERR);
-            }
-            @\fopen('/dev/null', 'rb');
-            @\fopen('/dev/null', 'wb');
-            @\fopen('/dev/null', 'wb');
 
             $exitCode = 0;
             try {
@@ -2483,6 +2487,8 @@ class RectorRunner implements RunnerInterface
      * project/composer-global dep (rector lives parallel under the same vendor dir).
      * Idempotent -- safe to call before bootInPlace() has ever run, e.g. from
      * configFileChanged().
+     *
+     * Rector's preload.php first, like cold bin/rector.php (#192) -- see preloadLikeCold().
      */
     private function ensureRectorAutoloaded(): void
     {
@@ -2491,11 +2497,56 @@ class RectorRunner implements RunnerInterface
         }
         // file = .../rector/rector/src/Bootstrap/RectorConfigsResolver.php → 3 levels up = package root
         $rectorPkgDir = dirname((new \ReflectionClass(RectorConfigsResolver::class))->getFileName(), 3);
+        $this->preloadLikeCold($rectorPkgDir);
         $scoperAutoload = $rectorPkgDir . '/vendor/scoper-autoload.php';
         if (!is_file($scoperAutoload)) {
             throw new \RuntimeException("scoper-autoload.php not found at: {$scoperAutoload}");
         }
         require_once $scoperAutoload;
+    }
+
+    /**
+     * Require the files Rector's preload.php requires, in its order, as cold
+     * bin/rector.php does before any other autoloader is loaded (#192). nikic/php-parser
+     * and phpstan/phpdoc-parser are not prefixed in Rector's build, so without this each
+     * of their classes is autoloaded on first use by whichever loader answers first --
+     * the project's Composer loader and phpstan.phar's both prepend themselves ahead of
+     * Rector's, and each can carry a different version. Measured on laravel/framework
+     * with an empty PHPStan cache: the warm worker took 103 php-parser classes
+     * (BuilderHelpers among them) from phpstan.phar and 15 from Rector's copy, and failed
+     * with "Invalid value"; cold took all 263 from Rector's copy.
+     *
+     * Not a plain require of preload.php: this process may already hold some classes of
+     * one of those packages from another copy (the MCP server's own mcp/sdk loads
+     * phpstan/phpdoc-parser from this package's vendor before any tool call), and
+     * redeclaring one is a fatal. Such a package is left as it is -- its mix already
+     * happened -- and the other one is still preloaded.
+     */
+    private function preloadLikeCold(string $rectorPkgDir): void
+    {
+        $preload = $rectorPkgDir . '/preload.php';
+        if (!is_file($preload) || !is_dir($rectorPkgDir . '/vendor')) {
+            return;
+        }
+        $namespaces = ['nikic/php-parser' => 'PhpParser\\', 'phpstan/phpdoc-parser' => 'PHPStan\\PhpDocParser\\'];
+        $declared = [...get_declared_classes(), ...get_declared_interfaces(), ...get_declared_traits()];
+        $loadable = [];
+        foreach ($namespaces as $package => $namespace) {
+            $own = realpath($rectorPkgDir . '/vendor/' . $package);
+            $loadable[$package] = $own !== false;
+            foreach ($declared as $name) {
+                if ($loadable[$package] && str_starts_with($name, $namespace)) {
+                    $file = (new \ReflectionClass($name))->getFileName();
+                    $loadable[$package] = $file !== false && str_starts_with((string) realpath($file), $own . DIRECTORY_SEPARATOR);
+                }
+            }
+        }
+        preg_match_all("#^require_once __DIR__ \. '(/vendor/([^/']+/[^/']+)/[^']+)';#m", (string) file_get_contents($preload), $requires, PREG_SET_ORDER);
+        foreach ($requires as [, $relative, $package]) {
+            if ($loadable[$package] ?? false) {
+                require_once $rectorPkgDir . $relative;
+            }
+        }
     }
 
     /**
