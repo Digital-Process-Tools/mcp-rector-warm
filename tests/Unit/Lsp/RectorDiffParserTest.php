@@ -88,6 +88,7 @@ final class RectorDiffParserTest extends TestCase
             'hasChange' => true,
             'changeFrom' => 2,
             'changeToExclusive' => 2,
+            'eol' => "\n",
         ]], $hunks);
     }
 
@@ -171,6 +172,48 @@ final class RectorDiffParserTest extends TestCase
 
         self::assertCount(2, $fixes);
         self::assertSame(['RectorA'], $fixes[0]['rectors']);
+        self::assertSame(['RectorC'], $fixes[1]['rectors']);
+    }
+
+    public function testBuildFixesPinsTheKnownAmbiguousLeftoverAttributionFromIssue154(): void
+    {
+        // #154: this is the SAME input shape as the test above --
+        // buildFixes()'s own inputs (diff, applied_rectors, changes[])
+        // cannot tell "RectorC produced hunk1" apart from "RectorA
+        // produced BOTH hunks, and changes[] only reported the one for
+        // hunk0" -- Rector's `--output-format=json` report exposes no
+        // per-rule hunk count that would settle it. The self-review
+        // comment right above the leftover-attribution code in
+        // buildFixes() already documented this exact ambiguity; #154
+        // filed it, and its own resolution accepted the residual
+        // false-positive rate as a presentation-layer (diagnostic label)
+        // risk rather than a correctness/security one, since narrowing
+        // the guard further needs data Rector does not currently expose.
+        // This test exists so a future change to the leftover heuristic
+        // does not silently alter this documented, accepted behaviour
+        // without anyone noticing -- it pins the CURRENT output, not a
+        // claim that the output is provably correct for this shape.
+        $diff = "--- Original\n+++ New\n"
+            . "@@ -70,10 +70,10 @@\n"
+            . " c1\n c2\n c3\n c4\n c5\n-removed_A\n+added_A\n c6\n c7\n c8\n c9\n"
+            . "@@ -90,5 +90,5 @@\n"
+            . " d1\n d2\n d3\n-removed_B\n+added_B\n d4\n";
+
+        // Same shape as RectorA producing BOTH hunks while changes[] only
+        // reports the line for hunk0 -- RectorC stands in for "some other
+        // rule that happened to apply but touched neither hunk itself".
+        $changes = [
+            ['rector' => 'RectorA', 'line' => 75],
+        ];
+
+        $fixes = RectorDiffParser::buildFixes($diff, ['RectorA', 'RectorC'], $changes);
+
+        self::assertCount(2, $fixes);
+        self::assertSame(['RectorA'], $fixes[0]['rectors']);
+        // Current, documented, accepted behaviour: hunk1 is attributed to
+        // the leftover rule RectorC -- which is WRONG if RectorA (not
+        // RectorC) is what actually produced hunk1, the exact scenario
+        // #154 describes and that buildFixes() cannot distinguish.
         self::assertSame(['RectorC'], $fixes[1]['rectors']);
     }
 

@@ -350,6 +350,51 @@ def test_did_open_on_an_already_clean_crlf_file_publishes_empty_diagnostics(serv
     assert notification["params"]["diagnostics"] == []
 
 
+def test_code_action_edit_applied_to_a_crlf_file_preserves_crlf_line_endings(server, project):
+    # #160: RectorDiffParser::hunkNewText() rejoins a hunk's kept lines with
+    # a hardcoded "\n". #91.3/#96 added CRLF fixtures and covered
+    # didOpen/diagnostics for them, but no test ever actually requested a
+    # codeAction and applied its edit against a real CRLF file -- so
+    # hunkNewText()'s own join was never exercised end to end. This test
+    # does exactly that and asserts the resulting text keeps the file's own
+    # CRLF convention throughout, not a mix of CRLF and bare LF.
+    path = project / "src" / "CrlfFixable.php"
+    original = path.read_bytes().decode("utf-8")
+    assert "\r\n" in original  # positive control: the fixture really is CRLF
+
+    uri = path.as_uri()
+    notification = did_open(server, uri)
+    diagnostic = notification["params"]["diagnostics"][0]
+
+    server.stdin.write(frame({
+        "jsonrpc": "2.0",
+        "id": 2,
+        "method": "textDocument/codeAction",
+        "params": {
+            "textDocument": {"uri": uri},
+            "range": diagnostic["range"],
+            "context": {"diagnostics": [diagnostic]},
+        },
+    }))
+    server.stdin.flush()
+    actions = read_frame(server.stdout)["result"]
+    quickfix = next(a for a in actions if a["title"].startswith("Apply Rector:"))
+    edit = quickfix["edit"]["changes"][uri][0]
+
+    result = apply_edit(original, edit)
+
+    lone_lf_in_new_text = edit["newText"].replace("\r\n", "").count("\n")
+    assert lone_lf_in_new_text == 0, (
+        "hunkNewText() joined the replacement with a bare \\n, losing the "
+        f"file's own CRLF convention: {edit['newText']!r}"
+    )
+    lone_lf_in_result = result.replace("\r\n", "").count("\n")
+    assert lone_lf_in_result == 0, (
+        "applying the edit produced a lone \\n not preceded by \\r -- "
+        f"mixed line endings in the result: {result!r}"
+    )
+
+
 @pytest.fixture
 def insert_only_project(tmp_path):
     dest = tmp_path / "insert-only-project"

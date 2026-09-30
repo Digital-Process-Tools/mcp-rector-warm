@@ -22,7 +22,7 @@ namespace Dpt\McpRectorWarm\Lsp;
 final class RectorDiffParser
 {
     /**
-     * @return list<array{oldStart: int, oldCount: int, newLines: list<string>, hasChange: bool, changeFrom: int|null, changeToExclusive: int|null}>
+     * @return list<array{oldStart: int, oldCount: int, newLines: list<string>, hasChange: bool, changeFrom: int|null, changeToExclusive: int|null, eol: string}>
      *   `hasChange` (#91.3) is false for a hunk whose body is entirely context
      *   lines -- Rector has been observed emitting exactly this for a
      *   line-ending-only (CRLF) difference. `changeFrom`/`changeToExclusive`
@@ -30,10 +30,22 @@ final class RectorDiffParser
      *   lines actually touch, narrower than the full `oldStart..oldStart+
      *   oldCount-1` span whenever the hunk carries unified-diff context
      *   lines (3 on each side, by default) -- both null when `hasChange` is
-     *   false.
+     *   false. `eol` (#160) is the ORIGINAL file's own line-ending
+     *   convention -- "\r\n" when any kept `-`/` ` line in the raw diff
+     *   still carries a trailing `\r` (this function only explodes on
+     *   "\n", so a CRLF source file's own lines keep it), "\n" otherwise.
+     *   Rector's pretty-printer emits newly ADDED (`+`) lines with a bare
+     *   "\n" regardless of the source file's convention, so `+` lines
+     *   cannot be used to detect it -- only `-`/` ` lines, which are
+     *   verbatim copies of the original file, can.
      */
     public static function parseHunks(string $diff): array
     {
+        // #160: detect the file's own line-ending convention once, from
+        // kept (`-`/` `) lines only -- see the `eol` doc above for why `+`
+        // lines are excluded.
+        $eol = preg_match('/^[- ].*\r$/m', $diff) === 1 ? "\r\n" : "\n";
+
         $hunks = [];
         $current = null;
         $oldLine = 0;
@@ -89,6 +101,7 @@ final class RectorDiffParser
                     'hasChange' => false,
                     'changeFrom' => null,
                     'changeToExclusive' => null,
+                    'eol' => $eol,
                 ];
                 $rawNew = [];
                 $oldLine = $oldStart;
@@ -111,11 +124,15 @@ final class RectorDiffParser
                 $current['hasChange'] = true;
                 $current['changeFrom'] ??= $oldLine;
                 $current['changeToExclusive'] = max($current['changeToExclusive'] ?? $oldLine, $oldLine);
-                $rawNew[] = ['pos' => $oldLine, 'text' => substr($line, 1), 'isAdd' => true];
+                // #160: strip any trailing \r a CRLF source line still
+                // carries (see the `eol` doc above) -- newLines stores bare
+                // text, and hunkNewText() re-adds the detected $eol itself,
+                // so a kept trailing \r here would double up into \r\r\n.
+                $rawNew[] = ['pos' => $oldLine, 'text' => rtrim(substr($line, 1), "\r"), 'isAdd' => true];
                 continue;
             }
             if ($marker === ' ') {
-                $rawNew[] = ['pos' => $oldLine, 'text' => substr($line, 1), 'isAdd' => false];
+                $rawNew[] = ['pos' => $oldLine, 'text' => rtrim(substr($line, 1), "\r"), 'isAdd' => false];
                 $oldLine++;
             }
         }
@@ -208,8 +225,13 @@ final class RectorDiffParser
         // the genuinely-unambiguous one-hunk/one-rule case this guard is
         // for. Narrowing further (e.g. cross-checking against hunk COUNT
         // per rule, which Rector's JSON report does not currently expose
-        // per-hunk) is a real follow-up, tracked as a trap.d fragment
-        // rather than attempted here.
+        // per-hunk) is a real follow-up -- tracked as #154, which pinned
+        // this exact ambiguity as a test (see
+        // RectorDiffParserTest::testBuildFixesPinsTheKnownAmbiguousLeftoverAttributionFromIssue154)
+        // and, per #154's own resolution, accepted the residual
+        // false-positive rate as a presentation-layer (diagnostic label)
+        // risk rather than a correctness/security one -- narrowing further
+        // needs data Rector's own report does not expose today.
         $attributed = [];
         foreach ($rectorsByHunk as $matched) {
             foreach ($matched as $rector) {
@@ -290,7 +312,7 @@ final class RectorDiffParser
     }
 
     /**
-     * @param array{oldStart: int, oldCount: int, newLines: list<string>} $hunk
+     * @param array{oldStart: int, oldCount: int, newLines: list<string>, eol: string} $hunk
      */
     private static function hunkNewText(array $hunk): string
     {
@@ -298,6 +320,11 @@ final class RectorDiffParser
             return '';
         }
 
-        return implode("\n", $hunk['newLines']) . "\n";
+        // #160: rejoin with the ORIGINAL file's own line-ending convention
+        // (parseHunks()'s `eol`), not a hardcoded "\n" -- a CRLF source file
+        // used to come back with the hunk's kept lines joined by a bare
+        // "\n" regardless, producing a mixed-ending result once applied
+        // against the rest of the (untouched, still-CRLF) file.
+        return implode($hunk['eol'], $hunk['newLines']) . $hunk['eol'];
     }
 }

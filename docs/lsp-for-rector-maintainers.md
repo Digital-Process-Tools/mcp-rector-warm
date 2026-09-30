@@ -168,11 +168,11 @@ for the command).
   "exactly one unattributed hunk + exactly one leftover rule" gate cannot
   tell that case apart from the genuinely-unambiguous one, and can attribute
   the wrong rule name to the hunk (recorded in
-  `trap.d/100.leftover-rule-ambiguity.md`). This is a presentation-layer
-  severity (a diagnostic label), not a correctness or security issue, and
-  Rector's own JSON report does not currently expose enough per-rule hunk
-  detail to close it without a report format change (see **Asks for
-  upstream** below).
+  `trap.d/100.leftover-rule-ambiguity.md`, filed and pinned by a test as
+  #154). This is a presentation-layer severity (a diagnostic label), not a
+  correctness or security issue, and Rector's own JSON report does not
+  currently expose enough per-rule hunk detail to close it without a report
+  format change (see **Asks for upstream** below).
 
 ## Numbers
 
