@@ -14,6 +14,7 @@ import json
 import os
 import shutil
 import subprocess
+import time
 from pathlib import Path
 
 import pytest
@@ -114,3 +115,58 @@ def test_exit_without_shutdown_gives_a_nonzero_exit_code(server):
     server.stdin.close()
 
     assert server.wait(timeout=10) != 0
+
+
+def test_initialize_does_not_walk_a_large_project_tree_before_reading_stdin(tmp_path):
+    # #179's own motivation: a real 136k-file project measured `initialize`
+    # at 1.4-3.6s versus 0.06s on this repo's own tiny fixture tree -- caused
+    # by TempCopySweeper::sweepTree(getcwd()) walking the whole workspace
+    # before the loop ever reads stdin (removed by #179's redesign, which
+    # replaces the startup tree walk with an flock()-based check that never
+    # touches directories it isn't already about to diagnose).
+    #
+    # This is a positive-control pair, not a bare "must not be slow": run
+    # against the pre-#179 code (TempCopySweeper::sweepTree still present
+    # and wired into bin/rector-warm-lsp), a 15,000-sibling-directory tree
+    # measured 1.19s for this same round trip versus 0.03s for an empty
+    # directory -- so a walk big enough to matter is what this asserts
+    # against, not an accident of this one tree's shape.
+    big_tree = tmp_path / "big-project"
+    big_tree.mkdir()
+    for i in range(15_000):
+        (big_tree / f"d{i}").mkdir()
+
+    proc = subprocess.Popen(
+        [php_binary(), str(BIN)],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        cwd=big_tree,
+    )
+    try:
+        started = time.monotonic()
+        proc.stdin.write(frame({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {"processId": None, "rootUri": None, "capabilities": {}},
+        }))
+        proc.stdin.flush()
+
+        response = read_frame(proc.stdout)
+        elapsed = time.monotonic() - started
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+        proc.wait(timeout=10)
+
+    assert response["id"] == 1
+    # Observed on this machine: pre-#179 ~1.19s on this tree, ~0.03s on an
+    # empty one; post-#179 ~0.05s on this tree. 0.5s leaves a wide margin
+    # above the fixed code's own measurement while staying far below the
+    # walk's, so a slower CI runner does not make this flaky in either
+    # direction.
+    assert elapsed < 0.5, (
+        f"initialize took {elapsed:.3f}s against a 15000-directory tree -- "
+        "this is the shape of a reintroduced startup tree walk (#179)"
+    )
