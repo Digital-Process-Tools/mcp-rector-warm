@@ -214,7 +214,16 @@ final class LspServer
                     // that would only ever refuse is worse than not
                     // advertising it, since a real editor may grey out
                     // other UI on the assumption an advertised command works.
-                    ...($this->diagnostics instanceof WorkspaceDiagnosticsSource ? [
+                    // #141: also gated on canApplyWorkspaceEdit -- docs/lsp.md
+                    // and docs/lsp-for-rector-maintainers.md always said the
+                    // advertisement required `workspace.applyEdit`, but the
+                    // code here only ever checked the diagnostics source
+                    // type, so a client that never declared it still saw the
+                    // command advertised (running it then refused with a
+                    // visible -32803, never silently, but the capability
+                    // should not be advertised to a client that cannot use
+                    // it at all -- see this array's own comment above).
+                    ...($this->diagnostics instanceof WorkspaceDiagnosticsSource && $this->canApplyWorkspaceEdit ? [
                         'executeCommandProvider' => ['commands' => [self::FIX_WORKSPACE_COMMAND]],
                     ] : []),
                 ],
@@ -835,6 +844,49 @@ final class LspServer
     }
 
     /**
+     * #141: `window/showMessage`, type 2 (Warning) per the LSP spec's
+     * MessageType enum -- a notification, not a request, so there is no
+     * reply to wait for or ignore.
+     */
+    private function showMessageWarning(string $message): array
+    {
+        return [
+            'jsonrpc' => '2.0',
+            'method' => 'window/showMessage',
+            'params' => ['type' => 2, 'message' => $message],
+        ];
+    }
+
+    /**
+     * #141: turns fixWorkspace's per-file `errors` into one human-readable
+     * warning naming every file that failed. `file` is only present on an
+     * error entry when the underlying source reported one (see
+     * RectorDiagnosticsSource::buildErrors()) -- falls back to the bare
+     * message when it is not, rather than losing the error entirely.
+     *
+     * @param list<array{message: string, line: int, file?: string}> $errors
+     */
+    private static function describeWorkspaceFixErrors(array $errors): string
+    {
+        $descriptions = array_map(
+            static function (array $error): string {
+                $file = $error['file'] ?? null;
+
+                return is_string($file) && $file !== ''
+                    ? sprintf('%s: %s', $file, $error['message'])
+                    : $error['message'];
+            },
+            $errors,
+        );
+
+        return sprintf(
+            'rector-warm.fixWorkspace: %d file(s) could not be fixed and were skipped: %s',
+            count($errors),
+            implode('; ', $descriptions),
+        );
+    }
+
+    /**
      * #111: how long isProgressCreateRefused() waits for the client's own
      * reply to `window/workDoneProgress/create` before giving up on it.
      * Second E2E review round, PR #128: a real client's reply arrives
@@ -1221,6 +1273,15 @@ final class LspServer
             } else {
                 $changes[$uri] = $edits;
             }
+        }
+
+        // #141: a file that fails (e.g. a syntax error) alongside others
+        // that succeed is skipped here, not refused -- see this method's own
+        // docblock. That used to answer plain success with no indication
+        // anything was skipped; now the failing file(s) are named in a
+        // `window/showMessage` (Warning) alongside the still-applied edit.
+        if ($outcome['errors'] !== []) {
+            $frames[] = $this->showMessageWarning(self::describeWorkspaceFixErrors($outcome['errors']));
         }
 
         $resultPayload = $skippedDirtyBuffers === [] ? null : ['skippedDirtyBuffers' => $skippedDirtyBuffers];

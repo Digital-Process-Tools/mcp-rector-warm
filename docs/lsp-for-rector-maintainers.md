@@ -71,7 +71,10 @@ an agent calling a tool:
   not necessarily the client's own string. A buffer that is edited back
   to match the saved file's content is still considered dirty until the
   client sends `didSave` or `didClose` for it -- there is no
-  content-equality check that would clear the flag early.
+  content-equality check that would clear the flag early. A file that fails
+  (e.g. a syntax error) alongside others that succeed is skipped, not
+  refused; since #141 the failing file(s) are named in a `window/showMessage`
+  (Warning) rather than looking like plain success.
 
 Editor setup for six clients (Neovim, Helix, Sublime Text, PhpStorm/LSP4IJ,
 plus the generic pattern) is in [Editor

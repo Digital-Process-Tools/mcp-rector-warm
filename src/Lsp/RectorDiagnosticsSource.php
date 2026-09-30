@@ -32,7 +32,7 @@ final class RectorDiagnosticsSource implements BufferDiagnosticsSource, Workspac
      * every `file_diffs` entry turned into fixes rather than just the
      * first.
      *
-     * @return array{files: array<string, list<array<string, mixed>>>, errors: list<array{message: string, line: int}>}
+     * @return array{files: array<string, list<array<string, mixed>>>, errors: list<array{message: string, line: int, file?: string}>}
      */
     public function diagnoseWorkspace(string $rootPath): array
     {
@@ -41,7 +41,7 @@ final class RectorDiagnosticsSource implements BufferDiagnosticsSource, Workspac
 
     /**
      * @param array<string, mixed>|CallToolResult $result
-     * @return array{files: array<string, list<array<string, mixed>>>, errors: list<array{message: string, line: int}>}
+     * @return array{files: array<string, list<array<string, mixed>>>, errors: list<array{message: string, line: int, file?: string}>}
      */
     private function interpretWorkspace(array|CallToolResult $result, string $rootPath): array
     {
@@ -434,8 +434,12 @@ final class RectorDiagnosticsSource implements BufferDiagnosticsSource, Workspac
      * "line":...}`) and a bare string entry, since nothing upstream pins
      * Rector's own error-entry shape across versions.
      *
+     * #141: `file` is present only when the raw entry named one (Rector's
+     * own multi-file/workspace report does; a single-file report does not
+     * need to and may not).
+     *
      * @param mixed $rawErrors
-     * @return list<array{message: string, line: int}>
+     * @return list<array{message: string, line: int, file?: string}>
      */
     private static function buildErrors(mixed $rawErrors): array
     {
@@ -448,14 +452,25 @@ final class RectorDiagnosticsSource implements BufferDiagnosticsSource, Workspac
             if (is_array($raw)) {
                 $message = is_string($raw['message'] ?? null) ? $raw['message'] : 'Rector reported an error.';
                 $line = is_int($raw['line'] ?? null) ? $raw['line'] : 0;
+                $file = is_string($raw['file'] ?? null) && $raw['file'] !== '' ? $raw['file'] : null;
             } elseif (is_string($raw)) {
                 $message = $raw;
                 $line = 0;
+                $file = null;
             } else {
                 continue;
             }
 
-            $errors[] = ['message' => $message, 'line' => $line];
+            // #141: preserved when Rector's own report names the file an
+            // error belongs to -- needed for `diagnoseWorkspace()`'s
+            // multi-file case, where a bare message alone cannot say WHICH
+            // file among several failed. Absent for the single-file
+            // diagnose() path's own use of this same helper; harmless
+            // there, since that caller already knows the file from its own
+            // $absolutePath argument and never reads this key.
+            $errors[] = $file !== null
+                ? ['message' => $message, 'line' => $line, 'file' => $file]
+                : ['message' => $message, 'line' => $line];
         }
 
         return $errors;
