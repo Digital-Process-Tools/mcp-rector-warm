@@ -168,6 +168,39 @@ final class WarmSession
         }
     }
 
+    /**
+     * The files behind declared watch paths (MCP_RECTOR_WARM_SESSION_WATCH):
+     * a directory stands for every file under it, whatever its extension; a
+     * file stands for itself, and is kept even while it does not exist, so
+     * creating it later still makes the session stale. Record each with
+     * recordRead() when the session starts.
+     *
+     * @param list<string> $paths absolute
+     * @return list<string>
+     */
+    public static function watchedFiles(array $paths): array
+    {
+        $files = [];
+        foreach ($paths as $path) {
+            $path = Path::normalise($path);
+            if (!\is_dir($path)) {
+                $files[] = $path;
+
+                continue;
+            }
+            $iterator = new \RecursiveIteratorIterator(
+                new \RecursiveDirectoryIterator($path, \FilesystemIterator::SKIP_DOTS),
+            );
+            foreach ($iterator as $file) {
+                if ($file instanceof \SplFileInfo && $file->isFile()) {
+                    $files[] = Path::normalise($file->getPathname());
+                }
+            }
+        }
+
+        return \array_values(\array_unique($files));
+    }
+
     public function calls(): int
     {
         return $this->calls;

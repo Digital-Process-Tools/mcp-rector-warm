@@ -24,7 +24,8 @@ final class RectorRunnerSessionTest extends TestCase
         $this->file = \sys_get_temp_dir() . '/runner-session-' . \bin2hex(\random_bytes(6)) . '.php';
         \file_put_contents($this->file, '<?php class RunnerSessionFixture {}');
         $this->previousEnv = \getenv(RectorRunner::SESSION_ENV);
-        \putenv(RectorRunner::SESSION_ENV);
+        // Switched on (it is opt-in), so each routing test below is about the call, not the switch.
+        \putenv(RectorRunner::SESSION_ENV . '=1');
     }
 
     protected function tearDown(): void
@@ -72,16 +73,49 @@ final class RectorRunnerSessionTest extends TestCase
         self::assertNull($this->candidate($this->argv('--', $this->file . '.missing'), true));
     }
 
-    public function testTheSwitchTurnsTheSessionOff(): void
+    public function testTheSessionIsOffUnlessSwitchedOn(): void
     {
-        foreach (['0', 'off', 'false', 'no', ' OFF '] as $value) {
+        // PR #189 review: opt-in. Unset, empty, 0 and anything unrecognised keep it off.
+        \putenv(RectorRunner::SESSION_ENV);
+        self::assertTrue(RectorRunner::sessionSwitchedOff());
+        self::assertNull($this->candidate($this->argv('--', $this->file), true));
+        foreach (['', '0', 'off', 'false', 'no', 'maybe'] as $value) {
             \putenv(RectorRunner::SESSION_ENV . '=' . $value);
             self::assertTrue(RectorRunner::sessionSwitchedOff(), $value);
             self::assertNull($this->candidate($this->argv('--', $this->file), true), $value);
         }
-        // Positive control: any other value leaves it on.
-        \putenv(RectorRunner::SESSION_ENV . '=1');
-        self::assertFalse(RectorRunner::sessionSwitchedOff());
-        self::assertSame($this->file, $this->candidate($this->argv('--', $this->file), true));
+        // Positive control: switched on, the same call goes to the session.
+        foreach (['1', 'on', 'true', 'yes', ' ON '] as $value) {
+            \putenv(RectorRunner::SESSION_ENV . '=' . $value);
+            self::assertFalse(RectorRunner::sessionSwitchedOff(), $value);
+            self::assertSame($this->file, $this->candidate($this->argv('--', $this->file), true), $value);
+        }
+    }
+
+    public function testWatchPathsAreSplitOnPathSeparatorAndResolvedAgainstTheProject(): void
+    {
+        $previous = \getenv(RectorRunner::SESSION_WATCH_ENV);
+        \putenv(RectorRunner::SESSION_WATCH_ENV . '=config' . \PATH_SEPARATOR . ' ' . \PATH_SEPARATOR . '/abs/templates/');
+        try {
+            self::assertSame(['/p/config', '/abs/templates'], RectorRunner::sessionWatchPaths('/p'));
+            \putenv(RectorRunner::SESSION_WATCH_ENV);
+            self::assertSame([], RectorRunner::sessionWatchPaths('/p'));
+        } finally {
+            \putenv($previous === false ? RectorRunner::SESSION_WATCH_ENV : RectorRunner::SESSION_WATCH_ENV . '=' . $previous);
+        }
+    }
+
+    public function testTheSessionRetiresOnItsOwnMemoryOrCallCountWhateverMemoryLimitSays(): void
+    {
+        $mb = 1024 * 1024;
+        // Must not fire: under both caps, and memory_limit -1 as both bins set it.
+        self::assertNull(RectorRunner::sessionRetireReason(10, 100 * $mb, '-1', 512, 250));
+        // Must fire: over its own memory cap although memory_limit is unlimited.
+        self::assertStringContainsString('MB', (string) RectorRunner::sessionRetireReason(10, 600 * $mb, '-1', 512, 250));
+        // Must fire: after the configured number of calls.
+        self::assertStringContainsString('250 calls', (string) RectorRunner::sessionRetireReason(250, 100 * $mb, '-1', 512, 250));
+        // Still honoured: 75% of a finite memory_limit.
+        self::assertNotNull(RectorRunner::sessionRetireReason(1, 200 * $mb, '256M', 512, 250));
+        self::assertNull(RectorRunner::sessionRetireReason(1, 100 * $mb, '256M', 512, 250));
     }
 }

@@ -169,6 +169,22 @@ final class DirectorySnapshotTest extends TestCase
         self::assertSame($this->root . '/src', $snapshot->firstChange());
     }
 
+    public function testAnyNewFileIsAChangeUnderAWatchRoot(): void
+    {
+        // MCP_RECTOR_WARM_SESSION_WATCH: a custom rule may read JSON, templates,
+        // anything -- every name counts there, whatever its extension.
+        \mkdir($this->root . '/config');
+        $snapshot = new DirectorySnapshot([$this->root], [], [], ['php'], 100_000, [$this->root . '/config']);
+        $snapshot->refresh();
+        $this->tick();
+        \file_put_contents($this->root . '/src/notes.md', 'not a PHP source');
+        self::assertNull($snapshot->firstChange(), 'outside the watch root a .md file does not count');
+
+        \file_put_contents($this->root . '/config/events.json', '{}');
+
+        self::assertSame($this->root . '/config', $snapshot->firstChange());
+    }
+
     public function testAnExcludedDirectoryIsNotWatched(): void
     {
         \mkdir($this->root . '/cache');

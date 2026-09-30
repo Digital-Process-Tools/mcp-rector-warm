@@ -149,6 +149,47 @@ final class WarmSessionTest extends TestCase
         @\rmdir($this->dir . '/lib/cache');
     }
 
+    public function testDeclaredWatchPathsExpandToEveryFileAndKeepMissingOnes(): void
+    {
+        \mkdir($this->dir . '/lib/events/deep', 0o777, true);
+        \file_put_contents($this->dir . '/lib/events/a.json', '{}');
+        \file_put_contents($this->dir . '/lib/events/deep/b.tpl', 'x');
+        $missing = $this->dir . '/lib/later.json';
+
+        $files = WarmSession::watchedFiles([$this->dir . '/lib/events', $missing]);
+        \sort($files);
+
+        self::assertSame([$this->dir . '/lib/events/a.json', $this->dir . '/lib/events/deep/b.tpl', $missing], $files);
+        @\unlink($this->dir . '/lib/events/deep/b.tpl');
+        @\unlink($this->dir . '/lib/events/a.json');
+        @\rmdir($this->dir . '/lib/events/deep');
+        @\rmdir($this->dir . '/lib/events');
+    }
+
+    public function testAWatchedFileThatChangesOrAppearsMakesTheSessionStale(): void
+    {
+        $session = $this->session();
+        $json = $this->write('lib/events.json', '{"a":1}');
+        $later = $this->dir . '/lib/later.json';
+        foreach (WarmSession::watchedFiles([$json, $later]) as $file) {
+            $session->recordRead($file);
+        }
+        self::assertNull($session->staleReason());
+
+        \file_put_contents($json, '{"a":2}');
+        self::assertStringContainsString($json, (string) $session->staleReason());
+
+        $fresh = $this->session();
+        foreach (WarmSession::watchedFiles([$later]) as $file) {
+            $fresh->recordRead($file);
+        }
+        self::assertNull($fresh->staleReason());
+        \file_put_contents($later, '{}');
+        self::assertStringContainsString($later, (string) $fresh->staleReason());
+        @\unlink($later);
+        @\unlink($this->dir . '/lib/events.json');
+    }
+
     public function testADirectoryChangeMakesTheSessionStale(): void
     {
         $snapshot = new DirectorySnapshot([$this->dir], [], [], ['php']);

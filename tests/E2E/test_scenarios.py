@@ -35,6 +35,10 @@ Scenario format (YAML) -- see CONTRIBUTING.md for a worked example:
                                    #   cold oracle has no such deadline, so a
                                    #   scenario using this needs oracle: false for
                                    #   any call step it deliberately times out.
+  session: true                    # optional (#185): switch the session child on for
+                                   #   this scenario (MCP_RECTOR_WARM_SESSION=1) unless the
+                                   #   suite runs with MCP_RECTOR_WARM_SESSION=0
+  env: {NAME: value}               # optional: extra environment for the SERVER only
   files: {rel/path.php: source}    # optional: files written on top
   bootstrap_files: [rel/path.php]  # optional: paths the config registers via
                                    #   withBootstrapFiles() -- like rector.php itself
@@ -96,8 +100,8 @@ import yaml
 from mcp_harness import (
     EXPECT_COLD_EVERY_CALL,
     REPO,
-    SESSION_EXPECTED,
     SESSION_LOG_ENV,
+    SESSION_OPT_OUT,
     SESSION_TERMINAL_EVENTS,
     assert_no_zombie_descendants,
     exit_record,
@@ -105,6 +109,7 @@ from mcp_harness import (
     normalise,
     open_server,
     run_cold,
+    session_active,
     session_events,
     stderr_size,
     stderr_tail,
@@ -139,7 +144,10 @@ return RectorConfig::configure()
     ]);
 """
 
-TOP_KEYS = {"description", "xfail", "fixture", "config", "oracle", "php_ini", "call_timeout", "files", "bootstrap_files", "steps"}
+TOP_KEYS = {
+    "description", "xfail", "fixture", "config", "oracle", "php_ini", "call_timeout", "files", "bootstrap_files", "steps",
+    "session", "env",
+}
 STEP_KINDS = {"write", "edit", "delete", "rename", "call"}
 CALL_KEYS = {"call", "dry_run", "expect"}
 EXPECT_KEYS = {
@@ -319,6 +327,7 @@ async def call_step(
     first_call: bool,
     where: str,
     expect_reboot: bool = False,
+    session_on: bool = False,
 ) -> None:
     """One rector_process call, checked against the cold oracle and the step's 'expect'."""
     rel = step["call"]
@@ -355,11 +364,11 @@ async def call_step(
 
     expect = step.get("expect") or {}
     if "session" in expect:
-        if SESSION_EXPECTED:
+        if session_on:
             check_session(session_events(server.record_dir, log_offset, wait_for_terminal=True), expect["session"], where)
         else:
-            # No pcntl, or MCP_RECTOR_WARM_SESSION=0: the switch must really be
-            # off, so not one session line may appear.
+            # No pcntl, or the session off: the switch must really be off, so
+            # not one session line may appear.
             assert session_events(server.record_dir, log_offset, wait_for_terminal=False) == [], (
                 f"{where}: the session is off here, yet the server logged session events"
             )
@@ -389,7 +398,7 @@ async def call_step(
         # persistent worker for its whole life (RectorRunner's own class
         # docblock), so more than one live descendant here is itself a finding,
         # not only a zombie one. #185: plus the worker's one session child.
-        assert_no_zombie_descendants(server.record_dir, max_live=2 if SESSION_EXPECTED else 1)
+        assert_no_zombie_descendants(server.record_dir, max_live=2 if session_on else 1)
 
 
 @pytest.mark.parametrize(("scenario_file", "data"), collect())
@@ -400,6 +409,10 @@ def test_scenario(scenario_file: Path, data: dict[str, Any], tmp_path: Path) -> 
     call_steps = [step for step in data["steps"] if "call" in step]
     oracle = data.get("oracle", True)
     watched_config_paths = CONFIG_FILE_NAMES | set(data.get("bootstrap_files") or [])
+    session_on = session_active(bool(data.get("session")))
+    server_env = {**SESSION_LOG_ENV, **{str(k): str(v) for k, v in (data.get("env") or {}).items()}}
+    if data.get("session") and not SESSION_OPT_OUT:
+        server_env["MCP_RECTOR_WARM_SESSION"] = "1"
 
     async def run() -> tuple[int, list[Exception]]:
         calls_made = 0
@@ -407,7 +420,7 @@ def test_scenario(scenario_file: Path, data: dict[str, Any], tmp_path: Path) -> 
         config_touched_since_last_call = False
         async with open_server(
             tree.root, record, config if config.exists() else None, data.get("php_ini"), data.get("call_timeout"),
-            extra_env=SESSION_LOG_ENV,
+            extra_env=server_env,
         ) as server:
             for i, step in enumerate(data["steps"]):
                 where = f"{scenario_file.name} step {i}"
@@ -434,6 +447,7 @@ def test_scenario(scenario_file: Path, data: dict[str, Any], tmp_path: Path) -> 
                     await call_step(
                         server, step, cold_tree, tree.root, in_tree_calls == 0, where,
                         expect_reboot=config_touched_since_last_call,
+                        session_on=session_on,
                     )
                     config_touched_since_last_call = False
                     calls_made += 1

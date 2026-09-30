@@ -41,7 +41,7 @@ final class DependencyFileTracker
      * path => [stat signature (size, mtime, inode) or null, content sha1 or
      * null, recorded-at unix timestamp].
      *
-     * @var array<string, array{0: array{int, int, int}|null, 1: string|null, 2: int}>
+     * @var array<string, array{0: array{int, int, int, int}|null, 1: string|null, 2: int}>
      */
     private array $tracked = [];
 
@@ -195,7 +195,14 @@ final class DependencyFileTracker
      * call path, and a Windows-specific discriminator is deferred to
      * whoever does that wiring).
      *
-     * @return array{int, int, int}|null
+     * PR #189 finding B: ctime is part of the signature. A same-size edit whose
+     * mtime is then put back (touch -r, cp -p, rsync -t --inplace, tar -x)
+     * leaves size, mtime and inode equal, and past the racy window no hash is
+     * taken; no user tool can set ctime back, so such an edit still changes the
+     * signature. (On Windows ctime is the creation time, which an edit does
+     * not move -- no worse there than without it; the session needs pcntl.)
+     *
+     * @return array{int, int, int, int}|null
      */
     private function sig(string $path): ?array
     {
@@ -204,7 +211,7 @@ final class DependencyFileTracker
             return null;
         }
 
-        return [$stat['size'], $stat['mtime'], $stat['ino']];
+        return [$stat['size'], $stat['mtime'], $stat['ino'], $stat['ctime']];
     }
 
     private function hash(string $path): ?string

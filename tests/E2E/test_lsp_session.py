@@ -20,7 +20,7 @@ from pathlib import Path
 
 import pytest
 
-from mcp_harness import NO_PCNTL_PLATFORM, SESSION_EXPECTED, SESSION_LOG_PREFIX, SESSION_TERMINAL_EVENTS
+from mcp_harness import NO_PCNTL_PLATFORM, SESSION_LOG_PREFIX, SESSION_OPT_OUT, SESSION_TERMINAL_EVENTS, session_active
 from test_lsp_initialize import BIN, frame, php_binary, read_frame
 
 REPO = Path(__file__).resolve().parents[2]
@@ -213,7 +213,8 @@ def test_a_buffer_copy_is_served_from_the_session_and_leaves_nothing_behind_in_i
         proc = subprocess.Popen(
             [php_binary(), str(BIN), f"--working-dir={project}"],
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=errlog,
-            env={**os.environ, "MCP_RECTOR_WARM_SESSION_LOG": "1"},
+            env={**os.environ, "MCP_RECTOR_WARM_SESSION_LOG": "1",
+                 **({} if SESSION_OPT_OUT else {"MCP_RECTOR_WARM_SESSION": "1"})},
         )
         try:
             send(proc, {"jsonrpc": "2.0", "id": 1, "method": "initialize",
@@ -249,7 +250,7 @@ def test_a_buffer_copy_is_served_from_the_session_and_leaves_nothing_behind_in_i
 
     events = terminal_events(log, 6)
     terminals = [event for event, _ in events if event in SESSION_TERMINAL_EVENTS]
-    if not SESSION_EXPECTED:
+    if not session_active(True):
         assert events == [], f"the session is off, yet it logged: {events!r}"
         return
     # Leaf, Mid, the buffer (forked from the session), Leaf again, saved Mid, Leaf.

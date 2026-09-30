@@ -34,12 +34,24 @@ namespace Dpt\McpRectorWarm\Warm;
  */
 final class DirectorySnapshot
 {
+    /** Hidden entries skipped; only PHP-source extensions count. */
+    private const PLAIN = 0;
+
+    /** Hidden entries count too (a directory PHPStan scans for symbols). */
+    private const FULL = 1;
+
+    /** Hidden entries and every file count (MCP_RECTOR_WARM_SESSION_WATCH). */
+    private const WATCH = 2;
+
     /**
-     * dir => [mtime, listing hash, subdirectories to walk, recorded-at, hidden entries count].
+     * dir => [mtime, listing hash, subdirectories to walk, recorded-at, mode].
      *
-     * @var array<string, array{0: int, 1: string, 2: list<string>, 3: int, 4: bool}>
+     * @var array<string, array{0: int, 1: string, 2: list<string>, 3: int, 4: int}>
      */
     private array $dirs = [];
+
+    /** @var list<string> */
+    private array $watchRoots;
 
     /** @var list<string> */
     private array $roots;
@@ -58,6 +70,8 @@ final class DirectorySnapshot
      * @param list<string> $fullRoots walked with hidden entries included
      * @param list<string> $excluded never walked, never listed (vendor dirs, caches)
      * @param list<string> $extensions file extensions whose names count, without the dot
+     * @param list<string> $watchRoots declared inputs of custom rules
+     *   (MCP_RECTOR_WARM_SESSION_WATCH): every file name counts, whatever its extension
      */
     public function __construct(
         array $roots,
@@ -65,7 +79,9 @@ final class DirectorySnapshot
         array $excluded,
         array $extensions,
         private readonly int $maxDirectories = 100_000,
+        array $watchRoots = [],
     ) {
+        $this->watchRoots = self::normalise($watchRoots);
         $this->fullRoots = self::normalise($fullRoots);
         $this->roots = self::normalise($roots);
         $this->excluded = self::normalise($excluded);
@@ -89,7 +105,7 @@ final class DirectorySnapshot
         $previous = $this->dirs;
         $this->dirs = [];
         \clearstatcache();
-        foreach ([...$this->fullRoots, ...$this->roots] as $root) {
+        foreach ([...$this->watchRoots, ...$this->fullRoots, ...$this->roots] as $root) {
             $this->walk($root, $previous);
         }
     }
@@ -101,7 +117,7 @@ final class DirectorySnapshot
     public function firstChange(): ?string
     {
         \clearstatcache();
-        foreach ($this->dirs as $dir => [$mtime, $hash, , $recordedAt, $hidden]) {
+        foreach ($this->dirs as $dir => [$mtime, $hash, , $recordedAt, $mode]) {
             $stat = @\stat($dir);
             if ($stat === false) {
                 return $dir;
@@ -109,7 +125,7 @@ final class DirectorySnapshot
             if ($stat['mtime'] === $mtime && !self::racy($mtime, $recordedAt)) {
                 continue;
             }
-            $listing = $this->scan($dir, $hidden);
+            $listing = $this->scan($dir, $mode);
             if ($listing === null || $listing[0] !== $hash) {
                 return $dir;
             }
@@ -128,7 +144,7 @@ final class DirectorySnapshot
     }
 
     /**
-     * @param array<string, array{0: int, 1: string, 2: list<string>, 3: int, 4: bool}> $previous
+     * @param array<string, array{0: int, 1: string, 2: list<string>, 3: int, 4: int}> $previous
      */
     private function walk(string $dir, array $previous): void
     {
@@ -145,16 +161,16 @@ final class DirectorySnapshot
                 $this->maxDirectories,
             ));
         }
-        $hidden = $this->isUnderFullRoot($dir);
+        $mode = $this->modeOf($dir);
         $old = $previous[$dir] ?? null;
-        if ($old !== null && $old[0] === $stat['mtime'] && $old[4] === $hidden && !self::racy($old[0], $old[3])) {
+        if ($old !== null && $old[0] === $stat['mtime'] && $old[4] === $mode && !self::racy($old[0], $old[3])) {
             $this->dirs[$dir] = $old;
         } else {
-            $listing = $this->scan($dir, $hidden);
+            $listing = $this->scan($dir, $mode);
             if ($listing === null) {
                 return;
             }
-            $this->dirs[$dir] = [$stat['mtime'], $listing[0], $listing[1], \time(), $hidden];
+            $this->dirs[$dir] = [$stat['mtime'], $listing[0], $listing[1], \time(), $mode];
         }
         foreach ($this->dirs[$dir][2] as $subdir) {
             $this->walk($subdir, $previous);
@@ -164,8 +180,9 @@ final class DirectorySnapshot
     /**
      * @return array{0: string, 1: list<string>}|null listing hash and subdirectories, or null when unreadable
      */
-    private function scan(string $dir, bool $hidden): ?array
+    private function scan(string $dir, int $mode): ?array
     {
+        $hidden = $mode !== self::PLAIN;
         $entries = @\scandir($dir);
         if ($entries === false) {
             return null;
@@ -185,6 +202,10 @@ final class DirectorySnapshot
                 if (!\is_link($path)) {
                     $subdirs[] = $path;
                 }
+                continue;
+            }
+            if ($mode === self::WATCH) {
+                $names[] = 'f:' . $entry;
                 continue;
             }
             $lower = \strtolower($entry);
@@ -221,15 +242,20 @@ final class DirectorySnapshot
         return false;
     }
 
-    private function isUnderFullRoot(string $path): bool
+    private function modeOf(string $path): int
     {
+        foreach ($this->watchRoots as $root) {
+            if (Path::isUnder($path, $root)) {
+                return self::WATCH;
+            }
+        }
         foreach ($this->fullRoots as $root) {
             if (Path::isUnder($path, $root)) {
-                return true;
+                return self::FULL;
             }
         }
 
-        return false;
+        return self::PLAIN;
     }
 
     /**

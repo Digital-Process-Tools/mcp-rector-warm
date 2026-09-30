@@ -1,4 +1,5 @@
 description: "#185: the session child keeps PHPStan state across calls, and a parent class, an interface and a trait edited on disk each force a fresh session (must fire), while a repeat call and an unrelated edit do not (must not fire)."
+session: true
 config: |
   <?php
 

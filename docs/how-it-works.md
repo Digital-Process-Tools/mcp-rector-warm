@@ -27,14 +27,18 @@ Limits:
 
 Forking every call from the pristine worker keeps each call isolated, but it throws away everything a call learned. On a large project that is most of a warm call: PHPStan reflecting the same dependency classes, and project rules rebuilding the same indexes, every time.
 
-So the worker forks **one long-lived session child** and sends it every single-file dry run. The session analyses in-process and keeps those caches. Before each call it checks that nothing it relied on has changed:
+With `MCP_RECTOR_WARM_SESSION=1` in the server's environment, the worker forks **one long-lived session child** and sends it every single-file dry run. The session analyses in-process and keeps those caches. **It is off by default**: read the next warning before turning it on.
+
+> **With the session on, inputs a custom rule reads by itself at call time are not watched, and can go stale.** A rule whose `refactor()` does `file_get_contents()`, `glob()` or `json_decode()` on some file and keeps the result in a static builds that index once per session, not once per call. Without the session, every call started from a pristine worker whose static was still empty, so the rule re-read its inputs each time. With it, an edit to those files is not seen until the session is replaced. Declare such inputs with `MCP_RECTOR_WARM_SESSION_WATCH` (below), or leave the session off. This is not the same as what a rule reads while `rector.php` loads: that is pinned in the pristine worker with or without the session.
+
+Before each call the session checks that nothing it relied on has changed:
 
 - every file PHPStan parsed (parent classes, interfaces, traits, anything reflected). The hook is a decorator on PHPStan's own `pathRoutingParser` service, which is the parser every BetterReflection source locator, the PHPDoc resolver and the trait handler go through;
 - every file PHP included during a call, and every file a call analysed;
 - the files under `withAutoloadPaths()` and PHPStan `scanDirectories`, which PHPStan scans for symbols wholesale, plus Composer's metadata (`vendor/composer/installed.json`, `autoload_*.php`);
 - the listing of every project directory. A class lookup that found nothing is remembered by PHPStan and by most autoloaders, so a class file created later would otherwise never be seen.
 
-A file is compared by size, mtime and inode, plus a content hash when the mtime is within a second of when the file was recorded. If anything differs, the session exits and the worker forks a fresh one from the still-pristine worker. That fresh session costs what the fork always cost.
+A file is compared by size, mtime, inode and ctime, plus a content hash when the mtime is within a second of when the file was recorded. The ctime catches a same-size edit whose mtime was put back (`touch -r`, `cp -p`, `rsync -t --inplace`). If anything differs, the session exits and the worker forks a fresh one from the still-pristine worker. That fresh session costs what the fork always cost.
 
 Some calls never run inside the session:
 
@@ -42,16 +46,18 @@ Some calls never run inside the session:
 - **A file whose classes nothing else finds.** A cold run on another file cannot see such a class. If the session analysed the file, it would keep the class for later calls. These calls are declined and fork from the pristine worker. Examples: a class outside the autoload paths with no autoloader entry, or a second declaration of an existing class.
 - **An editor buffer's temp copy** (LSP, #106) declares the same class as the saved file. When PHPStan's standard locators find every class in it, a cold run takes those classes from the saved file, as the session does. The buffer then runs in a child forked from the session: it gets the warm caches, and whatever the buffer adds dies with that child. Otherwise it forks from the pristine worker.
 
-What the session cannot see, and a cold run would: inputs that are not PHP sources read through PHPStan's parser or PHP's `include`. Examples are a template, XML or JSON file a custom rule reads at Rector time, an environment variable, or the clock. Also a file created in a hidden directory or with an extension other than `.php`, `.inc` or your configured file extensions, outside the autoload paths. The pristine worker already had the same blind spot for anything it read at boot.
+What the session cannot see, and a cold run would: inputs that are not read through PHPStan's parser or PHP's `include`, unless declared. Examples are a PHP, template, XML or JSON file a custom rule reads with `file_get_contents()` at call time, an environment variable, or the clock. Also a file created in a hidden directory or with an extension other than `.php`, `.inc` or your configured file extensions, outside the autoload paths.
+
+**Declaring such inputs.** `MCP_RECTOR_WARM_SESSION_WATCH` lists files or directories, relative to the project (or absolute), separated like `PATH` (`:` on macOS/Linux). Every file under a listed directory, whatever its extension, is tracked like a parsed PHP file: a changed, created or deleted file there starts a fresh session. A listed file that does not exist yet is watched too. Example: `MCP_RECTOR_WARM_SESSION_WATCH=config:src/Events`.
 
 Limits and costs:
 
 - **An edited file in the tracked set starts a new session.** Editing the file you keep re-checking, or any file under `withAutoloadPaths()`, therefore gives no speed-up on the next call, but costs no more than before.
 - **Checking costs one `stat()` per tracked file and per project directory** before every call. That is a few milliseconds on a small project and about 50-90 ms on a tree with 16-26k directories. More than 100,000 directories turns the session off.
-- **Memory**: the session holds the analysis caches. It retires itself after a call once it uses 75% of `memory_limit`.
+- **Memory**: the session holds the analysis caches, and they grow with every large file analysed. It retires itself after a call once its own memory passes `MCP_RECTOR_WARM_SESSION_MAX_MB` (default 512), after `MCP_RECTOR_WARM_SESSION_MAX_CALLS` calls (default 250), or past 75% of a finite `memory_limit`. The next call starts a fresh session.
 - **No pcntl, no session.** Windows and builds without `pcntl` keep the per-call standby worker described below.
 
-`MCP_RECTOR_WARM_SESSION=0` in the server's environment turns the session off: every call forks from the pristine worker, as before #185. `MCP_RECTOR_WARM_SESSION_LOG=1` makes the worker write one stderr line per call saying what served it (`serve`, `fork`, `decline`) and why a session was replaced (`respawn: changed: <file>`). If the hook does not fit an installed Rector or PHPStan, the session turns itself off at start with a `session disable:` line on stderr, and every call forks as before.
+Without `MCP_RECTOR_WARM_SESSION=1` (or with `=0`), every call forks from the pristine worker, as before #185. `MCP_RECTOR_WARM_SESSION_LOG=1` makes the worker write one stderr line per call saying what served it (`serve`, `fork`, `decline`) and why a session was replaced (`respawn: changed: <file>`, `retire: <reason>`). If the hook does not fit an installed Rector or PHPStan, the session turns itself off at start with a `session disable:` line on stderr, and every call forks as before.
 
 ## 2. Parallel mode forcibly disabled (`--debug` flag)
 

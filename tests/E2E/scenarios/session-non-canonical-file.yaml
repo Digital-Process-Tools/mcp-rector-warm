@@ -1,4 +1,5 @@
 description: "#185: a file whose class no locator would find without it (outside the autoload paths, no autoloader entry) is run from the pristine worker, never inside the session, so its class cannot leak into a later call."
+session: true
 files:
   src/Base.php: |
     <?php

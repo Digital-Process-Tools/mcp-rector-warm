@@ -7,6 +7,7 @@ namespace Dpt\McpRectorWarm;
 use Dpt\McpRectorWarm\Support\ProcessTree;
 use Dpt\McpRectorWarm\Warm\DependencyFileTracker;
 use Dpt\McpRectorWarm\Warm\DirectorySnapshot;
+use Dpt\McpRectorWarm\Warm\Path;
 use Dpt\McpRectorWarm\Warm\SessionHooks;
 use Dpt\McpRectorWarm\Warm\WarmSession;
 use Rector\Bootstrap\RectorConfigsResolver;
@@ -43,11 +44,30 @@ class RectorRunner implements RunnerInterface
     public const SKIP_AS_OPTION = '--rector-warm-skip-as';
 
     /**
-     * #185: MCP_RECTOR_WARM_SESSION=0 (or off / false / no) turns the session
-     * child off, so every call forks from the pristine worker as it did before
-     * #185. On by default. No effect without pcntl: there is no session there.
+     * #185: MCP_RECTOR_WARM_SESSION=1 (or on / true / yes) turns the session
+     * child on. OFF by default (PR #189 review): with the session on, inputs a
+     * custom rule reads itself at call time and keeps in a static are not
+     * watched unless declared in SESSION_WATCH_ENV -- see docs/how-it-works.md
+     * §1b. No effect without pcntl: there is no session there.
      */
     public const SESSION_ENV = 'MCP_RECTOR_WARM_SESSION';
+
+    /**
+     * #185: extra inputs of the session (files or directories, relative to the
+     * project, PATH_SEPARATOR-separated) -- what a custom rule reads itself.
+     * A change to any file there, or a file appearing there, starts a fresh
+     * session, the same as a changed PHP dependency.
+     */
+    public const SESSION_WATCH_ENV = 'MCP_RECTOR_WARM_SESSION_WATCH';
+
+    /** #185: the session child retires after a call once its own memory passes this many MB (default 512). */
+    public const SESSION_MAX_MB_ENV = 'MCP_RECTOR_WARM_SESSION_MAX_MB';
+
+    /** #185: the session child retires after this many calls it served itself (default 250). */
+    public const SESSION_MAX_CALLS_ENV = 'MCP_RECTOR_WARM_SESSION_MAX_CALLS';
+
+    private const SESSION_DEFAULT_MAX_MB = 512;
+    private const SESSION_DEFAULT_MAX_CALLS = 250;
 
     /**
      * #185: MCP_RECTOR_WARM_SESSION_LOG=1 makes the warm worker log on stderr
@@ -1030,11 +1050,78 @@ class RectorRunner implements RunnerInterface
         return $paths[0];
     }
 
+    /** Off unless MCP_RECTOR_WARM_SESSION says on (PR #189 review: opt-in). */
     public static function sessionSwitchedOff(): bool
     {
         $value = \getenv(self::SESSION_ENV);
 
-        return \is_string($value) && \in_array(\strtolower(\trim($value)), ['0', 'off', 'false', 'no'], true);
+        return !\is_string($value) || !\in_array(\strtolower(\trim($value)), ['1', 'on', 'true', 'yes'], true);
+    }
+
+    /**
+     * MCP_RECTOR_WARM_SESSION_WATCH as absolute, '/'-separated paths: split on
+     * PATH_SEPARATOR, blanks dropped, relative entries taken from $projectDirectory.
+     * Not resolved: a declared file may not exist yet.
+     *
+     * @return list<string>
+     */
+    public static function sessionWatchPaths(string $projectDirectory): array
+    {
+        $value = \getenv(self::SESSION_WATCH_ENV);
+        if (!\is_string($value) || \trim($value) === '') {
+            return [];
+        }
+        $paths = [];
+        foreach (\explode(\PATH_SEPARATOR, $value) as $entry) {
+            $entry = Path::normalise(\trim($entry));
+            if ($entry === '') {
+                continue;
+            }
+            $absolute = \str_starts_with($entry, '/') || \preg_match('#^[A-Za-z]:/#', $entry) === 1;
+            $path = $absolute ? $entry : \rtrim(Path::normalise($projectDirectory), '/') . '/' . $entry;
+            $paths[] = \rtrim($path, '/') ?: '/';
+        }
+
+        return \array_values(\array_unique($paths));
+    }
+
+    /**
+     * Why the session child should retire after the call it just served, or
+     * null. PR #189 finding C: both bins set memory_limit to -1, so a share of
+     * memory_limit alone never fired; the session has its own caps --
+     * MCP_RECTOR_WARM_SESSION_MAX_MB of its own memory, MCP_RECTOR_WARM_SESSION_MAX_CALLS
+     * calls -- and still honours 75% of a finite memory_limit.
+     */
+    public static function sessionRetireReason(int $calls, int $usageBytes, string $memoryLimit, int $maxMb, int $maxCalls): ?string
+    {
+        $mb = 1024 * 1024;
+        if ($maxMb > 0 && $usageBytes > $maxMb * $mb) {
+            return \sprintf('%d MB in use, over the %d MB cap', \intdiv($usageBytes, $mb), $maxMb);
+        }
+        if ($maxCalls > 0 && $calls >= $maxCalls) {
+            return "served {$calls} calls, the cap";
+        }
+        $limit = \trim($memoryLimit);
+        if ($limit !== '' && $limit !== '-1') {
+            $bytes = (int) $limit * match (\strtolower(\substr($limit, -1))) {
+                'g' => 1024 ** 3,
+                'm' => $mb,
+                'k' => 1024,
+                default => 1,
+            };
+            if ($bytes > 0 && $usageBytes > $bytes * self::SESSION_MEMORY_SHARE) {
+                return \sprintf('%d MB in use, over 75%% of memory_limit %s', \intdiv($usageBytes, $mb), $limit);
+            }
+        }
+
+        return null;
+    }
+
+    private static function positiveIntEnv(string $name, int $default): int
+    {
+        $value = \getenv($name);
+
+        return \is_string($value) && \ctype_digit(\trim($value)) ? (int) \trim($value) : $default;
     }
 
     /**
@@ -1096,6 +1183,7 @@ class RectorRunner implements RunnerInterface
                 );
                 if (($reply['retire'] ?? false) === true) {
                     // The session exits by itself right after this reply.
+                    $this->sessionLog('retire', (string) ($reply['retire_reason'] ?? ''));
                     $this->reapSession();
                 }
 
@@ -1123,7 +1211,10 @@ class RectorRunner implements RunnerInterface
     private function spawnSession(?int $deadline): bool
     {
         try {
-            $this->sessionDirectories ??= (new SessionHooks($this->container))->directorySnapshot((string) \getcwd());
+            $this->sessionDirectories ??= (new SessionHooks($this->container))->directorySnapshot(
+                (string) \getcwd(),
+                self::sessionWatchPaths((string) \getcwd()),
+            );
             $this->sessionDirectories->refresh();
         } catch (\Throwable $e) {
             $this->disableSession('cannot watch the project directories: ' . $e->getMessage());
@@ -1274,6 +1365,10 @@ class RectorRunner implements RunnerInterface
                 foreach ($hooks->staticInputFiles() as $file) {
                     $session->recordRead($file);
                 }
+                // Inputs a custom rule reads itself, declared by the user.
+                foreach (WarmSession::watchedFiles(self::sessionWatchPaths((string) \getcwd())) as $file) {
+                    $session->recordRead($file);
+                }
             } catch (\Throwable $e) {
                 $this->writeFrame($socket, $this->encodeHandshakeFrame(['ok' => false, 'error' => $e->getMessage()]));
                 $exitCode = 1;
@@ -1334,22 +1429,30 @@ class RectorRunner implements RunnerInterface
                     continue;
                 }
 
-                $retire = false;
+                $retireReason = null;
                 try {
                     $result = $this->execute($argv, $warmBoot);
                 } catch (\Throwable $e) {
                     // A throw out of Rector may leave half-built state behind:
                     // report it, then let the next call start a fresh session.
                     $result = ['error' => $e->getMessage(), 'error_class' => $e::class];
-                    $retire = true;
+                    $retireReason = 'the call threw ' . $e::class;
                 }
                 $session->afterInSessionCall($path);
-                $retire = $retire || self::memoryNearLimit();
+                $retireReason ??= self::sessionRetireReason(
+                    $session->calls(),
+                    \memory_get_usage(true),
+                    (string) \ini_get('memory_limit'),
+                    self::positiveIntEnv(self::SESSION_MAX_MB_ENV, self::SESSION_DEFAULT_MAX_MB),
+                    self::positiveIntEnv(self::SESSION_MAX_CALLS_ENV, self::SESSION_DEFAULT_MAX_CALLS),
+                );
+                $retire = $retireReason !== null;
                 $this->writeFrame($socket, $this->encodeForkResult([
                     'kind' => 'result',
                     'route' => WarmSession::SERVE,
                     'result' => $result,
                     'retire' => $retire,
+                    'retire_reason' => $retireReason,
                     'calls' => $session->calls(),
                     'tracked' => $session->trackedFiles(),
                 ]));
@@ -1441,24 +1544,6 @@ class RectorRunner implements RunnerInterface
         if ($enabled && \defined('STDERR') && \is_resource(\STDERR)) {
             @\fwrite(\STDERR, "mcp-rector-warm: session {$event}: {$detail}\n");
         }
-    }
-
-    private static function memoryNearLimit(): bool
-    {
-        $limit = \trim((string) \ini_get('memory_limit'));
-        if ($limit === '' || $limit === '-1') {
-            return false;
-        }
-        $bytes = (int) $limit;
-        $unit = \strtolower(\substr($limit, -1));
-        $bytes *= match ($unit) {
-            'g' => 1024 ** 3,
-            'm' => 1024 ** 2,
-            'k' => 1024,
-            default => 1,
-        };
-
-        return $bytes > 0 && \memory_get_usage(true) > $bytes * self::SESSION_MEMORY_SHARE;
     }
 
     /**

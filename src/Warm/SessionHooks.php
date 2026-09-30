@@ -212,10 +212,13 @@ final class SessionHooks implements SymbolResolver
     /**
      * The directory snapshot for this project, not yet refreshed: the working
      * directory and every non-vendor Composer source root as plain roots, the
-     * scanned directories as full roots; vendor directories (their Composer
-     * metadata is tracked instead) and Rector's caches excluded.
+     * scanned directories as full roots, declared watch directories as watch
+     * roots; vendor directories (their Composer metadata is tracked instead)
+     * and Rector's caches excluded.
+     *
+     * @param list<string> $watchPaths absolute (RectorRunner::sessionWatchPaths())
      */
-    public function directorySnapshot(string $workingDirectory): DirectorySnapshot
+    public function directorySnapshot(string $workingDirectory, array $watchPaths = []): DirectorySnapshot
     {
         $vendors = $this->vendorDirectories();
         $roots = [$workingDirectory];
@@ -239,7 +242,11 @@ final class SessionHooks implements SymbolResolver
             }
         }
 
-        return new DirectorySnapshot($roots, $fullRoots, $excluded, [...$this->fileExtensions(), 'php', 'inc']);
+        // Declared watch directories (MCP_RECTOR_WARM_SESSION_WATCH): any file
+        // appearing there counts, whatever its extension.
+        $watchRoots = \array_values(\array_filter($watchPaths, 'is_dir'));
+
+        return new DirectorySnapshot($roots, $fullRoots, $excluded, [...$this->fileExtensions(), 'php', 'inc'], 100_000, $watchRoots);
     }
 
     /**

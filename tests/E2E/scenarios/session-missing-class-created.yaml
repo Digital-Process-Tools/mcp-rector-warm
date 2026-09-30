@@ -1,4 +1,5 @@
 description: "#185: a parent class the session looked up and did not find is created later, in an existing directory and then in a new one, and the unchanged child must see it (must fire on a negative lookup)."
+session: true
 config: |
   <?php
 

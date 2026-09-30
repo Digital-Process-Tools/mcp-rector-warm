@@ -60,13 +60,24 @@ NO_PCNTL_PLATFORM = sys.platform.startswith("win") or DISABLE_PCNTL
 # environment) brings back "every call is a cold boot".
 EXPECT_COLD_EVERY_CALL = NO_PCNTL_PLATFORM and os.environ.get("MCP_RECTOR_WARM_NO_PCNTL", "").strip().lower() == "cold"
 
-# #185: with pcntl, analysis calls are served by one long-lived session child
-# (RectorRunner::serveSession()) unless MCP_RECTOR_WARM_SESSION=0 turns it off.
-# Without pcntl there is no session at all (the #108 standby worker per call).
-# Running the whole suite once with MCP_RECTOR_WARM_SESSION=0 compares the old
-# fork-per-call path against the same cold oracle.
-SESSION_OPT_OUT = os.environ.get("MCP_RECTOR_WARM_SESSION", "").strip().lower() in {"0", "off", "false", "no"}
-SESSION_EXPECTED = not NO_PCNTL_PLATFORM and not SESSION_OPT_OUT
+# #185: with pcntl, MCP_RECTOR_WARM_SESSION=1 routes analysis calls to one
+# long-lived session child (RectorRunner::serveSession()). It is OFF by default
+# (PR #189 review: opt-in). Without pcntl there is no session at all (the #108
+# standby worker per call). Running the whole suite once with
+# MCP_RECTOR_WARM_SESSION=1 compares the session against the same cold oracle;
+# the session's own tests switch it on for themselves unless the suite runs with
+# MCP_RECTOR_WARM_SESSION=0.
+_SESSION_SWITCH = os.environ.get("MCP_RECTOR_WARM_SESSION", "").strip().lower()
+SESSION_OPT_IN = _SESSION_SWITCH in {"1", "on", "true", "yes"}
+SESSION_OPT_OUT = _SESSION_SWITCH in {"0", "off", "false", "no"}
+SESSION_EXPECTED = not NO_PCNTL_PLATFORM and SESSION_OPT_IN
+
+
+def session_active(forced_on: bool) -> bool:
+    """Whether a server started for a test runs the session: suite-wide opt-in,
+    or a test that switches it on for itself, never without pcntl or under an
+    explicit MCP_RECTOR_WARM_SESSION=0."""
+    return not NO_PCNTL_PLATFORM and not SESSION_OPT_OUT and (SESSION_OPT_IN or forced_on)
 
 # The server's own debug log of what served each call (RectorRunner::sessionLog()).
 SESSION_LOG_ENV = {"MCP_RECTOR_WARM_SESSION_LOG": "1"}

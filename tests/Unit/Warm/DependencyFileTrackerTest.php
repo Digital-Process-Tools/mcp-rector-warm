@@ -116,6 +116,32 @@ final class DependencyFileTrackerTest extends TestCase
     }
 
     /**
+     * PR #189 finding B: a same-size edit whose mtime is then put back (touch
+     * -r, cp -p, rsync -t --inplace, tar -x) leaves size, mtime and inode
+     * equal, and outside the racy window no hash is taken. ctime is the one
+     * field no user tool can set back. The file is recorded with an old mtime
+     * so the racy same-second path cannot be what catches it.
+     */
+    public function testASameSizeEditWithItsMtimePutBackIsDetectedAsStale(): void
+    {
+        $tracker = new DependencyFileTracker();
+        $path = $this->write('base.php', '<?php function f(): array {}');
+        $old = \time() - 100;
+        \touch($path, $old);
+        \clearstatcache();
+        $tracker->record($path, null);
+        // Positive control: untouched, it is not stale.
+        self::assertNull($tracker->checkStale());
+
+        \usleep(1_100_000); // ctime has one-second resolution through stat()
+        \file_put_contents($path, '<?php function f(): float {}');
+        \touch($path, $old);
+        \clearstatcache();
+
+        self::assertSame($path, $tracker->checkStale());
+    }
+
+    /**
      * A file this tracker was never told about changing is not this
      * tracker's problem to report -- checkStale() must stay null for a
      * change to an UNTRACKED file, the must-not-fire half of the pair
