@@ -948,11 +948,50 @@ def test_unsaved_diagnostics_honour_the_original_paths_skips(project, form):
     assert temp_leftovers(project) == []
 
 
-def test_startup_removes_a_dead_servers_temp_dir_and_keeps_a_live_ones(project):
-    # A server killed mid-run (kill -9) never reaches its `finally`. The next
-    # server sweeps .rector-warm-<pid> dirs whose pid is gone; one whose pid
-    # is alive (here: this pytest process, standing in for another editor's
-    # server) is kept.
+def hold_exclusive_lock(path: Path):
+    """Cross-platform stand-in for a live server's own held flock() on its
+    `.lock` file -- fcntl on POSIX, msvcrt (byte-range locking via the CRT,
+    which Win32's LockFileEx-backed flock() sees as overlapping any
+    whole-file lock attempt) on Windows. The `e2e` job's matrix includes
+    windows-latest, so a bare fcntl import here would break collection
+    there. Needs at least one byte to lock a range of -- writes one only
+    if the caller has not already put real content (e.g. a recorded
+    buffer basename) there."""
+    if not path.exists() or path.stat().st_size == 0:
+        path.write_bytes(b"\0")
+    handle = open(path, "r+b")
+    if sys.platform == "win32":
+        import msvcrt
+        msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+    else:
+        import fcntl
+        fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    return handle
+
+
+def release_lock(handle) -> None:
+    if sys.platform == "win32":
+        import msvcrt
+        handle.seek(0)
+        msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+    handle.close()
+
+
+def test_a_buffer_run_removes_a_dead_servers_leftover_beside_it_and_keeps_a_live_ones(project):
+    # #179: TempCopySweeper no longer walks the whole tree at startup --
+    # only sweepDirectory() remains, called from diagnoseBuffer() itself,
+    # over the one directory next to the file being diagnosed. Staleness
+    # is decided by a `.lock` file's flock() rather than any pid check any
+    # more. Release-audit finding: production always creates `.lock`
+    # (recording the buffer copy's own basename) immediately after
+    # mkdir(), before the copy itself is ever written -- and the sweeper
+    # now refuses to delete anything unless a directory's full listing is
+    # exactly `.lock` plus that recorded basename -- so both leftovers get
+    # a `.lock` here too, matching that real shape. `dead`'s lock is free
+    # (backdating its mtime is irrelevant once a `.lock` exists -- staleness
+    # for a `.lock`-holding directory is decided by the lock alone); `live`'s
+    # is held by this SAME pytest process, standing in for another editor's
+    # live server, and is kept regardless of age.
     exited = subprocess.Popen([sys.executable, "-c", "pass"])
     exited.wait()
     dead = project / "src" / f".rector-warm-{exited.pid}"
@@ -960,12 +999,30 @@ def test_startup_removes_a_dead_servers_temp_dir_and_keeps_a_live_ones(project):
     for directory in (dead, live):
         directory.mkdir()
         (directory / "Clean.php").write_bytes(b"<?php\n")
+        (directory / ".lock").write_bytes(b"Clean.php")
+    live_lock = hold_exclusive_lock(live / ".lock")
 
     proc = start_server(project, {})
     try:
-        # Any reply proves startup finished: initialize was answered.
-        assert did_open(proc, (project / "src" / "Clean.php").as_uri())["method"] == "textDocument/publishDiagnostics"
+        uri = (project / "src" / "Clean.php").as_uri()
+
+        # Startup, and a plain didOpen (no unsaved content -- publishes
+        # against the file on disk, never calls diagnoseBuffer()/
+        # sweepDirectory() at all), must not sweep either leftover: there
+        # is no startup tree walk any more, and didOpen alone never
+        # reaches the per-directory sweep.
+        assert did_open(proc, uri)["method"] == "textDocument/publishDiagnostics"
+        assert dead.exists()
+        assert live.exists()
+
+        # A buffer run (didChange with unsaved content) of a file in the
+        # SAME directory calls sweepDirectory() on that directory first --
+        # this is what removes a stale sibling now.
+        did_change(proc, uri, 2, "<?php\n\n// unsaved\n")
+        read_frame(proc.stdout)
+
         assert not dead.exists()
         assert live.exists()
     finally:
         stop_server(proc)
+        release_lock(live_lock)

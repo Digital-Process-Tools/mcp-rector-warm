@@ -8,10 +8,19 @@ use Dpt\McpRectorWarm\Lsp\TempCopySweeper;
 use PHPUnit\Framework\TestCase;
 
 /**
- * #106 E2E finding: a server killed mid-run (kill -9) cannot run its own
- * `finally`, so its `.rector-warm-<pid>` directory stays. The next server
- * sweeps directories whose pid is no longer alive, and keeps the ones
- * whose pid is (another server working in the same project).
+ * #179: a server killed mid-run (kill -9) cannot run its own `finally`, so
+ * its `.rector-warm-<pid>` directory stays. Ownership is now decided by an
+ * exclusive `flock()` on a `.lock` file inside the directory: a directory
+ * whose lock a live process still holds is kept; one whose lock can be
+ * taken non-blocking (the owner is gone, and released it -- by the OS, on
+ * every platform, including a kill -9) is removed, PROVIDED its full
+ * listing is exactly `.lock` plus the one buffer-copy basename recorded
+ * inside `.lock` -- release-audit finding: anything else present at all,
+ * including a directory whose NAME only shares the prefix, is left
+ * untouched entirely. A directory with no `.lock` yet is judged by mtime
+ * instead, inside a fixed grace period, and is expected to be genuinely
+ * empty (production creates `.lock` immediately after `mkdir()`, before
+ * writing anything else).
  */
 final class TempCopySweeperTest extends TestCase
 {
@@ -62,17 +71,6 @@ final class TempCopySweeperTest extends TestCase
         unlink($path);
     }
 
-    /** A pid that belonged to a process which has already exited. */
-    private static function deadPid(): int
-    {
-        $process = proc_open([PHP_BINARY, '-r', ''], [], $pipes);
-        self::assertIsResource($process);
-        $pid = proc_get_status($process)['pid'];
-        proc_close($process);
-
-        return $pid;
-    }
-
     private function plant(string $relativeDir, string $file = 'Clean.php'): string
     {
         $dir = $this->root . '/' . $relativeDir;
@@ -82,66 +80,188 @@ final class TempCopySweeperTest extends TestCase
         return $dir;
     }
 
-    public function testADeadServersTempDirectoryIsRemovedAndALiveOnesIsKept(): void
+    /** A directory with nothing inside -- the shape a kill BEFORE `.lock` is ever created leaves. */
+    private function plantEmpty(string $relativeDir): string
     {
-        $dead = $this->plant('src/Deep/Er/.rector-warm-' . self::deadPid());
-        // Positive control for "kept": this test process is alive and is
-        // not the sweeping server either, like a second editor's server.
-        $live = $this->plant('src/.rector-warm-' . getmypid());
-        $notOurs = $this->plant('src/.rector-warm-notapid');
+        $dir = $this->root . '/' . $relativeDir;
+        mkdir($dir, 0o700, true);
 
-        $removed = TempCopySweeper::sweepTree($this->root);
-
-        self::assertDirectoryDoesNotExist($dead);
-        // The sweeper joins with DIRECTORY_SEPARATOR, the test with '/':
-        // compare separator-neutral (Windows).
-        $normalize = static fn (string $path): string => str_replace('\\', '/', $path);
-        self::assertSame([$normalize($dead)], array_map($normalize, $removed));
-        self::assertDirectoryExists($live);
-        self::assertDirectoryExists($notOurs);
-        self::assertFileExists($this->root . '/src');
+        return $dir;
     }
 
-    public function testTheWalkSkipsVendorNodeModulesAndGit(): void
+    /**
+     * Plants a `.rector-warm-<pid>`-shaped directory holding one buffer
+     * copy (`$file`) and a `.lock` file recording that same basename --
+     * matching production, which writes the copy's basename into `.lock`
+     * at creation time. Held or free as asked. A held lock never releases
+     * on its own: the caller gets back the handle and must fclose() it
+     * (which also releases the lock) once the test is done asserting
+     * against it.
+     *
+     * @return resource|null the open handle if $held, else null
+     */
+    private function plantLocked(string $relativeDir, bool $held, string $file = 'Clean.php'): mixed
     {
-        $pid = self::deadPid();
-        $inVendor = $this->plant('vendor/pkg/.rector-warm-' . $pid);
-        $inNodeModules = $this->plant('node_modules/x/.rector-warm-' . $pid);
-        $inGit = $this->plant('.git/.rector-warm-' . $pid);
-        $inSrc = $this->plant('src/.rector-warm-' . $pid);
+        $dir = $this->plant($relativeDir, $file);
+        $lockPath = $dir . '/' . TempCopySweeper::LOCK_FILE_NAME;
+        $handle = fopen($lockPath, 'c');
+        self::assertIsResource($handle, 'could not open the test lock file');
+        fwrite($handle, $file);
 
-        TempCopySweeper::sweepTree($this->root);
+        if ($held) {
+            self::assertTrue(flock($handle, LOCK_EX | LOCK_NB), 'could not hold the test lock');
 
-        self::assertDirectoryExists($inVendor);
-        self::assertDirectoryExists($inNodeModules);
-        self::assertDirectoryExists($inGit);
-        self::assertDirectoryDoesNotExist($inSrc);
+            return $handle;
+        }
+
+        fclose($handle);
+
+        return null;
     }
 
-    public function testSweepingOneDirectoryRemovesOnlyItsOwnDeadSiblings(): void
+    /** Backdates a directory's mtime past the no-`.lock` grace period. */
+    private static function backdate(string $path): void
     {
-        // The per-run sweep: before a buffer run writes its temp copy in a
-        // directory, dead siblings there are cleaned up too, so a leftover
-        // in vendor/ or deeper than the startup walk still goes away the
-        // next time a file next to it is edited.
-        $pid = self::deadPid();
-        $here = $this->plant('vendor/pkg/.rector-warm-' . $pid);
-        $elsewhere = $this->plant('src/.rector-warm-' . $pid);
-        $live = $this->plant('vendor/pkg/.rector-warm-' . getmypid());
+        self::assertTrue(touch($path, time() - 700), 'could not backdate the test directory');
+    }
 
-        TempCopySweeper::sweepDirectory($this->root . '/vendor/pkg');
+    public function testADirectoryWhoseLockIsHeldByALiveProcessIsKept(): void
+    {
+        // Must-fire control, same run: a directory whose lock is free (the
+        // owner released it, as any process does on exit, including a
+        // kill -9) is removed -- proves the guard didn't just start
+        // keeping every candidate.
+        $this->plantLocked('src/.rector-warm-1', held: false);
+        $free = $this->root . '/src/.rector-warm-1';
 
-        self::assertDirectoryDoesNotExist($here);
-        self::assertDirectoryExists($elsewhere);
-        self::assertDirectoryExists($live);
+        $held = $this->plantLocked('src/.rector-warm-2', held: true);
+
+        try {
+            TempCopySweeper::sweepDirectory($this->root . '/src');
+
+            self::assertDirectoryDoesNotExist($free);
+            self::assertDirectoryExists($this->root . '/src/.rector-warm-2', 'a directory whose lock is held by a live process must be kept');
+        } finally {
+            flock($held, LOCK_UN);
+            fclose($held);
+        }
+    }
+
+    /**
+     * Pairs with the test above: after the "live" process is killed (its
+     * handle closed, which releases the flock the same way the OS releases
+     * it on kill -9), the next sweep removes what it left behind. This is
+     * also the positive control for the two must-not-fire tests below: the
+     * SAME shape (digit-suffix name, `.lock` plus exactly its recorded
+     * basename) IS removed once the lock is free.
+     */
+    public function testADirectoryIsRemovedOnceTheProcessHoldingItsLockIsGone(): void
+    {
+        $handle = $this->plantLocked('src/.rector-warm-3', held: true);
+        $dir = $this->root . '/src/.rector-warm-3';
+
+        self::assertDirectoryExists($dir, 'control: still kept while the lock is held');
+
+        // Simulates the process dying: the OS releases every lock it held,
+        // including on a kill -9, without this test calling flock(LOCK_UN)
+        // itself.
+        fclose($handle);
+
+        TempCopySweeper::sweepDirectory($this->root . '/src');
+
+        self::assertDirectoryDoesNotExist($dir);
+    }
+
+    public function testADirectoryWithNoLockYetIsKeptWithinTheGracePeriodAndRemovedAfterIt(): void
+    {
+        // No `.lock` ever reaching here is expected to be genuinely EMPTY:
+        // production creates `.lock` immediately after `mkdir()`, before
+        // writing anything else, so this is the shape a kill in that
+        // narrow window leaves.
+        $freshNoLock = $this->plantEmpty('src/.rector-warm-4');
+        $staleNoLock = $this->plantEmpty('src/.rector-warm-5');
+        self::backdate($staleNoLock);
+
+        TempCopySweeper::sweepDirectory($this->root . '/src');
+
+        self::assertDirectoryExists($freshNoLock, 'a directory with no .lock yet, inside the grace period, must be kept');
+        self::assertDirectoryDoesNotExist($staleNoLock, 'a directory with no .lock, past the grace period, must be removed');
+    }
+
+    /**
+     * Release-audit finding: glob(..., '.rector-warm-*') matches any name
+     * sharing the prefix, not only one this class ever created. A real
+     * project directory merely NAMED like the pattern -- but with a
+     * non-digit suffix, the shape this class never creates -- must survive
+     * a sweep untouched, byte for byte, however old it is and whatever it
+     * holds.
+     */
+    public function testADirectoryMerelySharingThePrefixIsNeverTouched(): void
+    {
+        $userDirectory = $this->plant('src/.rector-warm-cache', 'config.json');
+        self::backdate($userDirectory);
+
+        TempCopySweeper::sweepDirectory($this->root . '/src');
+
+        self::assertDirectoryExists($userDirectory, 'a directory whose name only shares the prefix must never be swept');
+        self::assertFileExists($userDirectory . '/config.json');
+        self::assertSame("<?php\n", file_get_contents($userDirectory . '/config.json'));
+    }
+
+    /**
+     * Release-audit finding: a stale, digit-suffix directory whose `.lock`
+     * is free is removed ONLY when its full listing is exactly `.lock`
+     * plus the one recorded basename -- see
+     * testADirectoryIsRemovedOnceTheProcessHoldingItsLockIsGone() above for
+     * the positive control this pairs with. An extra file alongside the
+     * expected two must leave the WHOLE directory untouched, never
+     * partially emptied.
+     */
+    public function testADirectoryHoldingAnExtraFileBesideItsExpectedContentsIsNeverTouched(): void
+    {
+        $handle = $this->plantLocked('src/.rector-warm-12', held: true);
+        $dir = $this->root . '/src/.rector-warm-12';
+        file_put_contents($dir . '/Extra.txt', "not expected here\n");
+        fclose($handle);
+
+        TempCopySweeper::sweepDirectory($this->root . '/src');
+
+        self::assertDirectoryExists($dir, 'a directory holding anything beyond .lock and its recorded basename must never be swept');
+        self::assertFileExists($dir . '/Clean.php');
+        self::assertFileExists($dir . '/Extra.txt');
+        self::assertFileExists($dir . '/' . TempCopySweeper::LOCK_FILE_NAME);
+    }
+
+    /**
+     * The per-run sweep only ever looks at $directory's own direct
+     * children, never anything deeper or beside it -- there is no startup
+     * tree walk any more (#179 drops sweepTree() entirely).
+     */
+    public function testSweepingOneDirectoryRemovesOnlyItsOwnStaleSiblings(): void
+    {
+        $here = $this->plantEmpty('vendor/pkg/.rector-warm-6');
+        self::backdate($here);
+        $elsewhere = $this->plantEmpty('src/.rector-warm-7');
+        self::backdate($elsewhere);
+        $held = $this->plantLocked('vendor/pkg/.rector-warm-8', held: true);
+
+        try {
+            TempCopySweeper::sweepDirectory($this->root . '/vendor/pkg');
+
+            self::assertDirectoryDoesNotExist($here);
+            self::assertDirectoryExists($elsewhere, 'a stale directory outside the swept directory must be left for its own sweep');
+            self::assertDirectoryExists($this->root . '/vendor/pkg/.rector-warm-8');
+        } finally {
+            flock($held, LOCK_UN);
+            fclose($held);
+        }
     }
 
     /**
      * #142: sweepDirectory() reaches removeIfStale() via
-     * glob(..., GLOB_ONLYDIR), which follows a symlink -- unlike
-     * sweepTree()'s own direct-child loop, which already skips one. A
-     * symlink named like a stale candidate must not have its target's
-     * contents deleted, wherever that target is.
+     * glob(..., GLOB_ONLYDIR), which follows a symlink. A symlink named
+     * like a stale candidate must not have its target's contents deleted,
+     * wherever that target is.
      */
     public function testSweepDirectoryDoesNotFollowASymlinkedCandidate(): void
     {
@@ -150,15 +270,15 @@ final class TempCopySweeperTest extends TestCase
         $externalFile = $externalRoot . '/Outside.txt';
         file_put_contents($externalFile, "not part of the workspace\n");
 
-        $pid = self::deadPid();
-        $symlinkPath = $this->root . '/vendor/pkg/.rector-warm-' . $pid;
+        $symlinkPath = $this->root . '/vendor/pkg/.rector-warm-9';
         mkdir(dirname($symlinkPath), 0o700, true);
         self::assertTrue(symlink($externalRoot, $symlinkPath), 'could not create the test symlink');
 
         // Positive control, same run: a real stale directory (no symlink
         // involved) is still removed -- proves the guard didn't just start
         // refusing every candidate.
-        $realStale = $this->plant('vendor/pkg2/.rector-warm-' . $pid);
+        $this->plantLocked('vendor/pkg2/.rector-warm-9', held: false);
+        $realStale = $this->root . '/vendor/pkg2/.rector-warm-9';
 
         try {
             TempCopySweeper::sweepDirectory($this->root . '/vendor/pkg');
@@ -195,15 +315,15 @@ final class TempCopySweeperTest extends TestCase
         $externalFile = $externalRoot . '/Outside.txt';
         file_put_contents($externalFile, "not part of the workspace\n");
 
-        $pid = self::deadPid();
-        $junctionPath = $this->root . '/vendor/pkg/.rector-warm-' . $pid;
+        $junctionPath = $this->root . '/vendor/pkg/.rector-warm-10';
         mkdir(dirname($junctionPath), 0o700, true);
         self::createJunction($externalRoot, $junctionPath);
 
         // Positive control, same run: a real stale directory (no junction
         // involved) is still removed -- proves the guard didn't just start
         // refusing every candidate.
-        $realStale = $this->plant('vendor/pkg2/.rector-warm-' . $pid);
+        $this->plantLocked('vendor/pkg2/.rector-warm-10', held: false);
+        $realStale = $this->root . '/vendor/pkg2/.rector-warm-10';
 
         try {
             TempCopySweeper::sweepDirectory($this->root . '/vendor/pkg');
@@ -228,10 +348,10 @@ final class TempCopySweeperTest extends TestCase
      * query` call built its command as a shell STRING via escapeshellarg(),
      * so a path containing any of those characters got fsutil asked about a
      * mangled path that does not exist, which exits non-zero and reads as
-     * "not a junction". A junction planted at such a path would bypass both
-     * sweepTree()'s and removeIfStale()'s guards, reopening #142/#144 for
-     * that narrower path shape. Windows-only: there is no junction concept
-     * to create elsewhere, and escapeshellarg()'s character-mangling here is
+     * "not a junction". A junction planted at such a path would bypass
+     * removeIfStale()'s guard, reopening #142/#144 for that narrower path
+     * shape. Windows-only: there is no junction concept to create
+     * elsewhere, and escapeshellarg()'s character-mangling here is
      * Windows-specific too.
      */
     public function testIsLinkOrJunctionDetectsAJunctionUnderAPathContainingAnExclamationMark(): void
@@ -243,12 +363,12 @@ final class TempCopySweeperTest extends TestCase
         $externalRoot = sys_get_temp_dir() . '/mcp-rector-sweep-external-' . bin2hex(random_bytes(4));
         mkdir($externalRoot, 0o700, true);
         $externalFile = $externalRoot . '/Outside.txt';
-        file_put_contents($externalFile, "not part of the workspace\\n");
+        file_put_contents($externalFile, "not part of the workspace\n");
 
         // The `!` is the point of this test: escapeshellarg() mangles it.
         $parentWithBang = sys_get_temp_dir() . '/mcp-rector-sweep-bang-!-' . bin2hex(random_bytes(4));
         mkdir($parentWithBang, 0o700, true);
-        $junctionPath = $parentWithBang . '/.rector-warm-' . self::deadPid();
+        $junctionPath = $parentWithBang . '/.rector-warm-11';
 
         try {
             self::createJunction($externalRoot, $junctionPath);

@@ -201,6 +201,15 @@ final class RectorDiagnosticsSourceBufferTest extends TestCase
         $leftover = $this->workDir . '/src/.rector-warm-' . $deadPid;
         mkdir($leftover);
         file_put_contents($leftover . '/Sample.php', "<?php\n");
+        // #179: matching production's own shape -- `.lock` is always
+        // created immediately after mkdir(), before the buffer copy is
+        // ever written, so a leftover holding a buffer copy always has a
+        // `.lock` recording that copy's basename too. Release-audit
+        // finding: the sweeper now refuses to touch a directory whose
+        // full listing does not match exactly `.lock` plus its recorded
+        // basename, so this fixture must carry a real, free `.lock` for
+        // the sweep below to remove it at all.
+        file_put_contents($leftover . '/' . \Dpt\McpRectorWarm\Lsp\TempCopySweeper::LOCK_FILE_NAME, 'Sample.php');
 
         $this->source(fn (): string => '{"totals":{"changed_files":0,"errors":0}}')
             ->diagnoseBuffer($this->original, "<?php\n");
@@ -299,6 +308,111 @@ final class RectorDiagnosticsSourceBufferTest extends TestCase
             // time would be the exact bug under test), and before its target
             // is removed: on Windows a link to a directory needs rmdir().
             self::removeLink($symlinkPath);
+            $this->removeTree($externalDir);
+        }
+    }
+
+    /**
+     * #179 self-review finding: every other filesystem call this method
+     * makes on `$tempDirectory`/`$tempPath` after `mkdir()` succeeds is
+     * preceded by an isLinkOrJunction($tempDirectory) re-check in the
+     * `finally` block, because that block runs on every exit from `try`
+     * and a symlink swap can happen mid-run, while Rector is still
+     * executing (the same race #142/#144/#149 already assume is live).
+     * The `.lock` unlink this redesign adds must not be the one operation
+     * left unguarded: swapping $tempDirectory for a symlink to somewhere
+     * else DURING the run (not before it, which the tests above already
+     * cover) must not have a same-named `.lock` deleted through it.
+     *
+     * POSIX-only (CI finding, round 2): this test's OWN setup unlinks the
+     * real `.lock` file while this method's `try` block is still running
+     * -- $lockHandle is still open at that point, held by the code under
+     * test, since `finally` has not run yet. On POSIX, unlink() succeeds
+     * on a file another handle has open (the inode is removed from the
+     * directory; the open fd keeps it alive until closed) -- the attack
+     * this test simulates is real there. On Windows, deleting a file
+     * while ANY handle has it open without FILE_SHARE_DELETE (which PHP's
+     * fopen() does not request) is refused at the OS level -- so this
+     * test's own unlink() of `.lock` fails, the directory is never
+     * emptied, the symlink is never created (symlink() refuses when a
+     * real directory already sits at the target path), and the method's
+     * own `finally` block later hits a real, non-symlinked directory it
+     * correctly empties and removes -- producing an rmdir() "Directory
+     * not empty" warning from THIS TEST's own teardown (removeLink()
+     * assuming a link where a real directory was left instead), not from
+     * production. This is a genuine platform difference in what the
+     * attack this test guards against even IS on Windows: the same
+     * FILE_SHARE_DELETE restriction that defeats this test's setup also
+     * defeats the real attacker, for as long as this process holds its
+     * own lock open -- the race this test exercises is POSIX-only by
+     * construction, not merely untested on Windows.
+     */
+    /**
+     * #179 self-review finding (platform audit): the lock file this
+     * redesign creates inside `$tempDirectory` is named `.lock`, at the
+     * same level as the buffer copy -- created first, so a buffer whose
+     * own basename collides with that name would otherwise have its own
+     * fopen(..., 'x') permanently fail with a generic "already exists"
+     * message. Refused explicitly instead, with its own message. Must-not-
+     * fire control, same run: an ordinary basename is unaffected.
+     */
+    public function testABufferNamedLikeTheSweepersOwnLockFileIsRefusedExplicitly(): void
+    {
+        $called = false;
+        $result = $this->source(function () use (&$called): string {
+            $called = true;
+
+            return '{"totals":{"changed_files":0,"errors":0}}';
+        })->diagnoseBuffer($this->workDir . '/src/.lock', "<?php\n");
+
+        self::assertFalse($called, 'a buffer named like the sweeper\'s own lock file must be refused before Rector is asked to run');
+        self::assertStringContainsString('the sweeper\'s own lock file', $result['errors'][0]['message']);
+        self::assertSame(['src', 'src/Sample.php'], $this->projectEntries(), 'control: nothing written for the colliding name, and the original buffer is untouched');
+
+        // Must-fire control: an ordinary basename, same run, is unaffected.
+        $ordinary = $this->source(fn (): string => '{"totals":{"changed_files":0,"errors":0}}')
+            ->diagnoseBuffer($this->original, "<?php\n");
+        self::assertSame([], $ordinary['errors']);
+    }
+
+    public function testTheLockFileIsNotUnlinkedThroughATempDirectorySwappedForASymlinkMidRun(): void
+    {
+        if (PHP_OS_FAMILY === 'Windows') {
+            self::markTestSkipped('This race needs deleting a .lock file this same process still has open; Windows refuses that (no FILE_SHARE_DELETE), so the setup itself -- not just the guard under test -- cannot be constructed there. See this test\'s own docblock.');
+        }
+
+        $externalDir = sys_get_temp_dir() . '/mcp-rector-lsp-external-' . bin2hex(random_bytes(4));
+        mkdir($externalDir, 0o700, true);
+        $externalLock = $externalDir . '/.lock';
+        file_put_contents($externalLock, "not yours\n");
+
+        $tempDirectory = null;
+
+        try {
+            $this->source(function (string $path) use (&$tempDirectory, $externalDir): string {
+                $tempDirectory = dirname($path);
+
+                // Simulates the race: the real contents are gone and a
+                // symlink to somewhere else sits at $tempDirectory before
+                // this method's `finally` block runs.
+                unlink($path);
+                unlink($tempDirectory . '/.lock');
+                rmdir($tempDirectory);
+                symlink($externalDir, $tempDirectory);
+
+                return '{"totals":{"changed_files":0,"errors":0}}';
+            })->diagnoseBuffer($this->original, "<?php\n");
+
+            self::assertNotNull($tempDirectory);
+            self::assertSame(
+                "not yours\n",
+                file_get_contents($externalLock),
+                'the finally block must not unlink a same-named .lock through a symlink swapped in mid-run',
+            );
+        } finally {
+            if ($tempDirectory !== null) {
+                self::removeLink($tempDirectory);
+            }
             $this->removeTree($externalDir);
         }
     }

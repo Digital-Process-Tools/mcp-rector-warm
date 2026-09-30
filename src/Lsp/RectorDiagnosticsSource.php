@@ -218,6 +218,21 @@ final class RectorDiagnosticsSource implements BufferDiagnosticsSource, Workspac
         $tempDirectory = $directory . DIRECTORY_SEPARATOR . self::tempDirectoryName();
         $tempPath = $tempDirectory . DIRECTORY_SEPARATOR . basename($absolutePath);
 
+        // #179 self-review: the lock file this method now creates inside
+        // $tempDirectory lives at the same level as the buffer copy, named
+        // TempCopySweeper::LOCK_FILE_NAME ('.lock'). A buffer whose own
+        // basename collides with that name (a project genuinely editing a
+        // file called `.lock`) would otherwise have its own fopen(...,
+        // 'x') permanently fail with "already exists", since the lock
+        // file is created first -- refused explicitly, with its own
+        // message, rather than that generic failure. strcasecmp() rather
+        // than a plain === so the same refusal fires on a case-
+        // insensitive filesystem (Windows, and macOS's default APFS) for
+        // any case variant, not only an exact match.
+        if (strcasecmp(basename($tempPath), TempCopySweeper::LOCK_FILE_NAME) === 0) {
+            return self::failure(sprintf("rector-warm-lsp: refusing to diagnose a buffer named like the sweeper's own lock file (%s) in %s", TempCopySweeper::LOCK_FILE_NAME, $directory));
+        }
+
         // A server killed mid-run (kill -9) never reached its `finally`; its
         // leftover next to this file goes now, whatever the startup sweep's
         // depth limit or skipped directories let through.
@@ -272,6 +287,35 @@ final class RectorDiagnosticsSource implements BufferDiagnosticsSource, Workspac
             if (!@mkdir($tempDirectory, 0o700)) {
                 return self::failure(sprintf('rector-warm-lsp: could not create a temp directory in %s', $directory));
             }
+
+            // #179: ownership of $tempDirectory for TempCopySweeper's
+            // purposes is this lock, held for the rest of this method's
+            // run. A server killed outright (kill -9) never releases it
+            // explicitly, but the OS releases every lock a dying process
+            // holds -- including on Windows, where flock() maps to
+            // LockFileEx -- so the next sweep's non-blocking LOCK_EX
+            // acquire attempt succeeds and reads the directory as stale.
+            $lockPath = $tempDirectory . DIRECTORY_SEPARATOR . TempCopySweeper::LOCK_FILE_NAME;
+            $lockHandle = @fopen($lockPath, 'c');
+            if ($lockHandle === false || !flock($lockHandle, LOCK_EX | LOCK_NB)) {
+                if (is_resource($lockHandle)) {
+                    fclose($lockHandle);
+                }
+                @rmdir($tempDirectory);
+
+                return self::failure(sprintf('rector-warm-lsp: could not lock a temp directory in %s', $directory));
+            }
+
+            // Release-audit finding: the sweeper's own removeKnownContents()
+            // now refuses to delete anything unless the directory's full
+            // listing is exactly `.lock` plus one other recorded name --
+            // recorded HERE, in `.lock` itself, rather than assumed from
+            // "whatever single file is inside", so a directory this process
+            // did not create (or one holding anything unexpected) is never
+            // guessed to be safe to empty.
+            @ftruncate($lockHandle, 0);
+            @fwrite($lockHandle, basename($tempPath));
+            @fflush($lockHandle);
 
             // #149: the directory-level guard above stops a symlinked or
             // junctioned `.rector-warm-<pid>` NAME from being entered, but a
@@ -367,6 +411,29 @@ final class RectorDiagnosticsSource implements BufferDiagnosticsSource, Workspac
             // from `try`, including the early return the guard above takes,
             // so unlink() must not be the one place a symlinked $tempPath
             // still gets followed.
+            // #179: the lock is released and its file removed before
+            // rmdir() -- rmdir() refuses a non-empty directory. $lockHandle
+            // may be unset if mkdir() or the lock guard above already
+            // returned before it was opened.
+            // #179 self-review: every other filesystem call on
+            // $tempDirectory/$tempPath in this block is preceded by an
+            // isLinkOrJunction($tempDirectory) re-check, because this
+            // `finally` runs on every exit from `try` and a symlink swap
+            // can happen mid-run, while Rector is still executing (the
+            // same race #142/#144/#149 already assume is live and guard
+            // every other operation here against). The unlink() below is
+            // no exception: skipped whenever $tempDirectory is no longer
+            // the real directory this process created, so a same-named
+            // `.lock` at whatever it now points to is never deleted
+            // through it.
+            if (isset($lockHandle) && is_resource($lockHandle)) {
+                flock($lockHandle, LOCK_UN);
+                fclose($lockHandle);
+                if (!TempCopySweeper::isLinkOrJunction($tempDirectory)) {
+                    @unlink($tempDirectory . DIRECTORY_SEPARATOR . TempCopySweeper::LOCK_FILE_NAME);
+                }
+            }
+
             if (!TempCopySweeper::isLinkOrJunction($tempDirectory) && !TempCopySweeper::isLinkOrJunction($tempPath)) {
                 @unlink($tempPath);
                 @rmdir($tempDirectory);
