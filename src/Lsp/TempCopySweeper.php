@@ -125,12 +125,13 @@ final class TempCopySweeper
     }
 
     /**
-     * Removes only the names this directory is expected to hold (the
-     * lock file and the copy of one buffer, named like its original), then
-     * a non-recursive rmdir(). Anything unexpected inside (a subdirectory,
-     * or a name this sweep does not recognise) is left in place and the
-     * rmdir() then fails harmlessly, leaving the whole directory untouched
-     * rather than partially emptied.
+     * Removes every plain-file entry (the lock file, and the copy of one
+     * buffer, named after its original -- but not restricted to those two
+     * names specifically, only to "is a file"), then a non-recursive
+     * rmdir(). A subdirectory -- the one shape this is not expected to
+     * hold -- is left in place, and the rmdir() then fails harmlessly,
+     * leaving the whole directory untouched rather than partially
+     * emptied.
      */
     private static function removeKnownContents(string $path): bool
     {

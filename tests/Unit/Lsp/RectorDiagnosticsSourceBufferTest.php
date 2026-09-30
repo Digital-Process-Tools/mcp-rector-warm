@@ -310,6 +310,84 @@ final class RectorDiagnosticsSourceBufferTest extends TestCase
     }
 
     /**
+     * #179 self-review finding: every other filesystem call this method
+     * makes on `$tempDirectory`/`$tempPath` after `mkdir()` succeeds is
+     * preceded by an isLinkOrJunction($tempDirectory) re-check in the
+     * `finally` block, because that block runs on every exit from `try`
+     * and a symlink swap can happen mid-run, while Rector is still
+     * executing (the same race #142/#144/#149 already assume is live).
+     * The `.lock` unlink this redesign adds must not be the one operation
+     * left unguarded: swapping $tempDirectory for a symlink to somewhere
+     * else DURING the run (not before it, which the tests above already
+     * cover) must not have a same-named `.lock` deleted through it.
+     */
+    /**
+     * #179 self-review finding (platform audit): the lock file this
+     * redesign creates inside `$tempDirectory` is named `.lock`, at the
+     * same level as the buffer copy -- created first, so a buffer whose
+     * own basename collides with that name would otherwise have its own
+     * fopen(..., 'x') permanently fail with a generic "already exists"
+     * message. Refused explicitly instead, with its own message. Must-not-
+     * fire control, same run: an ordinary basename is unaffected.
+     */
+    public function testABufferNamedLikeTheSweepersOwnLockFileIsRefusedExplicitly(): void
+    {
+        $called = false;
+        $result = $this->source(function () use (&$called): string {
+            $called = true;
+
+            return '{"totals":{"changed_files":0,"errors":0}}';
+        })->diagnoseBuffer($this->workDir . '/src/.lock', "<?php\n");
+
+        self::assertFalse($called, 'a buffer named like the sweeper\'s own lock file must be refused before Rector is asked to run');
+        self::assertStringContainsString('the sweeper\'s own lock file', $result['errors'][0]['message']);
+        self::assertSame(['src', 'src/Sample.php'], $this->projectEntries(), 'control: nothing written for the colliding name, and the original buffer is untouched');
+
+        // Must-fire control: an ordinary basename, same run, is unaffected.
+        $ordinary = $this->source(fn (): string => '{"totals":{"changed_files":0,"errors":0}}')
+            ->diagnoseBuffer($this->original, "<?php\n");
+        self::assertSame([], $ordinary['errors']);
+    }
+
+    public function testTheLockFileIsNotUnlinkedThroughATempDirectorySwappedForASymlinkMidRun(): void
+    {
+        $externalDir = sys_get_temp_dir() . '/mcp-rector-lsp-external-' . bin2hex(random_bytes(4));
+        mkdir($externalDir, 0o700, true);
+        $externalLock = $externalDir . '/.lock';
+        file_put_contents($externalLock, "not yours\n");
+
+        $tempDirectory = null;
+
+        try {
+            $this->source(function (string $path) use (&$tempDirectory, $externalDir): string {
+                $tempDirectory = dirname($path);
+
+                // Simulates the race: the real contents are gone and a
+                // symlink to somewhere else sits at $tempDirectory before
+                // this method's `finally` block runs.
+                unlink($path);
+                unlink($tempDirectory . '/.lock');
+                rmdir($tempDirectory);
+                symlink($externalDir, $tempDirectory);
+
+                return '{"totals":{"changed_files":0,"errors":0}}';
+            })->diagnoseBuffer($this->original, "<?php\n");
+
+            self::assertNotNull($tempDirectory);
+            self::assertSame(
+                "not yours\n",
+                file_get_contents($externalLock),
+                'the finally block must not unlink a same-named .lock through a symlink swapped in mid-run',
+            );
+        } finally {
+            if ($tempDirectory !== null) {
+                self::removeLink($tempDirectory);
+            }
+            $this->removeTree($externalDir);
+        }
+    }
+
+    /**
      * #149: round-2 release-delta audit finding. #142/#144's guards above
      * only ever checked `$tempDirectory` -- a REAL, non-symlinked
      * `.rector-warm-<pid>` directory (planted ahead of time, named after
