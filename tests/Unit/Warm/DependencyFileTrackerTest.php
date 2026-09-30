@@ -124,6 +124,13 @@ final class DependencyFileTrackerTest extends TestCase
      */
     public function testASameSizeEditWithItsMtimePutBackIsDetectedAsStale(): void
     {
+        if (\PHP_OS_FAMILY === 'Windows') {
+            // PHP's stat() on Windows reports the file's creation time as
+            // ctime, so a content edit does not move it. The session never
+            // runs there (no pcntl), so nothing ships relying on this check.
+            self::markTestSkipped('ctime is the creation time on Windows; the session does not run there');
+        }
+
         $tracker = new DependencyFileTracker();
         $path = $this->write('base.php', '<?php function f(): array {}');
         $old = \time() - 100;
