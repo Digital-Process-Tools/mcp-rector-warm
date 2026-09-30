@@ -255,6 +255,47 @@ final class RectorDiagnosticsSourceTest extends TestCase
     }
 
     /**
+     * #141: `diagnoseWorkspace()`'s own errors need to say WHICH file
+     * failed -- a bare message alone cannot disambiguate when several
+     * files are in play. Rector's own multi-file report names the file
+     * per error entry; buildErrors() now preserves it rather than
+     * dropping it on the floor.
+     */
+    public function testDiagnoseWorkspacePreservesTheFileNameOnAPerFileError(): void
+    {
+        $output = '{"totals":{"changed_files":0,"errors":1},'
+            . '"errors":[{"message":"Syntax error, unexpected token","file":"Bad.php","line":7}],'
+            . '"file_diffs":[]}';
+
+        $result = $this->fakeSource($output)->diagnoseWorkspace($this->workDir);
+
+        self::assertSame(
+            [['message' => 'Syntax error, unexpected token', 'line' => 7, 'file' => 'Bad.php']],
+            $result['errors'],
+        );
+    }
+
+    /**
+     * Negative control for the test above: an error entry with no `file`
+     * key at all (Rector's single-file-style shape) must not gain one --
+     * `buildErrors()` must not invent a value where the raw data had none.
+     */
+    public function testDiagnoseWorkspaceLeavesFileAbsentWhenTheRawEntryDidNotNameOne(): void
+    {
+        $output = '{"totals":{"changed_files":0,"errors":1},'
+            . '"errors":[{"message":"Syntax error, unexpected token","line":7}],'
+            . '"file_diffs":[]}';
+
+        $result = $this->fakeSource($output)->diagnoseWorkspace($this->workDir);
+
+        self::assertSame(
+            [['message' => 'Syntax error, unexpected token', 'line' => 7]],
+            $result['errors'],
+        );
+        self::assertArrayNotHasKey('file', $result['errors'][0]);
+    }
+
+    /**
      * #90-equivalent for the workspace path: a refused call (out-of-root,
      * SecurityError) must surface as an `errors` entry, not silently look
      * like "nothing to fix".

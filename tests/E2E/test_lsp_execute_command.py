@@ -46,9 +46,19 @@ APPLY_EDIT_CAPABILITIES = {
 
 def execute_fix_workspace(proc, request_id: int = 2) -> list[dict]:
     """Send the command and collect every frame the server writes back for
-    it -- with no window.workDoneProgress declared here, that is at most an
-    outbound `workspace/applyEdit` request followed by the response to this
-    request itself."""
+    it, reading until the response TO THIS REQUEST ITSELF arrives (an `id`
+    matching request_id, with no `method` -- a response, not another
+    request the server sent us). With no window.workDoneProgress declared
+    here, that response can be preceded by an outbound `workspace/applyEdit`
+    request and/or, since #141, a `window/showMessage` notification naming
+    any file that failed alongside others that succeeded -- a fixed
+    read-one-or-two-frames count (the pre-#141 shape) silently stops short
+    of the real response once a third frame is possible, leaving it
+    unread on the stream and making every assertion below it look for a
+    response that was never captured. Bounded so a genuine protocol
+    regression (the response never arriving at all) fails with a clear
+    error instead of hanging the test forever.
+    """
     proc.stdin.write(frame({
         "jsonrpc": "2.0",
         "id": request_id,
@@ -57,10 +67,15 @@ def execute_fix_workspace(proc, request_id: int = 2) -> list[dict]:
     }))
     proc.stdin.flush()
 
-    frames = [read_frame(proc.stdout)]
-    if frames[0].get("id") != request_id:
-        frames.append(read_frame(proc.stdout))
-    return frames
+    frames = []
+    for _ in range(10):
+        fr = read_frame(proc.stdout)
+        frames.append(fr)
+        if fr.get("id") == request_id and "method" not in fr:
+            return frames
+    raise AssertionError(
+        f"never saw the response to executeCommand (id={request_id}) within 10 frames: {frames}"
+    )
 
 
 def test_fix_workspace_matches_a_cold_rector_apply_across_every_changed_file(tmp_path):

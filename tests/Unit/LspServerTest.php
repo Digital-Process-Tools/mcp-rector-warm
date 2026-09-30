@@ -54,7 +54,7 @@ final class LspServerTest extends TestCase
      * `workspace/executeCommand` has somewhere to go.
      *
      * @param array<string, list<array<string, mixed>>> $files absolute path -> fixes
-     * @param list<array{message: string, line: int}> $errors
+     * @param list<array{message: string, line: int, file?: string}> $errors
      */
     private static function fakeWorkspaceSource(array $files, array $errors = []): DiagnosticsSource
     {
@@ -214,11 +214,45 @@ final class LspServerTest extends TestCase
     }
 
     /**
-     * #102: positive control for the negative assertion above -- a source
-     * that DOES implement WorkspaceDiagnosticsSource makes `initialize`
-     * advertise the command.
+     * #102/#141: positive control -- a source that DOES implement
+     * WorkspaceDiagnosticsSource, and a client that declared
+     * `workspace.applyEdit`, makes `initialize` advertise the command. Paired
+     * with the must-not-fire test directly below (same source, no
+     * `applyEdit`): the docs (docs/lsp.md, docs/lsp-for-rector-maintainers.md)
+     * always said the advertisement was gated on `workspace.applyEdit`, but
+     * the code only ever checked the diagnostics source type -- this test
+     * used to pass with `'capabilities' => []` (no applyEdit at all),
+     * locking in that gap. #141 gates the advertisement on
+     * `canApplyWorkspaceEdit` too, so this now needs the capability it
+     * asserts is required.
      */
     public function testInitializeAdvertisesExecuteCommandProviderForAWorkspaceFixSource(): void
+    {
+        $server = new LspServer('0.1.0-prototype', self::fakeWorkspaceSource([]));
+
+        $responses = $server->handle([
+            'jsonrpc' => '2.0',
+            'id' => 1,
+            'method' => 'initialize',
+            'params' => ['capabilities' => self::APPLY_EDIT_ONLY],
+        ]);
+
+        self::assertSame(
+            ['commands' => ['rector-warm.fixWorkspace']],
+            $responses[0]['result']['capabilities']['executeCommandProvider'],
+        );
+    }
+
+    /**
+     * #141 must-not-fire: paired with the positive control above (same
+     * workspace-fix source). A client that never declared
+     * `workspace.applyEdit` must not see `executeCommandProvider` advertised
+     * at all -- running the command would only ever refuse for such a
+     * client, and an advertised-but-always-refusing command is worse than
+     * not advertising it (a real editor may grey out other UI on the
+     * assumption an advertised command works).
+     */
+    public function testInitializeDoesNotAdvertiseExecuteCommandProviderWithoutApplyEditCapability(): void
     {
         $server = new LspServer('0.1.0-prototype', self::fakeWorkspaceSource([]));
 
@@ -229,10 +263,7 @@ final class LspServerTest extends TestCase
             'params' => ['capabilities' => []],
         ]);
 
-        self::assertSame(
-            ['commands' => ['rector-warm.fixWorkspace']],
-            $responses[0]['result']['capabilities']['executeCommandProvider'],
-        );
+        self::assertArrayNotHasKey('executeCommandProvider', $responses[0]['result']['capabilities']);
     }
 
     /**
@@ -2022,6 +2053,78 @@ final class LspServerTest extends TestCase
             'outside the configured working directory',
             $responses[0]['error']['message'],
         );
+    }
+
+    /**
+     * #141: a file that fails (e.g. a syntax error) alongside others that
+     * succeed is skipped, not refused -- the successful fixes are still
+     * applied, exactly like a cold `rector process` continues past one
+     * broken file (see executeCommand()'s own docblock). But that used to
+     * answer plain success with no indication anything was skipped. Now a
+     * `window/showMessage` (Warning) names the failing file(s) alongside
+     * the still-applied edit.
+     */
+    public function testExecuteCommandWarnsAboutFilesThatFailedWhileStillApplyingTheRest(): void
+    {
+        $server = new LspServer('1.0.0', self::fakeWorkspaceSource(
+            ['/proj/A.php' => [self::fix(0, 1, "<?php\nclass A {}\n", 'RectorA')]],
+            [['message' => 'Syntax error, unexpected token', 'line' => 7, 'file' => '/proj/Bad.php']],
+        ));
+        self::initialize($server, [
+            'workspace' => ['applyEdit' => true, 'workspaceEdit' => ['documentChanges' => true]],
+        ]);
+
+        $responses = $server->handle([
+            'jsonrpc' => '2.0',
+            'id' => 30,
+            'method' => 'workspace/executeCommand',
+            'params' => ['command' => 'rector-warm.fixWorkspace'],
+        ]);
+
+        $applyEdit = null;
+        $showMessage = null;
+        foreach ($responses as $frame) {
+            if (($frame['method'] ?? null) === 'workspace/applyEdit') {
+                $applyEdit = $frame;
+            }
+            if (($frame['method'] ?? null) === 'window/showMessage') {
+                $showMessage = $frame;
+            }
+        }
+
+        self::assertNotNull($applyEdit, 'the other file must still be fixed, not refused wholesale');
+        self::assertSame(
+            ['file:///proj/A.php'],
+            array_column(array_column($applyEdit['params']['edit']['documentChanges'], 'textDocument'), 'uri'),
+        );
+
+        self::assertNotNull($showMessage, 'the failing file must be named in a window/showMessage warning');
+        self::assertSame(2, $showMessage['params']['type'], 'window/showMessage type 2 is Warning');
+        self::assertStringContainsString('/proj/Bad.php', $showMessage['params']['message']);
+        self::assertStringContainsString('Syntax error, unexpected token', $showMessage['params']['message']);
+    }
+
+    /**
+     * Negative control for the test above: no errors at all means no
+     * `window/showMessage` is sent -- the warning is tied to an actual
+     * failure, not sent unconditionally alongside every fix.
+     */
+    public function testExecuteCommandSendsNoShowMessageWhenNothingFailed(): void
+    {
+        $server = new LspServer('1.0.0', self::fakeWorkspaceSource([
+            '/proj/A.php' => [self::fix(0, 1, "<?php\nclass A {}\n", 'RectorA')],
+        ]));
+        self::initialize($server, self::APPLY_EDIT_ONLY);
+
+        $responses = $server->handle([
+            'jsonrpc' => '2.0',
+            'id' => 31,
+            'method' => 'workspace/executeCommand',
+            'params' => ['command' => 'rector-warm.fixWorkspace'],
+        ]);
+
+        $methods = array_map(static fn (array $frame): ?string => $frame['method'] ?? null, $responses);
+        self::assertNotContains('window/showMessage', $methods);
     }
 
     /**

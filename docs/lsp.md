@@ -152,10 +152,16 @@ silently discard the unsaved edits. The command's result lists any skipped
 URIs under `skippedDirtyBuffers`, so the client can tell. A file that is
 open but not dirty is still fixed.
 
-A client that never declared `workspace.applyEdit` gets a JSON-RPC error
-(there would be nowhere to send the fix) rather than a command that silently
-does nothing. An unrecognised command name gets the standard "Method not
-found" error.
+A client that never declared `workspace.applyEdit` never even sees the
+command advertised (#141) -- running it anyway would only ever refuse.
+
+A file that fails (e.g. a syntax error) alongside others that succeed is
+skipped, not refused: the rest of the workspace is still fixed, exactly like
+a cold `rector process` continues past one broken file. Since #141 the
+skipped file(s) are named in a `window/showMessage` (Warning), so this no
+longer looks like plain success with nothing wrong.
+
+An unrecognised command name gets the standard "Method not found" error.
 
 ## Progress
 

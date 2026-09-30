@@ -22,7 +22,7 @@ interface WorkspaceDiagnosticsSource
     /**
      * @return array{
      *   files: array<string, list<array{range: array{start: array{line:int,character:int}, end: array{line:int,character:int}}, newText: string, rectors: list<string>}>>,
-     *   errors: list<array{message: string, line: int}>,
+     *   errors: list<array{message: string, line: int, file?: string}>,
      * }
      *   `files` keys are absolute paths -- Rector's own `file_diffs[].file`
      *   entries, resolved against $rootPath when Rector reports them
