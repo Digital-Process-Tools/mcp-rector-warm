@@ -78,7 +78,16 @@ namespace Dpt\McpRectorWarm\Tests\Unit\Lsp {
         protected function tearDown(): void
         {
             TempCopySweeperPosixErrnoStub::reset();
-            self::removeTree($this->root);
+
+            // #168 self-review: setUp() calls markTestSkipped() BEFORE
+            // $this->root is ever assigned when posix_kill/posix_get_last_error
+            // are unavailable (e.g. the Windows CI leg). PHPUnit still runs
+            // tearDown() after a skip, so accessing the typed property here
+            // unconditionally would throw "must not be accessed before
+            // initialization" and turn a clean Skipped into a confusing Error.
+            if (isset($this->root)) {
+                self::removeTree($this->root);
+            }
         }
 
         private static function removeTree(string $dir): void
