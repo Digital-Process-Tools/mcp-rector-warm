@@ -14,8 +14,18 @@ use Mcp\Schema\Result\CallToolResult;
  */
 final class RectorDiagnosticsSource implements BufferDiagnosticsSource, WorkspaceDiagnosticsSource
 {
-    public function __construct(private readonly RectorTool $tool)
-    {
+    /**
+     * @param \Closure(resource $handle): bool|null $lockAcquirer #188 test
+     *   seam: when given, replaces the raw flock(LOCK_EX|LOCK_NB) call
+     *   diagnoseBuffer() makes on its own temp directory's lock, so a test
+     *   can force that one acquisition to fail without a second real
+     *   process racing on the same file. null (every real caller) keeps
+     *   the actual flock() call.
+     */
+    public function __construct(
+        private readonly RectorTool $tool,
+        private readonly ?\Closure $lockAcquirer = null,
+    ) {
     }
 
     /** #106: the hidden per-server directory an unsaved buffer's temp copy lives in */
@@ -199,8 +209,9 @@ final class RectorDiagnosticsSource implements BufferDiagnosticsSource, Workspac
      * The copy (and its directory) is removed in a `finally`, so a Rector
      * error, a refused call or a throwing runner leaves nothing behind. A
      * server killed outright (kill -9) cannot run that `finally`; its
-     * leftover is removed by TempCopySweeper, at the next server's startup
-     * and before any run in the same directory.
+     * leftover is removed by TempCopySweeper, next to the file being
+     * diagnosed, before any run in the same directory -- there is no
+     * startup sweep (#179 drops it).
      */
     public function diagnoseBuffer(string $absolutePath, string $content): array
     {
@@ -234,8 +245,8 @@ final class RectorDiagnosticsSource implements BufferDiagnosticsSource, Workspac
         }
 
         // A server killed mid-run (kill -9) never reached its `finally`; its
-        // leftover next to this file goes now, whatever the startup sweep's
-        // depth limit or skipped directories let through.
+        // leftover next to this file goes now -- the per-directory sweep
+        // below runs before every buffer write; there is no startup walk.
         TempCopySweeper::sweepDirectory($directory);
 
         try {
@@ -259,9 +270,12 @@ final class RectorDiagnosticsSource implements BufferDiagnosticsSource, Workspac
             // only succeeds when the calling process owns the target, so
             // for a directory an attacker planted ahead of time under this
             // guessable name (matching this server's own live pid, so
-            // TempCopySweeper's startup sweep skips it), the reapply
-            // silently failed (its return value was discarded) and the
-            // guard was a no-op for exactly the case its own comment named.
+            // TempCopySweeper's own per-directory sweep above does not
+            // treat it as stale -- a fresh, still-empty directory is kept
+            // within its grace period, and a live lock is always kept),
+            // the reapply silently failed (its return value was discarded)
+            // and the guard was a no-op for exactly the case its own
+            // comment named.
             // mkdir() is already atomic and exclusive -- refusing whenever
             // it does not succeed, rather than tolerating is_dir() ===
             // true and trying to repair the mode afterwards, closes that
@@ -280,7 +294,18 @@ final class RectorDiagnosticsSource implements BufferDiagnosticsSource, Workspac
             // temp directory" would tell an operator debugging a genuine
             // mkdir() failure that an attacker planted something, when
             // nothing did.
-            if (is_dir($tempDirectory)) {
+            // #188: a `.rector-warm-<pid>` directory reaching here already
+            // matches THIS process's own deterministic name -- nothing else
+            // was ever going to create one under this pid. If all it holds
+            // is an empty `.lock` nobody else can lock (the shape a
+            // lock-acquisition race, or any other imperfect cleanup, can
+            // leave behind), it is reclaimed rather than left to refuse
+            // every buffer in this directory for the rest of this
+            // process's life: TempCopySweeper::reclaimStaleOwnLock()
+            // removes it and this call proceeds as if it had never
+            // existed. Anything else present -- a live lock, or content
+            // beyond a bare empty `.lock` -- is refused exactly as before.
+            if (is_dir($tempDirectory) && !TempCopySweeper::reclaimStaleOwnLock($tempDirectory)) {
                 return self::failure(sprintf('rector-warm-lsp: refusing a pre-existing temp directory in %s', $directory));
             }
 
@@ -297,9 +322,22 @@ final class RectorDiagnosticsSource implements BufferDiagnosticsSource, Workspac
             // acquire attempt succeeds and reads the directory as stale.
             $lockPath = $tempDirectory . DIRECTORY_SEPARATOR . TempCopySweeper::LOCK_FILE_NAME;
             $lockHandle = @fopen($lockPath, 'c');
-            if ($lockHandle === false || !flock($lockHandle, LOCK_EX | LOCK_NB)) {
+            if ($lockHandle === false || !$this->tryLockExclusive($lockHandle)) {
                 if (is_resource($lockHandle)) {
                     fclose($lockHandle);
+                }
+                // #188: the success path a few lines below unlinks `.lock`
+                // before it rmdir()s $tempDirectory (see the `finally`
+                // block) -- this failure path must do the same, or `.lock`
+                // is still there when rmdir() runs, rmdir() silently fails
+                // on the now-non-empty directory, and this process refuses
+                // its own directory for the rest of its life at the
+                // is_dir() guard above. isLinkOrJunction() re-checked here
+                // for the same reason the `finally` block re-checks it: a
+                // symlink swapped in mid-race must never have its target's
+                // same-named `.lock` deleted through this path.
+                if (!TempCopySweeper::isLinkOrJunction($tempDirectory)) {
+                    @unlink($lockPath);
                 }
                 @rmdir($tempDirectory);
 
@@ -321,7 +359,8 @@ final class RectorDiagnosticsSource implements BufferDiagnosticsSource, Workspac
             // junctioned `.rector-warm-<pid>` NAME from being entered, but a
             // genuinely real directory (e.g. one an attacker plants ahead of
             // time, matching this server's own live pid so TempCopySweeper's
-            // startup sweep skips it) passes that guard -- and can then
+            // own per-directory sweep does not treat it as stale) passes
+            // that guard -- and can then
             // contain a symlink at the LEAF path, named after this buffer's
             // own basename. Without this check, the write below would
             // follow it and overwrite whatever it points to, anywhere this
@@ -450,6 +489,21 @@ final class RectorDiagnosticsSource implements BufferDiagnosticsSource, Workspac
     private static function tempDirectoryName(): string
     {
         return self::TEMP_DIRECTORY_PREFIX . getmypid();
+    }
+
+    /**
+     * #188 test seam: real callers get the actual flock(LOCK_EX|LOCK_NB)
+     * attempt; a test may inject $lockAcquirer to force this one
+     * acquisition to fail, simulating the race a second server winds up
+     * winning between this process's own fopen() and flock().
+     *
+     * @param resource $handle
+     */
+    private function tryLockExclusive($handle): bool
+    {
+        return $this->lockAcquirer !== null
+            ? ($this->lockAcquirer)($handle)
+            : flock($handle, LOCK_EX | LOCK_NB);
     }
 
     /**

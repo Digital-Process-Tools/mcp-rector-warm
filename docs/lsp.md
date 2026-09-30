@@ -65,12 +65,17 @@ How the buffer is run:
   at the same path.
 - The copy and its directory are deleted when the run ends, including when
   Rector reports an error. A server killed outright (`kill -9`) cannot do
-  that, so each server removes, at startup, any `.rector-warm-<pid>`
-  directory whose pid is no longer running. The startup walk goes 8 levels
-  deep and skips `vendor/`, `node_modules/` and VCS directories. Before each
-  run, the server also removes such directories next to the file it is
-  diagnosing. A directory whose pid is still running belongs to another
-  server and is kept.
+  that, so before each buffer run, the server removes any stale
+  `.rector-warm-<pid>` directory next to the file it is diagnosing.
+  Ownership is decided by an exclusive lock on a `.lock` file inside each
+  such directory, not by pid liveness: a directory whose lock is still held
+  belongs to a live server and is kept; one whose lock is free (its owner
+  is gone, on every platform, including `kill -9`) is removed. There is no
+  startup walk over the project -- only this per-directory check, run
+  before a write into that same directory. A directory left behind by a
+  version before this design (0.7.1 and earlier) is not swept
+  automatically; it is ordinary hidden project litter and can be deleted
+  by hand.
 
 `rector.php` and `composer.lock` are configuration, not code Rector
 refactors, so their unsaved buffers are not diagnosed. They take effect when

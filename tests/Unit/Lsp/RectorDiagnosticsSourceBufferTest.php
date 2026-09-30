@@ -94,8 +94,11 @@ final class RectorDiagnosticsSourceBufferTest extends TestCase
     /**
      * @param \Closure(string $path): string $behaviour gets the path Rector
      *   was asked to process and returns Rector's raw output (or throws)
+     * @param \Closure(resource $handle): bool|null $lockAcquirer #188:
+     *   forwarded to RectorDiagnosticsSource's own test seam so a test can
+     *   force the lock-failure branch without a second real process.
      */
-    private function source(\Closure $behaviour): RectorDiagnosticsSource
+    private function source(\Closure $behaviour, ?\Closure $lockAcquirer = null): RectorDiagnosticsSource
     {
         $runner = new class ($behaviour) implements RunnerInterface {
             public function __construct(private readonly \Closure $behaviour)
@@ -122,7 +125,7 @@ final class RectorDiagnosticsSourceBufferTest extends TestCase
             }
         };
 
-        return new RectorDiagnosticsSource(RectorTool::withRunner($runner));
+        return new RectorDiagnosticsSource(RectorTool::withRunner($runner), $lockAcquirer);
     }
 
     public function testTheBufferIsProcessedFromATempFileBesideTheOriginalThenRemoved(): void
@@ -421,9 +424,9 @@ final class RectorDiagnosticsSourceBufferTest extends TestCase
      * #149: round-2 release-delta audit finding. #142/#144's guards above
      * only ever checked `$tempDirectory` -- a REAL, non-symlinked
      * `.rector-warm-<pid>` directory (planted ahead of time, named after
-     * this server's own live pid so TempCopySweeper's startup sweep skips
-     * it -- it explicitly never sweeps its own pid) passes both of those
-     * checks, and the leaf `$tempPath` inside it was never checked at all.
+     * this server's own live pid, so TempCopySweeper's own per-directory
+     * sweep does not treat it as stale) passes both of those checks, and
+     * the leaf `$tempPath` inside it was never checked at all.
      * A symlink planted there, named after the buffer's own basename, must
      * not be written through, and -- the same finally-block gap #142/#144
      * closed for `$tempDirectory` -- must not be unlinked through either.
@@ -480,8 +483,8 @@ final class RectorDiagnosticsSourceBufferTest extends TestCase
      * it slips past the exact guard that refuses a symlink above. Same
      * premise as that test: a real, non-symlinked `.rector-warm-<pid>`
      * directory, planted ahead of time and named after this server's own
-     * live pid so the startup sweep skips it, with a hard link at the leaf
-     * instead of a symlink.
+     * live pid so TempCopySweeper's own per-directory sweep does not treat
+     * it as stale, with a hard link at the leaf instead of a symlink.
      */
     public function testABufferForAHardLinkedTempFileInARealTempDirectoryIsRefusedAndNothingOutsideIsTouched(): void
     {
@@ -524,9 +527,10 @@ final class RectorDiagnosticsSourceBufferTest extends TestCase
      * when the CALLING PROCESS OWNS the target -- for a directory an
      * attacker plants ahead of time under this guessable
      * `.rector-warm-<pid>` name (matching this server's own live pid, so
-     * the startup sweep skips it), chmod() on a directory owned by a
-     * DIFFERENT user silently fails and the guard was a no-op for exactly
-     * the case it named. A single-user test process cannot reproduce a
+     * TempCopySweeper's own per-directory sweep does not treat it as
+     * stale), chmod() on a directory owned by a DIFFERENT user silently
+     * fails and the guard was a no-op for exactly the case it named. A
+     * single-user test process cannot reproduce a
      * genuinely different owner, so this asserts the stronger property the
      * fix actually gives: diagnoseBuffer() refuses ANY pre-existing
      * `.rector-warm-<pid>` directory outright, rather than reusing it and
@@ -688,6 +692,102 @@ final class RectorDiagnosticsSourceBufferTest extends TestCase
             // target, same as it does for a directory symlink on Windows.
             self::removeLink($junctionPath);
             $this->removeTree($externalDir);
+        }
+    }
+
+    /**
+     * #188 must-fire: force flock() to fail right after fopen() succeeds --
+     * the exact race a rival server briefly winning the lock leaves behind.
+     * The lock-failure branch must unlink `.lock` before it rmdir()s the
+     * temp directory, so nothing survives to trip the "pre-existing temp
+     * directory" guard for the rest of this process's life. Paired,
+     * same test, with the must-fire positive control the issue itself asks
+     * for: a second, ordinary buffer run in the same directory afterwards
+     * must still publish diagnostics.
+     */
+    public function testALockAcquisitionRaceLeavesNoOrphanAndTheNextRunStillPublishes(): void
+    {
+        $tempDirectory = null;
+        $failed = $this->source(
+            fn (): string => '{"totals":{"changed_files":0,"errors":0}}',
+            function ($handle) use (&$tempDirectory): bool {
+                $meta = stream_get_meta_data($handle);
+                $tempDirectory = dirname($meta['uri']);
+
+                return false;
+            },
+        )->diagnoseBuffer($this->original, "<?php\n");
+
+        self::assertStringContainsString('could not lock a temp directory', $failed['errors'][0]['message']);
+        self::assertNotNull($tempDirectory);
+        self::assertDirectoryDoesNotExist(
+            $tempDirectory,
+            'the lock-failure branch must not leave the temp directory (or its .lock) behind',
+        );
+
+        $succeeded = $this->source(fn (): string => '{"totals":{"changed_files":0,"errors":0}}')
+            ->diagnoseBuffer($this->original, "<?php\n");
+        self::assertSame(
+            [],
+            $succeeded['errors'],
+            'a buffer run after the race must still publish diagnostics, not refuse a leftover directory',
+        );
+    }
+
+    /**
+     * #188 must-fire: an own `.rector-warm-<pid>` directory holding
+     * nothing but an empty, unheld `.lock` -- the shape any imperfect
+     * cleanup, not only the race above, can leave behind -- must be
+     * reclaimed rather than permanently refusing every buffer in this
+     * directory.
+     */
+    public function testAnOwnDirectoryHoldingOnlyAnEmptyFreeLockIsReclaimed(): void
+    {
+        $tempDirectory = $this->workDir . '/src/.rector-warm-' . getmypid();
+        mkdir($tempDirectory, 0o700, true);
+        file_put_contents($tempDirectory . '/' . \Dpt\McpRectorWarm\Lsp\TempCopySweeper::LOCK_FILE_NAME, '');
+
+        $result = $this->source(fn (): string => '{"totals":{"changed_files":0,"errors":0}}')
+            ->diagnoseBuffer($this->original, "<?php\n");
+
+        self::assertSame(
+            [],
+            $result['errors'],
+            'an own directory holding only an empty, free .lock must be reclaimed rather than refused',
+        );
+    }
+
+    /**
+     * #188 must-not-fire, paired with the reclaim test above: a `.lock`
+     * genuinely held by a live process (the second `fopen()` on this same
+     * path is an independent open file description, so it conflicts with
+     * the first exactly as it would across two real processes -- the same
+     * technique TempCopySweeperTest::plantLocked() already relies on) must
+     * never be reclaimed. The directory stays refused, and Rector is never
+     * asked to run.
+     */
+    public function testAnOwnDirectoryHoldingOnlyALiveLockIsNotReclaimed(): void
+    {
+        $tempDirectory = $this->workDir . '/src/.rector-warm-' . getmypid();
+        mkdir($tempDirectory, 0o700, true);
+        $lockPath = $tempDirectory . '/' . \Dpt\McpRectorWarm\Lsp\TempCopySweeper::LOCK_FILE_NAME;
+        $handle = fopen($lockPath, 'c');
+        self::assertIsResource($handle, 'could not open the test lock file');
+        self::assertTrue(flock($handle, LOCK_EX | LOCK_NB), 'could not hold the test lock');
+
+        try {
+            $called = false;
+            $result = $this->source(function () use (&$called): string {
+                $called = true;
+
+                return '{"totals":{"changed_files":0,"errors":0}}';
+            })->diagnoseBuffer($this->original, "<?php\n");
+
+            self::assertFalse($called, 'a directory whose lock is genuinely held must still be refused, not reclaimed');
+            self::assertStringContainsString('pre-existing temp directory', $result['errors'][0]['message']);
+        } finally {
+            flock($handle, LOCK_UN);
+            fclose($handle);
         }
     }
 
