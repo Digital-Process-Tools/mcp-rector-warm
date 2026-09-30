@@ -96,3 +96,31 @@ fragment whose claim is about the code).
   budget a structural dead end), is closed via #119 (`ProcessTree::killTree()`, confirmed in
   `discardProcWorker()`). The retry-widening saga both fragments document is superseded history, not
   an open lesson. No rule needed.
+- **`trap.d/161.isalive-ambiguous-errno-treated-as-dead.md`** (still true, checked against HEAD by
+  curate 2026-09-30) -- `TempCopySweeper::isAlive()` (`src/Lsp/TempCopySweeper.php`) still collapses
+  any `posix_kill()` failure other than EPERM straight to `false` ("known dead"), contradicting its
+  own three-way "true/false/null" contract for an unrecognised errno. One-off finding about the code,
+  not an agent-facing lesson -- filed as #168.
+- **`trap.d/165.fopen-x-does-not-refuse-a-dangling-symlink.md`** (still true, checked against HEAD by
+  curate 2026-09-30) -- `fopen($tempPath, 'x')` in `RectorDiagnosticsSource.php` still does not refuse
+  a DANGLING symlink (it follows the link and creates the target instead), so the neighbouring
+  comment's "refuses unconditionally if anything ... already exists" claim is still overbroad for that
+  one case. The residual TOCTOU window this leaves (a dangling symlink appearing after
+  `isLinkOrJunction()` already ran) is the same family as, and already carried by, #145 -- no new
+  issue filed. The `changelog.d/161.fixed.md` half of this fragment's own claim (that the wording was
+  corrected in the #165 commit) is confirmed: `CHANGELOG.md`'s `[0.7.0]` `#161` entry now names this
+  exact residual gap by this fragment's own filename. One-off finding about the code, not an
+  agent-facing lesson.
+- **`trap.d/165.isreparsepoint-fail-closed-scope-unclear.md`** (still true, checked against HEAD by
+  curate 2026-09-30) -- `TempCopySweeper::isReparsePoint()` (`src/Lsp/TempCopySweeper.php`) still
+  reads any `fsutil reparsepoint query` exit other than a `proc_open()` spawn failure as "not a
+  junction" via `proc_close($process) === 0`, a fail-open reading of an unconfirmed answer rather than
+  the fail-closed direction #142/#144/#161/#162 established. Reasoned, not observed -- no Windows host
+  available to confirm whether `fsutil` ever exits non-zero for a reason other than "genuinely not a
+  junction". One-off finding about the code, not an agent-facing lesson -- filed as #169.
+- **`trap.d/165.stderr-fallback-unreachable-in-forked-grandchild.md`** (still true, checked against
+  HEAD by curate 2026-09-30) -- the class-level docblock above `RectorRunner::applySkipsOfOriginalPath()`
+  still claims a fail-open "says so on stderr" unconditionally, which is only true on the non-forked
+  path; the catch block itself already guards the `fwrite()` correctly and the inline comment beside
+  it already documents the forked-grandchild case accurately. One-off doc-accuracy finding, not an
+  agent-facing lesson -- filed as #170.
