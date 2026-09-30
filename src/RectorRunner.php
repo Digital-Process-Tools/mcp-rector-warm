@@ -2119,6 +2119,21 @@ class RectorRunner implements RunnerInterface
             $_SERVER['argv'][0] = $rectorBin;
         }
 
+        // #184: Rector\Console\ConsoleApplication::doRun() unconditionally calls
+        // XdebugHandler::check() before running any command. When Xdebug is loaded,
+        // check() restarts the OS process using $_SERVER['argv'] as-is. On the
+        // worker/no-pcntl-cold paths $_SERVER['argv'][1..] is still whatever the daemon
+        // was originally launched with (the argv[0] spoof above only ever touches index
+        // 0), never THIS call's own $argv -- so a restart silently runs Rector for real,
+        // without --dry-run, over every path in the daemon's config. XdebugHandler's own
+        // documented escape hatch is an env var named "{envPrefix}_ALLOW_XDEBUG" (Rector
+        // constructs it with envPrefix 'rector', i.e. RECTOR_ALLOW_XDEBUG); setting it
+        // makes check() skip the restart outright, independent of what argv contains.
+        // Symmetric with the argv[0] save/restore just above: set for this call only,
+        // restore whatever the env held before, so nothing leaks across calls.
+        $origAllowXdebugEnv = getenv('RECTOR_ALLOW_XDEBUG');
+        putenv('RECTOR_ALLOW_XDEBUG=1');
+
         // Rector's JsonOutputFormatter uses raw `echo` (rector/src/ChangesReporting/Output/JsonOutputFormatter.php:40)
         // bypassing the Symfony OutputInterface. Wrap in ob_*() to capture and prevent it from
         // leaking into our MCP stdio transport.
@@ -2129,6 +2144,11 @@ class RectorRunner implements RunnerInterface
             $echoed = ob_get_clean();
             if ($origArgv0 !== null) {
                 $_SERVER['argv'][0] = $origArgv0;
+            }
+            if ($origAllowXdebugEnv === false) {
+                putenv('RECTOR_ALLOW_XDEBUG');
+            } else {
+                putenv('RECTOR_ALLOW_XDEBUG=' . $origAllowXdebugEnv);
             }
         }
 

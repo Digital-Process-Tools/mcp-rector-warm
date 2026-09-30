@@ -2014,6 +2014,202 @@ final class RectorRunnerTest extends TestCase
             rmdir($tmp);
         }
     }
+
+    /**
+     * #184: Rector's ConsoleApplication::doRun() unconditionally calls
+     * XdebugHandler::check() before running any command. When Xdebug is loaded,
+     * check() restarts the OS process using the CURRENT $_SERVER['argv'] -- which,
+     * on the worker/cold-subprocess paths, is the daemon's own original launch argv
+     * (no --dry-run), not this call's $argv. That restart runs Rector for real over
+     * every configured path. Setting RECTOR_ALLOW_XDEBUG=1 (XdebugHandler's own
+     * documented escape hatch, envPrefix 'rector') for the duration of
+     * application->run() makes check() skip the restart entirely, regardless of
+     * what $_SERVER['argv'] happens to contain.
+     *
+     * Positive control: the fake application records the env value it observed
+     * DURING run(), pinning that the value was actually set before run() was
+     * called -- not merely set-then-unset around an empty block.
+     */
+    public function testExecuteAllowsXdebugDuringApplicationRunToPreventARealRestart(): void
+    {
+        $runner = new RectorRunner();
+
+        $observedEnvDuringRun = null;
+        $application = new class ($observedEnvDuringRun) {
+            private $ref;
+
+            public function __construct(&$ref)
+            {
+                $this->ref = &$ref;
+            }
+
+            public function run(object $input, object $output): int
+            {
+                $this->ref = getenv('RECTOR_ALLOW_XDEBUG');
+
+                return 0;
+            }
+        };
+
+        $this->setPrivateRunnerState($runner, $application);
+
+        $method = new \ReflectionMethod(RectorRunner::class, 'execute');
+        $method->setAccessible(true);
+        $method->invoke($runner, ['rector', 'process', '--dry-run'], true);
+
+        self::assertSame(
+            '1',
+            $observedEnvDuringRun,
+            'RECTOR_ALLOW_XDEBUG must be "1" while application->run() executes, so '
+            . "XdebugHandler::check() never restarts the process using stale argv",
+        );
+    }
+
+    /**
+     * #184, restore half: the env var must not leak past the call it was set for
+     * -- symmetric with the existing argv[0] save/restore a few lines above it.
+     * Must-fire control: start from a concrete sentinel value, not from "unset",
+     * so a bug that simply never restores anything is caught, not just a bug that
+     * clears an already-empty variable.
+     */
+    public function testExecuteRestoresThePriorXdebugEnvValueAfterTheCall(): void
+    {
+        $previous = getenv('RECTOR_ALLOW_XDEBUG');
+        putenv('RECTOR_ALLOW_XDEBUG=sentinel-184');
+
+        try {
+            $runner = new RectorRunner();
+            $application = new class () {
+                public function run(object $input, object $output): int
+                {
+                    return 0;
+                }
+            };
+
+            $this->setPrivateRunnerState($runner, $application);
+
+            $method = new \ReflectionMethod(RectorRunner::class, 'execute');
+            $method->setAccessible(true);
+            $method->invoke($runner, ['rector', 'process', '--dry-run'], true);
+
+            self::assertSame(
+                'sentinel-184',
+                getenv('RECTOR_ALLOW_XDEBUG'),
+                'execute() must restore whatever RECTOR_ALLOW_XDEBUG held before the call, '
+                . 'the same way it restores $_SERVER["argv"][0]',
+            );
+        } finally {
+            if ($previous === false) {
+                putenv('RECTOR_ALLOW_XDEBUG');
+            } else {
+                putenv('RECTOR_ALLOW_XDEBUG=' . $previous);
+            }
+        }
+    }
+
+    /**
+     * #184, restore-to-unset half: the auditor's own review of this fix (recorded in
+     * the pull request) flagged that the sibling test above only ever primes a
+     * concrete sentinel before the call, so it only ever exercises the
+     * `putenv('NAME=' . $prior)` branch of the restore -- never the
+     * `$origAllowXdebugEnv === false` branch, which is the ordinary real-world case
+     * for anyone who has not already worked around #184 by setting the env
+     * themselves. This test starts from "definitely unset" (unsetting first, rather
+     * than trusting the ambient environment to already be that way) and asserts the
+     * env is unset again afterward, so a regression that leaves it as an empty
+     * string instead of truly absent (a documented historical quirk of some
+     * putenv() implementations) is caught rather than silently accepted.
+     */
+    public function testExecuteRestoresXdebugEnvToUnsetWhenItWasUnsetBeforeTheCall(): void
+    {
+        $previous = getenv('RECTOR_ALLOW_XDEBUG');
+        putenv('RECTOR_ALLOW_XDEBUG');
+        self::assertFalse(
+            getenv('RECTOR_ALLOW_XDEBUG'),
+            'test precondition: the env must genuinely be unset before the call, not merely absent from this test\'s own knowledge of it',
+        );
+
+        try {
+            $runner = new RectorRunner();
+            $application = new class () {
+                public function run(object $input, object $output): int
+                {
+                    return 0;
+                }
+            };
+
+            $this->setPrivateRunnerState($runner, $application);
+
+            $method = new \ReflectionMethod(RectorRunner::class, 'execute');
+            $method->setAccessible(true);
+            $method->invoke($runner, ['rector', 'process', '--dry-run'], true);
+
+            self::assertFalse(
+                getenv('RECTOR_ALLOW_XDEBUG'),
+                'execute() must leave RECTOR_ALLOW_XDEBUG genuinely unset (getenv() === false) '
+                . 'after the call when it was unset before -- not merely set to an empty string',
+            );
+        } finally {
+            if ($previous === false) {
+                putenv('RECTOR_ALLOW_XDEBUG');
+            } else {
+                putenv('RECTOR_ALLOW_XDEBUG=' . $previous);
+            }
+        }
+    }
+
+    private function setPrivateRunnerState(RectorRunner $runner, object $application): void
+    {
+        foreach ([
+            'application' => $application,
+            'container' => new class () {
+                public function get(string $id): object
+                {
+                    // Deliberately has no areSomeRectorsLoaded() method, so execute()'s
+                    // onboarding check (is_object() && method_exists()) is false and the
+                    // real container path is never exercised by this test double.
+                    return new \stdClass();
+                }
+            },
+            // Rector's own vendor tree is prefix-scoped (a build-time namespace prefix
+            // execute() resolves via detectRectorPrefix()/resolvePrefixed(), not present in
+            // this test process), so the real Symfony\Component\Console classes are not
+            // reachable by their normal FQCN here. These two minimal doubles stand in for
+            // ArgvInput/BufferedOutput -- execute() only ever does `new $inputClass($argv)`,
+            // `new $outputClass()` and, on the output, `->fetch()`.
+            'inputClass' => RectorRunnerTest184FakeInput::class,
+            'outputClass' => RectorRunnerTest184FakeOutput::class,
+        ] as $prop => $value) {
+            $property = new \ReflectionProperty(RectorRunner::class, $prop);
+            $property->setAccessible(true);
+            $property->setValue($runner, $value);
+        }
+    }
+}
+
+/**
+ * @internal minimal doubles for RectorRunner::execute()'s inputClass/outputClass, used by
+ * the #184 Xdebug-env tests above -- standing in for Symfony's ArgvInput/BufferedOutput,
+ * which live under Rector's own build-time namespace prefix and are not reachable by their
+ * normal FQCN from a test process.
+ */
+final class RectorRunnerTest184FakeInput
+{
+    /** @param list<string> $argv */
+    public function __construct(array $argv)
+    {
+    }
+}
+
+/**
+ * @internal see RectorRunnerTest184FakeInput.
+ */
+final class RectorRunnerTest184FakeOutput
+{
+    public function fetch(): string
+    {
+        return '';
+    }
 }
 
 /**
