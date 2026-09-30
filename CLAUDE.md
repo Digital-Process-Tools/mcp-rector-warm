@@ -4,6 +4,17 @@ Default branch `main`. This file is read by every agent that touches the
 repo, so it carries what someone needs before their first change, and nothing that
 would be stale by next week.
 
+## What this repo is for
+
+Two things: a language server (`bin/rector-warm-lsp`) and an MCP server that **work** for a
+real user -- warm output equal to cold `rector process`, no crash, no hang, no lost edit, no
+junk left in the user's project. Everything else is noise.
+
+Before dispatching or merging anything, ask: does this make the LSP or the MCP server work
+better for someone using it? If not, do not do it. That rules out doc-citation drift,
+docblock wording, tooling and plugin plumbing, and rare-platform edge cases that break no
+real use. Close such issues as not planned rather than carrying them.
+
 ## Running the tests
 
 ```
