@@ -206,6 +206,69 @@ final class TempCopySweeper
     }
 
     /**
+     * #188: reclaims a server's OWN `.rector-warm-<pid>` directory -- the
+     * caller already knows $path matches its own deterministic name,
+     * nothing else was ever going to create one under this process's pid
+     * -- when a lock-acquisition race (or any other imperfect cleanup) has
+     * left it holding nothing but an empty, unheld `.lock`. Unlike
+     * removeIfStale()/removeKnownContents() above, this never judges
+     * mtime or a recorded basename: an entirely bare `.lock`, with no
+     * companion buffer file, is a shape production only ever leaves via
+     * that race (the basename is written right after the lock is
+     * acquired, never before), so the one check that matters is whether
+     * this process itself can take the lock right now.
+     *
+     * Refuses (returns false, changing nothing) for: a symlinked or
+     * junctioned $path; anything other than exactly one `.lock` file
+     * inside it; and a `.lock` another process still holds -- the
+     * must-not-fire case a live server's own in-progress run must never
+     * be swept out from under it.
+     */
+    public static function reclaimStaleOwnLock(string $path): bool
+    {
+        if (self::isLinkOrJunction($path)) {
+            return false;
+        }
+
+        $entries = @scandir($path);
+        if ($entries === false) {
+            return false;
+        }
+        if (array_values(array_diff($entries, ['.', '..'])) !== [self::LOCK_FILE_NAME]) {
+            return false;
+        }
+
+        $lockPath = $path . DIRECTORY_SEPARATOR . self::LOCK_FILE_NAME;
+        $handle = @fopen($lockPath, 'c');
+        if ($handle === false) {
+            return false;
+        }
+
+        try {
+            if (!flock($handle, LOCK_EX | LOCK_NB)) {
+                return false;
+            }
+
+            flock($handle, LOCK_UN);
+        } finally {
+            fclose($handle);
+        }
+
+        // Re-checked immediately before deleting anything, the same
+        // defensive shape removeIfStale()/the LSP's own `finally` block
+        // use elsewhere in this feature: the lock was free a moment ago,
+        // but nothing prevents a symlink swap between that check and this
+        // unlink() if $path is ever reachable by another writer.
+        if (self::isLinkOrJunction($path)) {
+            return false;
+        }
+
+        @unlink($lockPath);
+
+        return @rmdir($path);
+    }
+
+    /**
      * #144: is_link() is documented reliable for a POSIX symlink and a
      * Windows symlink, but NOT for an NTFS junction (`mklink /J`, which --
      * unlike `mklink /D` -- needs no elevated privilege) -- a distinct
