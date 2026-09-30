@@ -1623,24 +1623,42 @@ class RectorRunner implements RunnerInterface
      * Bounded (#153): the standby this discards may still be mid-boot -- the
      * client closing stdin right after a call that forced a config-change
      * reboot (runViaStandbyWorker()'s finally block always starts a fresh one,
-     * fire-and-forget) races exactly this destructor. 2s is generous next to
-     * how fast a kill signal normally resolves; see discardProcWorker()'s own
-     * docblock for why it is not unconditional.
+     * fire-and-forget) races exactly this destructor. The E2E harness this
+     * issue was filed against (tests/E2E/stdio_tap.py's EXIT_GRACE) gives the
+     * whole daemon only 1.5s to exit after stdin closes, so ONE shared 1.2s
+     * budget covers both this call and stopRetiredProcWorkers() below, with
+     * margin under that window for the rest of this method's own work --
+     * not 2s per call, which could clear either wait alone yet still miss
+     * the harness's own combined deadline. See discardProcWorker()'s own
+     * docblock for why the wait is bounded rather than unconditional at all.
      */
     public function __destruct()
     {
-        $this->discardProcWorker(false, \hrtime(true) + 2_000_000_000);
-        $this->stopRetiredProcWorkers();
+        $deadlineNs = \hrtime(true) + 1_200_000_000;
+        $this->discardProcWorker(false, $deadlineNs);
+        $this->stopRetiredProcWorkers($deadlineNs);
     }
 
-    /** Stop and reap every retired worker now, rather than waiting for it to exit on
-     *  its own -- they have all served their call already. */
-    private function stopRetiredProcWorkers(): void
+    /**
+     * Stop and reap every retired worker now, rather than waiting for it to exit on
+     * its own -- they have all served their call already.
+     *
+     * $deadlineNs (#153): shared with __destruct()'s own discardProcWorker() call --
+     * a retired worker has already connected and served its call, so it is far less
+     * likely to be caught by the mid-boot DLL-loader-lock race that section theorizes
+     * about, but nothing rules it out, and an unconditional proc_close() here would
+     * undo the whole point of bounding the standby's own wait right above it. null
+     * (every other call site, via reboot()) keeps the old fully-blocking behaviour.
+     */
+    private function stopRetiredProcWorkers(?int $deadlineNs = null): void
     {
         foreach ($this->retiredProcWorkers as $retired) {
             $status = \proc_get_status($retired['proc']);
             if ($status['running']) {
                 \proc_terminate($retired['proc'], 9);
+            }
+            if ($deadlineNs !== null && !$this->awaitProcExitOrDeadline($retired['proc'], $deadlineNs)) {
+                continue;
             }
             \proc_close($retired['proc']);
             @\unlink($retired['stderr']);

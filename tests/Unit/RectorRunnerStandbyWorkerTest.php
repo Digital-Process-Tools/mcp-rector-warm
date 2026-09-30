@@ -1053,7 +1053,13 @@ final class RectorRunnerStandbyWorkerTest extends TestCase
         $elapsed = microtime(true) - $start;
 
         try {
-            self::assertLessThan(4.0, $elapsed, "__destruct() must not block past its own 2s bounded deadline (took {$elapsed}s)");
+            // #153 follow-up (audit finding): the bound must clear
+            // tests/E2E/stdio_tap.py's own 1.5s EXIT_GRACE, the exact window
+            // the flaky harness measures -- not merely be "generous" in the
+            // abstract. __destruct() budgets 1.2s combined for both
+            // discardProcWorker() and stopRetiredProcWorkers(); 1.5 asserted
+            // here (not 1.2) leaves slack for this test's own overhead.
+            self::assertLessThan(1.5, $elapsed, "__destruct() must clear the E2E harness's own 1.5s EXIT_GRACE (took {$elapsed}s)");
         } finally {
             if (is_resource($proc)) {
                 proc_terminate($proc, 9);
