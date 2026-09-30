@@ -331,22 +331,40 @@ final class RectorDiffParserTest extends TestCase
 
     public function testParseHunksFallsBackToTheFileWideEolWhenAHunkHasNoKeptLineOfItsOwn(): void
     {
-        // Self-review (independent auditor pass): a pure-insertion hunk
+        // Self-review (independent auditor pass, then a SECOND-ROUND
+        // Explore review pass on THIS test itself): a pure-insertion hunk
         // with no surrounding context has no `-`/` ` line of its own to
         // read -- it must fall back to what the REST of the diff's kept
-        // lines say (here: CRLF, from hunk 1) rather than defaulting to a
-        // bare "\n" and silently reproducing #160 in this narrow shape.
+        // lines say rather than defaulting to a bare "\n" and silently
+        // reproducing #160 in this narrow shape.
+        //
+        // Second-round finding: an earlier version of this test used only
+        // ONE distinct eol signal in the whole diff (hunk 1's own CRLF
+        // WAS the file-wide fallback value too), so it passed identically
+        // under the OLD file-wide-only implementation (which stamps the
+        // same value onto every hunk regardless of that hunk's own kept
+        // lines) -- it pinned nothing. Three hunks now: hunk 1's own kept
+        // lines are LF-only, hunk 3's are CRLF (the only source of the
+        // file-wide fallback signal), and hunk 2 is the pure-insertion
+        // hunk with no kept line of its own. A regression to file-wide-
+        // only stamping would incorrectly give hunk 1 the CRLF fallback
+        // too (it has no per-hunk override in that implementation),
+        // failing the hunks[0] assertion below.
         $diff = "--- Original\n+++ New\n"
-            . "@@ -1,3 +1,3 @@\n <?php\r\n-old1\r\n+new1\n <?php\r\n"
-            . "@@ -20,0 +20,1 @@\n+inserted\n";
+            . "@@ -1,3 +1,3 @@\n <?php\n-old1\n+new1\n <?php\n"
+            . "@@ -20,0 +20,1 @@\n+inserted\n"
+            . "@@ -40,3 +40,3 @@\n <?php\r\n-old3\r\n+new3\n <?php\r\n";
 
         $hunks = RectorDiffParser::parseHunks($diff);
 
-        self::assertCount(2, $hunks);
-        self::assertSame("\r\n", $hunks[0]['eol']);
+        self::assertCount(3, $hunks);
+        // Hunk 1's OWN kept lines are LF-only -- must stay "\n" even
+        // though the file-wide fallback (fed by hunk 3) is CRLF.
+        self::assertSame("\n", $hunks[0]['eol']);
         // Hunk 2 has no kept line of its own -- falls back to the
-        // file-wide signal from hunk 1, not a hardcoded "\n".
+        // file-wide signal (from hunk 3), not a hardcoded "\n".
         self::assertSame("\r\n", $hunks[1]['eol']);
+        self::assertSame("\r\n", $hunks[2]['eol']);
     }
 
     public function testParseHunksDoesNotOverStripARealTrailingCarriageReturn(): void
