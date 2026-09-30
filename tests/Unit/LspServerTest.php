@@ -109,6 +109,82 @@ final class LspServerTest extends TestCase
         };
     }
 
+    /**
+     * #147 self-review finding (oss:auditor pass): building a `file://`
+     * test URI via `'file://' . $path` (as the pre-existing case-fold test
+     * above already does) breaks on a platform where sys_get_temp_dir()
+     * returns a backslash-separated path -- parse_url() cannot read a
+     * PHP_URL_PATH out of `file://C:\Users\...\A.php`, so uriToPath()
+     * falls back to treating the whole raw URI string as the path, which
+     * then fails stat() and routes the comparison away from the dev+ino
+     * path these tests exist to exercise. Mirrors LspServer::pathToUri()'s
+     * own backslash normalisation, without its percent-encoding -- these
+     * tests deliberately want a literal, non-percent-encoded URI on one
+     * side.
+     */
+    private static function filePathToTestUri(string $absolutePath): string
+    {
+        // #147 round-2 self-review finding, from a real windows-latest CI
+        // failure (not reasoned -- observed): this helper normalised
+        // backslash separators but did not reproduce
+        // LspServer::pathToUri()'s OTHER piece of Windows handling -- a
+        // leading '/' inserted before a drive letter, so `file://` plus a
+        // bare `C:/...` collapses the URI's authority component onto the
+        // drive letter instead of leaving it empty. `pathToUri()` itself
+        // produces `file:///C:/...` (three slashes: scheme, empty
+        // authority, then the drive-letter path) for exactly this shape;
+        // this helper produced `file://C:/...` (two slashes), a URI this
+        // test's own production-derived expectations never actually see
+        // pathToUri() emit. Every windows-latest failure this caused was a
+        // string-identity mismatch on the EXPECTED side, not a functional
+        // regression: isBufferDirty() itself skipped/fixed correctly in
+        // every case.
+        $normalized = str_replace('\\', '/', $absolutePath);
+        if (preg_match('#^[A-Za-z]:#', $normalized) === 1) {
+            $normalized = '/' . $normalized;
+        }
+
+        return 'file://' . $normalized;
+    }
+
+    /**
+     * #147 round-2 self-review finding, from the same windows-latest CI
+     * failure as filePathToTestUri() above -- pinned directly rather than
+     * only through the four higher-level fixWorkspace tests, so a future
+     * change to this helper's drive-letter handling fails here first
+     * rather than as a four-way array-identity mismatch on a platform
+     * this developer's own machine cannot reproduce.
+     */
+    public function testFilePathToTestUriMatchesPathToUrisDriveLetterHandling(): void
+    {
+        self::assertSame('file:///C:/Users/x/A.php', self::filePathToTestUri('C:\\Users\\x\\A.php'));
+        self::assertSame('file:///tmp/x/A.php', self::filePathToTestUri('/tmp/x/A.php'));
+    }
+
+    /**
+     * #147 self-review finding (oss:auditor pass): the dev+ino comparison
+     * this fix relies on is a no-op wherever stat() cannot report a real
+     * inode (isBufferDirty()'s own docblock: ino === 0 on either side
+     * falls back to the pre-existing case-insensitive comparison, which
+     * does not exercise a symlinked or percent-encoded URI). Rather than
+     * branching on PHP_OS_FAMILY -- which would assume every Windows PHP
+     * build behaves the same way, an unverified claim -- this probes the
+     * actual platform this test is running on and skips loudly, naming
+     * what went untested, when the probe itself proves unreliable.
+     */
+    private static function skipIfInodesAreUnreliable(): void
+    {
+        $probe = @stat(__FILE__);
+        if ($probe === false || $probe['ino'] === 0) {
+            self::markTestSkipped(
+                'This platform\'s stat() does not report a reliable inode (ino=0) -- '
+                . 'isBufferDirty()\'s dev+ino identity check falls back to the '
+                . 'pre-existing case-insensitive URI comparison here, which this test '
+                . 'does not exercise.',
+            );
+        }
+    }
+
     public function testInitializeReturnsCapabilitiesAndServerInfo(): void
     {
         $server = new LspServer('0.1.0-prototype');
@@ -2340,6 +2416,326 @@ final class LspServerTest extends TestCase
             'uri',
         );
         self::assertSame(['file://' . $upper], $uris);
+        self::assertNotNull($result);
+        self::assertNull($result['result']);
+    }
+
+    /**
+     * #147: `isBufferDirty()` gated its dev+ino stat comparison behind
+     * `strcasecmp($bufferUri, $uri) !== 0` -- comparing the raw URI
+     * strings before either side is canonicalised. On macOS `/tmp` is
+     * itself a symlink to `/private/tmp`, so a buffer opened through
+     * `/tmp/...` and a fix computed for the real `/private/tmp/...` path
+     * (or vice versa) never reach the strcasecmp gate at all: the stat
+     * comparison this method exists to run never executes, and the
+     * disk-derived fix is applied over the unsaved buffer -- exactly the
+     * #140 bug, just reached through a symlinked path instead of a
+     * case difference.
+     *
+     * Uses a real symlink under sys_get_temp_dir(), skipped when this
+     * platform cannot create one (e.g. an unprivileged Windows account).
+     */
+    public function testExecuteCommandSkipsADirtyBufferOpenedThroughASymlinkedPath(): void
+    {
+        self::skipIfInodesAreUnreliable();
+
+        $base = sys_get_temp_dir() . '/lsp-symlink-test-' . bin2hex(random_bytes(4));
+        $real = $base . '/real';
+        $link = $base . '/link';
+        mkdir($real, 0777, true);
+        $target = $real . '/A.php';
+        file_put_contents($target, "<?php\n// A\n");
+
+        if (!@symlink($real, $link)) {
+            @unlink($target);
+            @rmdir($real);
+            @rmdir($base);
+            self::markTestSkipped('This platform could not create a symlink.');
+        }
+
+        try {
+            $server = new LspServer('1.0.0', self::fakeWorkspaceAndBufferSource([
+                $target => [self::fix(0, 1, "<?php\n// A fixed\n", 'RectorA')],
+            ]));
+            self::initialize($server, [
+                'workspace' => ['applyEdit' => true, 'workspaceEdit' => ['documentChanges' => true]],
+            ]);
+
+            // Dirtied through the SYMLINKED path -- a different URI string
+            // from the disk-derived one the workspace scan will report.
+            $symlinkedUri = self::filePathToTestUri($link . '/A.php');
+            $server->handle([
+                'jsonrpc' => '2.0',
+                'method' => 'textDocument/didOpen',
+                'params' => ['textDocument' => ['uri' => $symlinkedUri, 'version' => 1]],
+            ]);
+            $server->handle([
+                'jsonrpc' => '2.0',
+                'method' => 'textDocument/didChange',
+                'params' => [
+                    'textDocument' => ['uri' => $symlinkedUri, 'version' => 2],
+                    'contentChanges' => [['text' => "<?php\n// A, unsaved\n"]],
+                ],
+            ]);
+
+            $responses = $server->handle([
+                'jsonrpc' => '2.0',
+                'id' => 30,
+                'method' => 'workspace/executeCommand',
+                'params' => ['command' => 'rector-warm.fixWorkspace'],
+            ]);
+        } finally {
+            // #147 round-2 self-review finding, from the same windows-latest
+            // CI run as the URI fix above: PHP's unlink() on Windows cannot
+            // remove a directory symlink (rmdir() is required there
+            // instead; POSIX is the other way around -- rmdir() refuses a
+            // symlink even when it points at a directory). The @-silenced
+            // unlink() above used to no-op on Windows, leaving $link's
+            // directory entry behind after $real was removed and turning
+            // rmdir($base) into a "Directory not empty" warning on every
+            // run. Trying both, in either order, closes it on both
+            // platforms without branching on PHP_OS_FAMILY.
+            if (!@unlink($link)) {
+                @rmdir($link);
+            }
+            unlink($target);
+            rmdir($real);
+            rmdir($base);
+        }
+
+        $applyEdit = null;
+        $result = null;
+        foreach ($responses as $frame) {
+            if (($frame['method'] ?? null) === 'workspace/applyEdit') {
+                $applyEdit = $frame;
+            }
+            if (array_key_exists('id', $frame) && $frame['id'] === 30) {
+                $result = $frame;
+            }
+        }
+
+        self::assertNull(
+            $applyEdit,
+            'the only fix in this workspace is for a dirty buffer opened through a symlinked '
+            . 'path -- no workspace/applyEdit must be sent',
+        );
+        self::assertNotNull($result);
+        self::assertSame(['skippedDirtyBuffers' => [self::filePathToTestUri($target)]], $result['result']);
+    }
+
+    /**
+     * #147: positive control for the symlink test above -- the same file,
+     * opened through the symlinked path but never dirtied, must still be
+     * fixed normally. Pins that the fix does not turn into "any buffer
+     * opened through a symlink is always skipped".
+     */
+    public function testExecuteCommandStillFixesAFileOpenedThroughASymlinkedPathWhenNotDirty(): void
+    {
+        $base = sys_get_temp_dir() . '/lsp-symlink-test-' . bin2hex(random_bytes(4));
+        $real = $base . '/real';
+        $link = $base . '/link';
+        mkdir($real, 0777, true);
+        $target = $real . '/A.php';
+        file_put_contents($target, "<?php\n// A\n");
+
+        if (!@symlink($real, $link)) {
+            @unlink($target);
+            @rmdir($real);
+            @rmdir($base);
+            self::markTestSkipped('This platform could not create a symlink.');
+        }
+
+        try {
+            $server = new LspServer('1.0.0', self::fakeWorkspaceAndBufferSource([
+                $target => [self::fix(0, 1, "<?php\n// A fixed\n", 'RectorA')],
+            ]));
+            self::initialize($server, [
+                'workspace' => ['applyEdit' => true, 'workspaceEdit' => ['documentChanges' => true]],
+            ]);
+
+            // Opened through the symlinked path, but no didChange -- not dirty.
+            $symlinkedUri = self::filePathToTestUri($link . '/A.php');
+            $server->handle([
+                'jsonrpc' => '2.0',
+                'method' => 'textDocument/didOpen',
+                'params' => ['textDocument' => ['uri' => $symlinkedUri, 'version' => 1]],
+            ]);
+
+            $responses = $server->handle([
+                'jsonrpc' => '2.0',
+                'id' => 31,
+                'method' => 'workspace/executeCommand',
+                'params' => ['command' => 'rector-warm.fixWorkspace'],
+            ]);
+        } finally {
+            // #147 round-2 self-review finding, from the same windows-latest
+            // CI run as the URI fix above: PHP's unlink() on Windows cannot
+            // remove a directory symlink (rmdir() is required there
+            // instead; POSIX is the other way around -- rmdir() refuses a
+            // symlink even when it points at a directory). The @-silenced
+            // unlink() above used to no-op on Windows, leaving $link's
+            // directory entry behind after $real was removed and turning
+            // rmdir($base) into a "Directory not empty" warning on every
+            // run. Trying both, in either order, closes it on both
+            // platforms without branching on PHP_OS_FAMILY.
+            if (!@unlink($link)) {
+                @rmdir($link);
+            }
+            unlink($target);
+            rmdir($real);
+            rmdir($base);
+        }
+
+        $applyEdit = null;
+        $result = null;
+        foreach ($responses as $frame) {
+            if (($frame['method'] ?? null) === 'workspace/applyEdit') {
+                $applyEdit = $frame;
+            }
+            if (array_key_exists('id', $frame) && $frame['id'] === 31) {
+                $result = $frame;
+            }
+        }
+
+        self::assertNotNull($applyEdit, 'the file has no dirty buffer -- its fix must still be sent');
+        $uris = array_column(
+            array_column($applyEdit['params']['edit']['documentChanges'], 'textDocument'),
+            'uri',
+        );
+        self::assertSame([self::filePathToTestUri($target)], $uris);
+        self::assertNotNull($result);
+        self::assertNull($result['result']);
+    }
+
+    /**
+     * #147 (merged #150): the same `strcasecmp`-on-raw-URI gate also
+     * misses a non-canonical percent-encoding of an otherwise identical
+     * path -- a literal space in the buffer's own URI vs `%20` (or a
+     * different hex case) in the disk-derived URI never compare equal as
+     * raw strings, even though `uriToPath()` decodes both to the same
+     * filesystem path.
+     */
+    public function testExecuteCommandSkipsADirtyBufferWhenUriPercentEncodingDiffersFromDisk(): void
+    {
+        self::skipIfInodesAreUnreliable();
+
+        $dir = sys_get_temp_dir() . '/lsp-percent-test-' . bin2hex(random_bytes(4));
+        mkdir($dir, 0777, true);
+        $target = $dir . '/has space.php';
+        file_put_contents($target, "<?php\n// A\n");
+
+        try {
+            $server = new LspServer('1.0.0', self::fakeWorkspaceAndBufferSource([
+                $target => [self::fix(0, 1, "<?php\n// A fixed\n", 'RectorA')],
+            ]));
+            self::initialize($server, [
+                'workspace' => ['applyEdit' => true, 'workspaceEdit' => ['documentChanges' => true]],
+            ]);
+
+            // Dirtied via a literal-space URI (not percent-encoded) --
+            // pathToUri() would have produced 'file://' . $dir . '/has%20space.php'
+            // for the disk-derived side.
+            $literalUri = self::filePathToTestUri($dir) . '/has space.php';
+            $server->handle([
+                'jsonrpc' => '2.0',
+                'method' => 'textDocument/didOpen',
+                'params' => ['textDocument' => ['uri' => $literalUri, 'version' => 1]],
+            ]);
+            $server->handle([
+                'jsonrpc' => '2.0',
+                'method' => 'textDocument/didChange',
+                'params' => [
+                    'textDocument' => ['uri' => $literalUri, 'version' => 2],
+                    'contentChanges' => [['text' => "<?php\n// A, unsaved\n"]],
+                ],
+            ]);
+
+            $responses = $server->handle([
+                'jsonrpc' => '2.0',
+                'id' => 32,
+                'method' => 'workspace/executeCommand',
+                'params' => ['command' => 'rector-warm.fixWorkspace'],
+            ]);
+        } finally {
+            unlink($target);
+            rmdir($dir);
+        }
+
+        $applyEdit = null;
+        $result = null;
+        foreach ($responses as $frame) {
+            if (($frame['method'] ?? null) === 'workspace/applyEdit') {
+                $applyEdit = $frame;
+            }
+            if (array_key_exists('id', $frame) && $frame['id'] === 32) {
+                $result = $frame;
+            }
+        }
+
+        self::assertNull(
+            $applyEdit,
+            'the only fix in this workspace is for a dirty buffer whose URI differs from the '
+            . 'disk-derived one only in percent-encoding -- no workspace/applyEdit must be sent',
+        );
+        self::assertNotNull($result);
+        self::assertSame(['skippedDirtyBuffers' => [self::filePathToTestUri($dir) . '/has%20space.php']], $result['result']);
+    }
+
+    /**
+     * #147 (merged #150): positive control for the percent-encoding test
+     * above -- the same file, opened via the literal-space URI but never
+     * dirtied, must still be fixed normally.
+     */
+    public function testExecuteCommandStillFixesAFileWhenUriPercentEncodingDiffersFromDiskAndNotDirty(): void
+    {
+        $dir = sys_get_temp_dir() . '/lsp-percent-test-' . bin2hex(random_bytes(4));
+        mkdir($dir, 0777, true);
+        $target = $dir . '/has space.php';
+        file_put_contents($target, "<?php\n// A\n");
+
+        try {
+            $server = new LspServer('1.0.0', self::fakeWorkspaceAndBufferSource([
+                $target => [self::fix(0, 1, "<?php\n// A fixed\n", 'RectorA')],
+            ]));
+            self::initialize($server, [
+                'workspace' => ['applyEdit' => true, 'workspaceEdit' => ['documentChanges' => true]],
+            ]);
+
+            $literalUri = self::filePathToTestUri($dir) . '/has space.php';
+            $server->handle([
+                'jsonrpc' => '2.0',
+                'method' => 'textDocument/didOpen',
+                'params' => ['textDocument' => ['uri' => $literalUri, 'version' => 1]],
+            ]);
+
+            $responses = $server->handle([
+                'jsonrpc' => '2.0',
+                'id' => 33,
+                'method' => 'workspace/executeCommand',
+                'params' => ['command' => 'rector-warm.fixWorkspace'],
+            ]);
+        } finally {
+            unlink($target);
+            rmdir($dir);
+        }
+
+        $applyEdit = null;
+        $result = null;
+        foreach ($responses as $frame) {
+            if (($frame['method'] ?? null) === 'workspace/applyEdit') {
+                $applyEdit = $frame;
+            }
+            if (array_key_exists('id', $frame) && $frame['id'] === 33) {
+                $result = $frame;
+            }
+        }
+
+        self::assertNotNull($applyEdit, 'the file has no dirty buffer -- its fix must still be sent');
+        $uris = array_column(
+            array_column($applyEdit['params']['edit']['documentChanges'], 'textDocument'),
+            'uri',
+        );
+        self::assertSame([self::filePathToTestUri($dir) . '/has%20space.php'], $uris);
         self::assertNotNull($result);
         self::assertNull($result['result']);
     }
