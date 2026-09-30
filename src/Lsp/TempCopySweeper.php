@@ -279,6 +279,11 @@ final class TempCopySweeper
      * is_link() semantics this needs, widened to the type is_link() misses.
      * A no-op everywhere but Windows, where is_link() alone is already
      * proven reliable (#142).
+     *
+     * Impure: it reads the filesystem, and callers re-check it on purpose
+     * right before deleting, to catch a symlink swapped in mid-race.
+     *
+     * @phpstan-impure
      */
     public static function isLinkOrJunction(string $path): bool
     {
