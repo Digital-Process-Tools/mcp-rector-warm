@@ -94,8 +94,6 @@ final class RectorDiagnosticsSourceBufferTest extends TestCase
     /**
      * @param \Closure(string $path): string $behaviour gets the path Rector
      *   was asked to process and returns Rector's raw output (or throws)
-     */
-    /**
      * @param \Closure(resource $handle): bool|null $lockAcquirer #188:
      *   forwarded to RectorDiagnosticsSource's own test seam so a test can
      *   force the lock-failure branch without a second real process.
@@ -426,9 +424,9 @@ final class RectorDiagnosticsSourceBufferTest extends TestCase
      * #149: round-2 release-delta audit finding. #142/#144's guards above
      * only ever checked `$tempDirectory` -- a REAL, non-symlinked
      * `.rector-warm-<pid>` directory (planted ahead of time, named after
-     * this server's own live pid so TempCopySweeper's startup sweep skips
-     * it -- it explicitly never sweeps its own pid) passes both of those
-     * checks, and the leaf `$tempPath` inside it was never checked at all.
+     * this server's own live pid, so TempCopySweeper's own per-directory
+     * sweep does not treat it as stale) passes both of those checks, and
+     * the leaf `$tempPath` inside it was never checked at all.
      * A symlink planted there, named after the buffer's own basename, must
      * not be written through, and -- the same finally-block gap #142/#144
      * closed for `$tempDirectory` -- must not be unlinked through either.
@@ -485,8 +483,8 @@ final class RectorDiagnosticsSourceBufferTest extends TestCase
      * it slips past the exact guard that refuses a symlink above. Same
      * premise as that test: a real, non-symlinked `.rector-warm-<pid>`
      * directory, planted ahead of time and named after this server's own
-     * live pid so the startup sweep skips it, with a hard link at the leaf
-     * instead of a symlink.
+     * live pid so TempCopySweeper's own per-directory sweep does not treat
+     * it as stale, with a hard link at the leaf instead of a symlink.
      */
     public function testABufferForAHardLinkedTempFileInARealTempDirectoryIsRefusedAndNothingOutsideIsTouched(): void
     {
@@ -529,9 +527,10 @@ final class RectorDiagnosticsSourceBufferTest extends TestCase
      * when the CALLING PROCESS OWNS the target -- for a directory an
      * attacker plants ahead of time under this guessable
      * `.rector-warm-<pid>` name (matching this server's own live pid, so
-     * the startup sweep skips it), chmod() on a directory owned by a
-     * DIFFERENT user silently fails and the guard was a no-op for exactly
-     * the case it named. A single-user test process cannot reproduce a
+     * TempCopySweeper's own per-directory sweep does not treat it as
+     * stale), chmod() on a directory owned by a DIFFERENT user silently
+     * fails and the guard was a no-op for exactly the case it named. A
+     * single-user test process cannot reproduce a
      * genuinely different owner, so this asserts the stronger property the
      * fix actually gives: diagnoseBuffer() refuses ANY pre-existing
      * `.rector-warm-<pid>` directory outright, rather than reusing it and

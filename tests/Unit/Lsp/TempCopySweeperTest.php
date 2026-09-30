@@ -423,4 +423,93 @@ final class TempCopySweeperTest extends TestCase
 
         self::assertSame(0, $exitCode, 'could not create the test junction: ' . $output);
     }
+
+    /**
+     * #188: reclaimStaleOwnLock() is the guard diagnoseBuffer() calls to
+     * take back its own `.rector-warm-<pid>` directory when a
+     * lock-acquisition race (or any other imperfect cleanup) leaves it
+     * holding nothing but an empty, free `.lock`. Tested directly here,
+     * the same way this file already tests TempCopySweeper's other public
+     * methods, rather than only through the LSP source's own call site.
+     */
+    public function testReclaimStaleOwnLockRemovesAnEmptyFreeLockAndItsDirectory(): void
+    {
+        $dir = $this->plantEmpty('src/.rector-warm-20');
+        touch($dir . '/' . TempCopySweeper::LOCK_FILE_NAME);
+
+        self::assertTrue(TempCopySweeper::reclaimStaleOwnLock($dir));
+        self::assertDirectoryDoesNotExist($dir);
+    }
+
+    /**
+     * #188 must-not-fire, paired with the test above: a `.lock` a live
+     * process still holds must never be reclaimed. Two independent
+     * `fopen()`s of the same path within this one test process conflict on
+     * `flock()` exactly as they would across two real processes -- the
+     * same technique plantLocked() already relies on elsewhere in this
+     * file.
+     */
+    public function testReclaimStaleOwnLockLeavesALiveLockUntouched(): void
+    {
+        $dir = $this->root . '/src/.rector-warm-21';
+        mkdir($dir, 0o700, true);
+        $lockPath = $dir . '/' . TempCopySweeper::LOCK_FILE_NAME;
+        $handle = fopen($lockPath, 'c');
+        self::assertIsResource($handle, 'could not open the test lock file');
+        self::assertTrue(flock($handle, LOCK_EX | LOCK_NB), 'could not hold the test lock');
+
+        try {
+            self::assertFalse(TempCopySweeper::reclaimStaleOwnLock($dir));
+            self::assertDirectoryExists($dir, 'a directory whose lock is genuinely held must never be reclaimed');
+            self::assertFileExists($lockPath);
+        } finally {
+            flock($handle, LOCK_UN);
+            fclose($handle);
+        }
+    }
+
+    /**
+     * #188 must-not-fire: anything beyond a bare `.lock` -- an extra file,
+     * a leftover buffer copy, anything at all -- must leave the whole
+     * directory untouched, never partially emptied, the same rule
+     * removeKnownContents() already applies to a genuinely stale
+     * directory.
+     */
+    public function testReclaimStaleOwnLockLeavesAnythingBeyondABareLockUntouched(): void
+    {
+        $dir = $this->plantEmpty('src/.rector-warm-22');
+        touch($dir . '/' . TempCopySweeper::LOCK_FILE_NAME);
+        file_put_contents($dir . '/Extra.txt', "not expected here\n");
+
+        self::assertFalse(TempCopySweeper::reclaimStaleOwnLock($dir));
+        self::assertDirectoryExists($dir);
+        self::assertFileExists($dir . '/Extra.txt');
+    }
+
+    /**
+     * #188 must-not-fire: a symlinked `.rector-warm-<pid>` path must never
+     * have its target reclaimed through it, the same #142/#144 guard this
+     * file already asserts for sweepDirectory()'s own glob() above.
+     */
+    public function testReclaimStaleOwnLockDoesNotFollowASymlinkedDirectory(): void
+    {
+        $externalRoot = sys_get_temp_dir() . '/mcp-rector-sweep-external-' . bin2hex(random_bytes(4));
+        mkdir($externalRoot, 0o700, true);
+        touch($externalRoot . '/' . TempCopySweeper::LOCK_FILE_NAME);
+
+        $symlinkPath = $this->root . '/src/.rector-warm-23';
+        mkdir(dirname($symlinkPath), 0o700, true);
+        self::assertTrue(symlink($externalRoot, $symlinkPath), 'could not create the test symlink');
+
+        try {
+            self::assertFalse(TempCopySweeper::reclaimStaleOwnLock($symlinkPath));
+            self::assertFileExists(
+                $externalRoot . '/' . TempCopySweeper::LOCK_FILE_NAME,
+                'a symlinked candidate must not have its target reclaimed through it',
+            );
+        } finally {
+            self::removeLink($symlinkPath);
+            self::removeTree($externalRoot);
+        }
+    }
 }
