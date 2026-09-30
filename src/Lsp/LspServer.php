@@ -1460,18 +1460,39 @@ final class LspServer
             return true;
         }
 
+        // #147/#150 self-review finding: gating the dev+ino comparison
+        // behind `strcasecmp($bufferUri, $uri) === 0` compared the raw URI
+        // strings before either side is canonicalised. That gate never
+        // passes for two URIs which resolve to the same file only after
+        // uriToPath()'s own decoding/symlink-following -- a buffer opened
+        // through a symlinked path (`/tmp/...` vs the real
+        // `/private/tmp/...` on macOS) or through a differently
+        // percent-encoded URI for an identical path (`%20` vs a literal
+        // space) -- so the stat comparison this method exists to run never
+        // executed for either case, and #140's own bug (a disk-derived fix
+        // silently overwriting an unsaved buffer) reopened through both.
+        //
+        // Every open buffer is now stat()-compared unconditionally. The
+        // case-insensitive string fallback below only matters when either
+        // side's stat() fails (a test fixture path, or a file deleted
+        // between the workspace scan and this check) -- narrower than
+        // before on purpose: it must not fire for two buffers whose stats
+        // BOTH resolved and differ, or every dev+ino match here would be
+        // masked by a coincidental case-fold on unrelated files.
         $candidateStat = @stat(self::uriToPath($uri));
         foreach (array_keys($this->buffers) as $bufferUri) {
-            if (strcasecmp($bufferUri, $uri) !== 0) {
-                continue;
+            if ($candidateStat !== false) {
+                $bufferStat = @stat(self::uriToPath($bufferUri));
+                if ($bufferStat !== false) {
+                    if ($candidateStat['dev'] === $bufferStat['dev'] && $candidateStat['ino'] === $bufferStat['ino']) {
+                        return true;
+                    }
+
+                    continue;
+                }
             }
 
-            $bufferStat = @stat(self::uriToPath($bufferUri));
-            if ($candidateStat === false || $bufferStat === false) {
-                return true;
-            }
-
-            if ($candidateStat['dev'] === $bufferStat['dev'] && $candidateStat['ino'] === $bufferStat['ino']) {
+            if (strcasecmp($bufferUri, $uri) === 0) {
                 return true;
             }
         }

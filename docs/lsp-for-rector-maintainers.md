@@ -59,7 +59,19 @@ an agent calling a tool:
   unsaved (dirty) buffer is skipped instead of being overwritten with a
   disk-derived edit that would silently discard the unsaved changes
   (#140); skipped URIs are reported back in the command's result under
-  `skippedDirtyBuffers`.
+  `skippedDirtyBuffers`. The result is `null` when nothing was skipped
+  (there is no empty-array/`null` distinction to read anything into --
+  both mean "nothing to report"). Each reported URI is the server's own
+  form -- on-disk case, with any symlink in the path resolved -- which
+  may not be byte-for-byte the URI the client itself sent on `didOpen`;
+  the dirtiness check itself is robust to that difference (a buffer
+  opened through a symlinked path, or through a differently
+  percent-encoded URI for the same file, is still recognised as dirty,
+  #147/#150), but the URI in `skippedDirtyBuffers` is the canonical one,
+  not necessarily the client's own string. A buffer that is edited back
+  to match the saved file's content is still considered dirty until the
+  client sends `didSave` or `didClose` for it -- there is no
+  content-equality check that would clear the flag early.
 
 Editor setup for six clients (Neovim, Helix, Sublime Text, PhpStorm/LSP4IJ,
 plus the generic pattern) is in [Editor
