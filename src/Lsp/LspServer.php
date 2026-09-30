@@ -1475,21 +1475,39 @@ final class LspServer
         // Every open buffer is now stat()-compared unconditionally. The
         // case-insensitive string fallback below only matters when either
         // side's stat() fails (a test fixture path, or a file deleted
-        // between the workspace scan and this check) -- narrower than
-        // before on purpose: it must not fire for two buffers whose stats
-        // BOTH resolved and differ, or every dev+ino match here would be
-        // masked by a coincidental case-fold on unrelated files.
+        // between the workspace scan and this check), OR when either
+        // side's inode is reported as 0.
+        //
+        // Round-2 self-review finding (oss:auditor pass): trusting dev+ino
+        // unconditionally is only safe when the inode is a real per-file
+        // identifier. PHP's stat() on Windows has a long-documented history
+        // of NOT filling st_ino reliably (this codebase's own #161 fix
+        // chose to route around inode identity entirely for exactly this
+        // reason -- see RectorDiagnosticsSource.php's fopen(..., 'x')
+        // comment). An inode of 0 is never a valid real inode on a POSIX
+        // filesystem, so it is used here as the one portable signal that
+        // this platform's stat() cannot be trusted for identity: on such a
+        // platform every (candidate, buffer) pair would otherwise compare
+        // dev=0/ino=0 as equal, and isBufferDirty() would return true for
+        // ANY open buffer regardless of which file it names -- a much
+        // broader false positive than the bug this method exists to catch.
+        // Falling back to the pre-existing case-insensitive comparison in
+        // that case is strictly no worse than before this fix; it simply
+        // does not gain the symlink/percent-encoding fix on a platform
+        // whose stat() cannot support it.
         $candidateStat = @stat(self::uriToPath($uri));
         foreach (array_keys($this->buffers) as $bufferUri) {
-            if ($candidateStat !== false) {
-                $bufferStat = @stat(self::uriToPath($bufferUri));
-                if ($bufferStat !== false) {
-                    if ($candidateStat['dev'] === $bufferStat['dev'] && $candidateStat['ino'] === $bufferStat['ino']) {
-                        return true;
-                    }
+            $bufferStat = $candidateStat !== false ? @stat(self::uriToPath($bufferUri)) : false;
 
-                    continue;
+            if (
+                $candidateStat !== false && $bufferStat !== false
+                && $candidateStat['ino'] !== 0 && $bufferStat['ino'] !== 0
+            ) {
+                if ($candidateStat['dev'] === $bufferStat['dev'] && $candidateStat['ino'] === $bufferStat['ino']) {
+                    return true;
                 }
+
+                continue;
             }
 
             if (strcasecmp($bufferUri, $uri) === 0) {

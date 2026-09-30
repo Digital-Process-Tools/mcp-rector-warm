@@ -109,6 +109,48 @@ final class LspServerTest extends TestCase
         };
     }
 
+    /**
+     * #147 self-review finding (oss:auditor pass): building a `file://`
+     * test URI via `'file://' . $path` (as the pre-existing case-fold test
+     * above already does) breaks on a platform where sys_get_temp_dir()
+     * returns a backslash-separated path -- parse_url() cannot read a
+     * PHP_URL_PATH out of `file://C:\Users\...\A.php`, so uriToPath()
+     * falls back to treating the whole raw URI string as the path, which
+     * then fails stat() and routes the comparison away from the dev+ino
+     * path these tests exist to exercise. Mirrors LspServer::pathToUri()'s
+     * own backslash normalisation, without its percent-encoding -- these
+     * tests deliberately want a literal, non-percent-encoded URI on one
+     * side.
+     */
+    private static function filePathToTestUri(string $absolutePath): string
+    {
+        return 'file://' . str_replace('\\', '/', $absolutePath);
+    }
+
+    /**
+     * #147 self-review finding (oss:auditor pass): the dev+ino comparison
+     * this fix relies on is a no-op wherever stat() cannot report a real
+     * inode (isBufferDirty()'s own docblock: ino === 0 on either side
+     * falls back to the pre-existing case-insensitive comparison, which
+     * does not exercise a symlinked or percent-encoded URI). Rather than
+     * branching on PHP_OS_FAMILY -- which would assume every Windows PHP
+     * build behaves the same way, an unverified claim -- this probes the
+     * actual platform this test is running on and skips loudly, naming
+     * what went untested, when the probe itself proves unreliable.
+     */
+    private static function skipIfInodesAreUnreliable(): void
+    {
+        $probe = @stat(__FILE__);
+        if ($probe === false || $probe['ino'] === 0) {
+            self::markTestSkipped(
+                'This platform\'s stat() does not report a reliable inode (ino=0) -- '
+                . 'isBufferDirty()\'s dev+ino identity check falls back to the '
+                . 'pre-existing case-insensitive URI comparison here, which this test '
+                . 'does not exercise.',
+            );
+        }
+    }
+
     public function testInitializeReturnsCapabilitiesAndServerInfo(): void
     {
         $server = new LspServer('0.1.0-prototype');
@@ -2361,6 +2403,8 @@ final class LspServerTest extends TestCase
      */
     public function testExecuteCommandSkipsADirtyBufferOpenedThroughASymlinkedPath(): void
     {
+        self::skipIfInodesAreUnreliable();
+
         $base = sys_get_temp_dir() . '/lsp-symlink-test-' . bin2hex(random_bytes(4));
         $real = $base . '/real';
         $link = $base . '/link';
@@ -2385,7 +2429,7 @@ final class LspServerTest extends TestCase
 
             // Dirtied through the SYMLINKED path -- a different URI string
             // from the disk-derived one the workspace scan will report.
-            $symlinkedUri = 'file://' . $link . '/A.php';
+            $symlinkedUri = self::filePathToTestUri($link . '/A.php');
             $server->handle([
                 'jsonrpc' => '2.0',
                 'method' => 'textDocument/didOpen',
@@ -2430,7 +2474,7 @@ final class LspServerTest extends TestCase
             . 'path -- no workspace/applyEdit must be sent',
         );
         self::assertNotNull($result);
-        self::assertSame(['skippedDirtyBuffers' => ['file://' . $target]], $result['result']);
+        self::assertSame(['skippedDirtyBuffers' => [self::filePathToTestUri($target)]], $result['result']);
     }
 
     /**
@@ -2464,7 +2508,7 @@ final class LspServerTest extends TestCase
             ]);
 
             // Opened through the symlinked path, but no didChange -- not dirty.
-            $symlinkedUri = 'file://' . $link . '/A.php';
+            $symlinkedUri = self::filePathToTestUri($link . '/A.php');
             $server->handle([
                 'jsonrpc' => '2.0',
                 'method' => 'textDocument/didOpen',
@@ -2500,7 +2544,7 @@ final class LspServerTest extends TestCase
             array_column($applyEdit['params']['edit']['documentChanges'], 'textDocument'),
             'uri',
         );
-        self::assertSame(['file://' . $target], $uris);
+        self::assertSame([self::filePathToTestUri($target)], $uris);
         self::assertNotNull($result);
         self::assertNull($result['result']);
     }
@@ -2515,6 +2559,8 @@ final class LspServerTest extends TestCase
      */
     public function testExecuteCommandSkipsADirtyBufferWhenUriPercentEncodingDiffersFromDisk(): void
     {
+        self::skipIfInodesAreUnreliable();
+
         $dir = sys_get_temp_dir() . '/lsp-percent-test-' . bin2hex(random_bytes(4));
         mkdir($dir, 0777, true);
         $target = $dir . '/has space.php';
@@ -2531,7 +2577,7 @@ final class LspServerTest extends TestCase
             // Dirtied via a literal-space URI (not percent-encoded) --
             // pathToUri() would have produced 'file://' . $dir . '/has%20space.php'
             // for the disk-derived side.
-            $literalUri = 'file://' . $dir . '/has space.php';
+            $literalUri = self::filePathToTestUri($dir) . '/has space.php';
             $server->handle([
                 'jsonrpc' => '2.0',
                 'method' => 'textDocument/didOpen',
@@ -2574,7 +2620,7 @@ final class LspServerTest extends TestCase
             . 'disk-derived one only in percent-encoding -- no workspace/applyEdit must be sent',
         );
         self::assertNotNull($result);
-        self::assertSame(['skippedDirtyBuffers' => ['file://' . $dir . '/has%20space.php']], $result['result']);
+        self::assertSame(['skippedDirtyBuffers' => [self::filePathToTestUri($dir) . '/has%20space.php']], $result['result']);
     }
 
     /**
@@ -2597,7 +2643,7 @@ final class LspServerTest extends TestCase
                 'workspace' => ['applyEdit' => true, 'workspaceEdit' => ['documentChanges' => true]],
             ]);
 
-            $literalUri = 'file://' . $dir . '/has space.php';
+            $literalUri = self::filePathToTestUri($dir) . '/has space.php';
             $server->handle([
                 'jsonrpc' => '2.0',
                 'method' => 'textDocument/didOpen',
@@ -2631,7 +2677,7 @@ final class LspServerTest extends TestCase
             array_column($applyEdit['params']['edit']['documentChanges'], 'textDocument'),
             'uri',
         );
-        self::assertSame(['file://' . $dir . '/has%20space.php'], $uris);
+        self::assertSame([self::filePathToTestUri($dir) . '/has%20space.php'], $uris);
         self::assertNotNull($result);
         self::assertNull($result['result']);
     }
