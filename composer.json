@@ -21,6 +21,8 @@
         "sort-packages": true
     },
     "require-dev": {
+        "dpt/mcp-phpstan-warm": "^0.7.1",
+        "phpstan/phpstan": "^2.2",
         "phpunit/phpunit": "^10"
     }
 }

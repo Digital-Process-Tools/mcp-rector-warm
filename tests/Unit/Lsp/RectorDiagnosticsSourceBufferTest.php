@@ -222,13 +222,11 @@ final class RectorDiagnosticsSourceBufferTest extends TestCase
 
     public function testASyntaxErrorBufferReportsTheErrorAgainstTheOriginalAndLeavesNothingBehind(): void
     {
-        $result = $this->source(function (string $path): string {
-            return json_encode([
-                'totals' => ['changed_files' => 0, 'errors' => 1],
-                'errors' => [['message' => 'Syntax error in ' . $path . ', unexpected EOF', 'file' => $path, 'line' => 3]],
-                'file_diffs' => [],
-            ], JSON_UNESCAPED_SLASHES);
-        })->diagnoseBuffer($this->original, "<?php\n\nclass Sample {\n");
+        $result = $this->source(fn(string $path): string => json_encode([
+            'totals' => ['changed_files' => 0, 'errors' => 1],
+            'errors' => [['message' => 'Syntax error in ' . $path . ', unexpected EOF', 'file' => $path, 'line' => 3]],
+            'file_diffs' => [],
+        ], JSON_UNESCAPED_SLASHES))->diagnoseBuffer($this->original, "<?php\n\nclass Sample {\n");
 
         self::assertSame([], $result['fixes']);
         self::assertCount(1, $result['errors']);

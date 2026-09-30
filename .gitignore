@@ -5,3 +5,4 @@
 .idea/
 .vscode/
 __pycache__/
+/.phpstan-cache/

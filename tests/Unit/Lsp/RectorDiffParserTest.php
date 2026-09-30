@@ -21,8 +21,8 @@ final class RectorDiffParserTest extends TestCase
     {
         $fixes = RectorDiffParser::buildFixes(
             self::SIMPLIFY_IF_DIFF,
-            ['Rector\\CodeQuality\\Rector\\If_\\SimplifyIfReturnBoolRector'],
-            [['rector' => 'Rector\\CodeQuality\\Rector\\If_\\SimplifyIfReturnBoolRector', 'line' => 5]],
+            [\Rector\CodeQuality\Rector\If_\SimplifyIfReturnBoolRector::class],
+            [['rector' => \Rector\CodeQuality\Rector\If_\SimplifyIfReturnBoolRector::class, 'line' => 5]],
         );
 
         self::assertCount(1, $fixes);
@@ -46,7 +46,7 @@ final class RectorDiffParserTest extends TestCase
             $fixes[0]['newText'],
         );
         self::assertSame(
-            ['Rector\\CodeQuality\\Rector\\If_\\SimplifyIfReturnBoolRector'],
+            [\Rector\CodeQuality\Rector\If_\SimplifyIfReturnBoolRector::class],
             $fixes[0]['rectors'],
         );
     }
@@ -57,12 +57,12 @@ final class RectorDiffParserTest extends TestCase
         // file-wide applied_rectors list is what keeps the message non-empty.
         $fixes = RectorDiffParser::buildFixes(
             self::SIMPLIFY_IF_DIFF,
-            ['Rector\\CodeQuality\\Rector\\If_\\SimplifyIfReturnBoolRector'],
+            [\Rector\CodeQuality\Rector\If_\SimplifyIfReturnBoolRector::class],
             [],
         );
 
         self::assertSame(
-            ['Rector\\CodeQuality\\Rector\\If_\\SimplifyIfReturnBoolRector'],
+            [\Rector\CodeQuality\Rector\If_\SimplifyIfReturnBoolRector::class],
             $fixes[0]['rectors'],
         );
     }

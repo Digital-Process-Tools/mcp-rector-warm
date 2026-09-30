@@ -12,7 +12,7 @@ use Mcp\Schema\Result\CallToolResult;
  * MCP tool uses (dry-run), on the single file the LSP asks about, and turns
  * its `file_diffs` entry into fixes via RectorDiffParser.
  */
-final class RectorDiagnosticsSource implements BufferDiagnosticsSource, WorkspaceDiagnosticsSource
+final readonly class RectorDiagnosticsSource implements BufferDiagnosticsSource, WorkspaceDiagnosticsSource
 {
     /**
      * @param \Closure(resource $handle): bool|null $lockAcquirer #188 test
@@ -23,8 +23,8 @@ final class RectorDiagnosticsSource implements BufferDiagnosticsSource, Workspac
      *   the actual flock() call.
      */
     public function __construct(
-        private readonly RectorTool $tool,
-        private readonly ?\Closure $lockAcquirer = null,
+        private RectorTool $tool,
+        private ?\Closure $lockAcquirer = null,
     ) {
     }
 

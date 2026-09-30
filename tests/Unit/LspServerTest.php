@@ -730,7 +730,7 @@ final class LspServerTest extends TestCase
 
     public function testDidOpenPublishesOneDiagnosticPerFix(): void
     {
-        $fixes = [self::fix(3, 12, "fixed\n", 'Rector\\CodeQuality\\Rector\\If_\\SimplifyIfReturnBoolRector')];
+        $fixes = [self::fix(3, 12, "fixed\n", \Rector\CodeQuality\Rector\If_\SimplifyIfReturnBoolRector::class)];
         $server = new LspServer('1.0.0', self::fakeSource($fixes));
 
         $responses = $server->handle([
@@ -747,7 +747,7 @@ final class LspServerTest extends TestCase
         $diagnostic = $notification['params']['diagnostics'][0];
         self::assertSame($fixes[0]['range'], $diagnostic['range']);
         self::assertSame('rector', $diagnostic['source']);
-        self::assertSame('Rector\\CodeQuality\\Rector\\If_\\SimplifyIfReturnBoolRector', $diagnostic['message']);
+        self::assertSame(\Rector\CodeQuality\Rector\If_\SimplifyIfReturnBoolRector::class, $diagnostic['message']);
     }
 
     public function testDidOpenPublishesAnErrorDiagnosticForAnErrorsEntryWithNoQuickfix(): void
@@ -1464,7 +1464,7 @@ final class LspServerTest extends TestCase
         };
 
         $diagnostics = new class ($log) implements DiagnosticsSource {
-            public function __construct(private object $log)
+            public function __construct(private readonly object $log)
             {
             }
 
@@ -1857,7 +1857,6 @@ final class LspServerTest extends TestCase
     public function testPathToUriKeepsAWindowsDriveLetterColonUnencoded(): void
     {
         $method = new \ReflectionMethod(LspServer::class, 'pathToUri');
-        $method->setAccessible(true);
 
         self::assertSame(
             'file:///C:/Users/me/A.php',
@@ -1868,7 +1867,6 @@ final class LspServerTest extends TestCase
     public function testPathToUriEncodesAnOrdinaryPosixPathSegment(): void
     {
         $method = new \ReflectionMethod(LspServer::class, 'pathToUri');
-        $method->setAccessible(true);
 
         self::assertSame(
             'file:///home/user/foo%20bar.php',

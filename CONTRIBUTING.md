@@ -20,8 +20,29 @@ Open a GitHub issue with:
    ```bash
    ./vendor/bin/phpunit --no-coverage
    tests/E2E/run.sh
+   vendor/bin/phpstan analyse --no-progress --memory-limit=512M
+   vendor/bin/rector process --dry-run
    ```
 4. Open the PR with a one-paragraph summary of the change.
+
+## Validators on every edit (#201)
+
+If you're editing this repo with [claude-supertool](https://github.com/Digital-Process-Tools/claude-supertool)
+as your agent's file-edit proxy, `.supertool.json` here wires this checkout's
+own `bin/mcp-rector-warm` and `mcp-phpstan-warm` up as warm validators, so
+every PHP edit is checked against this project's own `rector.php` and
+`phpstan.neon` (level 5 + `phpstan-baseline.neon` for pre-existing findings)
+as you go -- the same dogfooding DVSI, our real consumer, already does. Cheap
+syntax validators (`phplint`, `py-compile`, `bash-check`, `jsonlint`,
+`yaml-check`) roll a bad edit back immediately; `phpstan`/`rector` are
+advisory (`tier: slow`, no `rollback_on_fail`) since a warm daemon's own
+correctness is a separate question from the file's.
+
+Known gap: `mcp-phpstan-warm`'s warm engine does not currently honor
+`phpstan.neon`'s `level`/baseline the way the cold `phpstan analyse` CLI does,
+so the interactive `phpstan-mcp` validator can show findings the CI
+`static-analysis` job (which runs cold) does not. Trust CI, not the live
+validator count, for whether phpstan is actually green.
 
 ## What we'll merge
 

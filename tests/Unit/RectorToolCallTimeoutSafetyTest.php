@@ -55,7 +55,7 @@ final class RectorToolCallTimeoutSafetyTest extends TestCase
             /** @var list<bool> */
             public array $lastDryRunSeen = [];
 
-            public function __construct(private int $callTimeoutSeconds)
+            public function __construct(private readonly int $callTimeoutSeconds)
             {
             }
 

@@ -409,7 +409,7 @@ final class LspServerBufferTest extends TestCase
         };
 
         $source = new class ($log) implements BufferDiagnosticsSource {
-            public function __construct(private object $log)
+            public function __construct(private readonly object $log)
             {
             }
 

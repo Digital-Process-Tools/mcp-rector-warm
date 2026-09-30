@@ -20,11 +20,11 @@ use RuntimeException;
  * first, and version N's result is then dropped by
  * LspServer::takeReadyDiagnostics().
  */
-final class LspLoop
+final readonly class LspLoop
 {
     public function __construct(
-        private readonly StdioLspTransport $transport,
-        private readonly LspServer $server,
+        private StdioLspTransport $transport,
+        private LspServer $server,
     ) {
     }
 

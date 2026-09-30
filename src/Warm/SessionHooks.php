@@ -48,7 +48,7 @@ final class SessionHooks implements SymbolResolver
         'autoload_namespaces.php', 'autoload_files.php', 'autoload_static.php', 'autoload_real.php',
     ];
 
-    private Container $phpstan;
+    private readonly Container $phpstan;
 
     private ?SourceLocator $standard = null;
 
@@ -244,7 +244,7 @@ final class SessionHooks implements SymbolResolver
 
         // Declared watch directories (MCP_RECTOR_WARM_SESSION_WATCH): any file
         // appearing there counts, whatever its extension.
-        $watchRoots = \array_values(\array_filter($watchPaths, 'is_dir'));
+        $watchRoots = \array_values(\array_filter($watchPaths, is_dir(...)));
 
         return new DirectorySnapshot($roots, $fullRoots, $excluded, [...$this->fileExtensions(), 'php', 'inc'], 100_000, $watchRoots);
     }
@@ -361,7 +361,7 @@ final class SessionHooks implements SymbolResolver
         }
         $value = $this->phpstan->getParameter($name);
 
-        return \is_array($value) ? \array_values(\array_filter($value, 'is_string')) : [];
+        return \is_array($value) ? \array_values(\array_filter($value, is_string(...))) : [];
     }
 
     /**

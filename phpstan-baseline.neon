@@ -1,0 +1,295 @@
+parameters:
+	ignoreErrors:
+		-
+			message: '#^Parameter \#2 \$result of method Dpt\\McpRectorWarm\\Lsp\\LspServer\:\:result\(\) expects array\<string, mixed\>\|null, list\<array\<string, array\<string, mixed\>\|string\>\> given\.$#'
+			identifier: argument.type
+			count: 1
+			path: src/Lsp/LspServer.php
+
+		-
+			message: '#^Offset ''errors'' on array\{fixes\: list\<array\<string, mixed\>\>, errors\: list\<array\{message\: string, line\: int\}\>\} on left side of \?\? always exists and is not nullable\.$#'
+			identifier: nullCoalesce.offset
+			count: 1
+			path: src/Lsp/RectorDiagnosticsSource.php
+
+		-
+			message: '#^Offset ''rector'' on array\{rector\: string, line\?\: int\} on left side of \?\? always exists and is not nullable\.$#'
+			identifier: nullCoalesce.offset
+			count: 1
+			path: src/Lsp/RectorDiffParser.php
+
+		-
+			message: '#^Strict comparison using \!\=\= between int\<0, max\> and null will always evaluate to true\.$#'
+			identifier: notIdentical.alwaysTrue
+			count: 1
+			path: src/Lsp/RectorDiffParser.php
+
+		-
+			message: '#^Strict comparison using \!\=\= between null and null will always evaluate to false\.$#'
+			identifier: notIdentical.alwaysFalse
+			count: 2
+			path: src/Lsp/RectorDiffParser.php
+
+		-
+			message: '#^Strict comparison using \!\=\= between numeric\-string and '''' will always evaluate to true\.$#'
+			identifier: notIdentical.alwaysTrue
+			count: 1
+			path: src/Lsp/RectorDiffParser.php
+
+		-
+			message: '#^Strict comparison using \=\=\= between null and null will always evaluate to true\.$#'
+			identifier: identical.alwaysTrue
+			count: 1
+			path: src/Lsp/RectorDiffParser.php
+
+		-
+			message: '#^Strict comparison using \=\=\= between string and null will always evaluate to false\.$#'
+			identifier: identical.alwaysFalse
+			count: 1
+			path: src/Lsp/RectorDiffParser.php
+
+		-
+			message: '#^Unreachable statement \- code above always terminates\.$#'
+			identifier: deadCode.unreachable
+			count: 1
+			path: src/Lsp/RectorDiffParser.php
+
+		-
+			message: '#^Offset ''size'' on array\{0\: int, 1\: int, 2\: int, 3\: int, 4\: int, 5\: int, 6\: int, 7\: int, \.\.\.\} on left side of \?\? always exists and is not nullable\.$#'
+			identifier: nullCoalesce.offset
+			count: 1
+			path: src/Lsp/StdioLspTransport.php
+
+		-
+			message: '#^Offset ''stream_type'' on array\{timed_out\: bool, blocked\: bool, eof\: bool, unread_bytes\: int, stream_type\: string, wrapper_type\: string, wrapper_data\: mixed, mode\: string, \.\.\.\} on left side of \?\? always exists and is not nullable\.$#'
+			identifier: nullCoalesce.offset
+			count: 1
+			path: src/Lsp/StdioLspTransport.php
+
+		-
+			message: '#^Offset ''unread_bytes'' on array\{timed_out\: bool, blocked\: bool, eof\: bool, unread_bytes\: int, stream_type\: string, wrapper_type\: string, wrapper_data\: mixed, mode\: string, \.\.\.\} on left side of \?\? always exists and is not nullable\.$#'
+			identifier: nullCoalesce.offset
+			count: 1
+			path: src/Lsp/StdioLspTransport.php
+
+		-
+			message: '#^Call to function assert\(\) with true will always evaluate to true\.$#'
+			identifier: function.alreadyNarrowedType
+			count: 1
+			path: src/RectorRunner.php
+
+		-
+			message: '#^Call to function is_array\(\) with array\<string, array\{global_value\: string\|null, local_value\: string\|null\}\> will always evaluate to true\.$#'
+			identifier: function.alreadyNarrowedType
+			count: 1
+			path: src/RectorRunner.php
+
+		-
+			message: '#^Call to function is_array\(\) with array\<string, mixed\> will always evaluate to true\.$#'
+			identifier: function.alreadyNarrowedType
+			count: 1
+			path: src/RectorRunner.php
+
+		-
+			message: '#^Call to function is_array\(\) with array\{command\: string, pid\: int, running\: bool, signaled\: bool, stopped\: bool, exitcode\: int, termsig\: int, stopsig\: int\} will always evaluate to true\.$#'
+			identifier: function.alreadyNarrowedType
+			count: 1
+			path: src/RectorRunner.php
+
+		-
+			message: '#^Call to function is_array\(\) with mixed will always evaluate to false\.$#'
+			identifier: function.impossibleType
+			count: 4
+			path: src/RectorRunner.php
+
+		-
+			message: '#^Call to function is_object\(\) with object will always evaluate to true\.$#'
+			identifier: function.alreadyNarrowedType
+			count: 1
+			path: src/RectorRunner.php
+
+		-
+			message: '#^Call to function is_string\(\) with non\-falsy\-string will always evaluate to true\.$#'
+			identifier: function.alreadyNarrowedType
+			count: 1
+			path: src/RectorRunner.php
+
+		-
+			message: '#^Offset ''error'' on \*NEVER\* in isset\(\) always exists and is not nullable\.$#'
+			identifier: isset.offset
+			count: 3
+			path: src/RectorRunner.php
+
+		-
+			message: '#^Offset ''timed_out'' on array\{timed_out\: bool, blocked\: bool, eof\: bool, unread_bytes\: int, stream_type\: string, wrapper_type\: string, wrapper_data\: mixed, mode\: string, \.\.\.\} on left side of \?\? always exists and is not nullable\.$#'
+			identifier: nullCoalesce.offset
+			count: 2
+			path: src/RectorRunner.php
+
+		-
+			message: '#^Strict comparison using \!\=\= between array\{command\: string, pid\: int, running\: false, signaled\: bool, stopped\: bool, exitcode\: int, termsig\: int, stopsig\: int\} and false will always evaluate to true\.$#'
+			identifier: notIdentical.alwaysTrue
+			count: 1
+			path: src/RectorRunner.php
+
+		-
+			message: '#^Strict comparison using \=\=\= between array\{command\: string, pid\: int, running\: bool, signaled\: bool, stopped\: bool, exitcode\: int, termsig\: int, stopsig\: int\} and false will always evaluate to false\.$#'
+			identifier: identical.alwaysFalse
+			count: 1
+			path: src/RectorRunner.php
+
+		-
+			message: '#^The overwriting exit point is on this line\.$#'
+			identifier: finally.exitPoint
+			count: 2
+			path: src/RectorRunner.php
+
+		-
+			message: '#^This return is overwritten by a different one in the finally block below\.$#'
+			identifier: finally.exitPoint
+			count: 2
+			path: src/RectorRunner.php
+
+		-
+			message: '#^Method Dpt\\McpRectorWarm\\Warm\\DependencyFileTracker\:\:archivePathOrSelf\(\) never assigns null to &\$alreadyTracked so it can be removed from the by\-ref type\.$#'
+			identifier: parameterByRef.unusedType
+			count: 1
+			path: src/Warm/DependencyFileTracker.php
+
+		-
+			message: '#^Access to an undefined property Dpt\\McpRectorWarm\\Lsp\\BufferDiagnosticsSource\:\:\$calls\.$#'
+			identifier: property.notFound
+			count: 11
+			path: tests/Unit/Lsp/LspServerBufferTest.php
+
+		-
+			message: '#^Parameter \#1 \$behaviour of method Dpt\\McpRectorWarm\\Tests\\Unit\\Lsp\\RectorDiagnosticsSourceBufferTest\:\:source\(\) expects Closure\(string\)\: string, Closure\(string, array\)\: ''\{"totals"\:\{"changed_files"\:0,"errors"\:0\}\}'' given\.$#'
+			identifier: argument.type
+			count: 2
+			path: tests/Unit/Lsp/RectorDiagnosticsSourceBufferTest.php
+
+		-
+			message: '#^Anonymous function never returns null so it can be removed from the return type\.$#'
+			identifier: return.unusedType
+			count: 1
+			path: tests/Unit/LspServerTest.php
+
+		-
+			message: '#^Parameter \#1 \$expected of static method PHPUnit\\Framework\\Assert\:\:assertSame\(\) contains unresolvable type\.$#'
+			identifier: argument.unresolvableType
+			count: 1
+			path: tests/Unit/LspServerTest.php
+
+		-
+			message: '#^Property Dpt\\McpRectorWarm\\Lsp\\DiagnosticsSource@anonymous/tests/Unit/LspServerTest\.php\:462\:\:\$seen is never read, only written\.$#'
+			identifier: property.onlyWritten
+			count: 1
+			path: tests/Unit/LspServerTest.php
+
+		-
+			message: '#^Property Dpt\\McpRectorWarm\\Lsp\\DiagnosticsSource@anonymous/tests/Unit/LspServerTest\.php\:502\:\:\$seen is never read, only written\.$#'
+			identifier: property.onlyWritten
+			count: 1
+			path: tests/Unit/LspServerTest.php
+
+		-
+			message: '#^Property Dpt\\McpRectorWarm\\Lsp\\DiagnosticsSource@anonymous/tests/Unit/LspServerTest\.php\:537\:\:\$seen is never read, only written\.$#'
+			identifier: property.onlyWritten
+			count: 1
+			path: tests/Unit/LspServerTest.php
+
+		-
+			message: '#^Property Dpt\\McpRectorWarm\\Lsp\\DiagnosticsSource@anonymous/tests/Unit/LspServerTest\.php\:567\:\:\$seen is never read, only written\.$#'
+			identifier: property.onlyWritten
+			count: 1
+			path: tests/Unit/LspServerTest.php
+
+		-
+			message: '#^Property class@anonymous/tests/Unit/RectorRunnerSkipAsTest\.php\:131\:\:\$skippedPaths \(array\|null\) is never assigned null so it can be removed from the property type\.$#'
+			identifier: property.unusedType
+			count: 1
+			path: tests/Unit/RectorRunnerSkipAsTest.php
+
+		-
+			message: '#^Call to static method PHPUnit\\Framework\\Assert\:\:assertFalse\(\) with true and ''the standby worker…'' will always evaluate to true\.$#'
+			identifier: staticMethod.alreadyNarrowedType
+			count: 1
+			path: tests/Unit/RectorRunnerStandbyWorkerTest.php
+
+		-
+			message: '#^Call to static method PHPUnit\\Framework\\Assert\:\:assertIsArray\(\) with array\{command\: string, pid\: int, running\: bool, signaled\: bool, stopped\: bool, exitcode\: int, termsig\: int, stopsig\: int\} will always evaluate to true\.$#'
+			identifier: staticMethod.alreadyNarrowedType
+			count: 1
+			path: tests/Unit/RectorRunnerStandbyWorkerTest.php
+
+		-
+			message: '#^Left side of && is always true\.$#'
+			identifier: booleanAnd.leftAlwaysTrue
+			count: 1
+			path: tests/Unit/RectorRunnerStandbyWorkerTest.php
+
+		-
+			message: '#^Negated boolean expression is always false\.$#'
+			identifier: booleanNot.alwaysFalse
+			count: 1
+			path: tests/Unit/RectorRunnerStandbyWorkerTest.php
+
+		-
+			message: '#^Call to static method PHPUnit\\Framework\\Assert\:\:assertFalse\(\) with true and ''the warm worker…'' will always evaluate to true\.$#'
+			identifier: staticMethod.alreadyNarrowedType
+			count: 1
+			path: tests/Unit/RectorRunnerTest.php
+
+		-
+			message: '#^Call to static method PHPUnit\\Framework\\Assert\:\:assertIsArray\(\) with array\{command\: string, pid\: int, running\: bool, signaled\: bool, stopped\: bool, exitcode\: int, termsig\: int, stopsig\: int\} will always evaluate to true\.$#'
+			identifier: staticMethod.alreadyNarrowedType
+			count: 1
+			path: tests/Unit/RectorRunnerTest.php
+
+		-
+			message: '#^Constructor of class Dpt\\McpRectorWarm\\Tests\\Unit\\RectorRunnerTest184FakeInput has an unused parameter \$argv\.$#'
+			identifier: constructor.unusedParameter
+			count: 1
+			path: tests/Unit/RectorRunnerTest.php
+
+		-
+			message: '#^Negated boolean expression is always false\.$#'
+			identifier: booleanNot.alwaysFalse
+			count: 1
+			path: tests/Unit/RectorRunnerTest.php
+
+		-
+			message: '#^Parameter &\$consumed by\-ref type of method Dpt\\McpRectorWarm\\Tests\\Unit\\RectorRunnerTest63CaptureFilter\:\:filter\(\) expects int, \(float\|int\) given\.$#'
+			identifier: parameterByRef.type
+			count: 1
+			path: tests/Unit/RectorRunnerTest.php
+
+		-
+			message: '#^Parameter &\$consumed by\-ref type of method Dpt\\McpRectorWarm\\Tests\\Unit\\RectorRunnerTestGenericCaptureFilter\:\:filter\(\) expects int, \(float\|int\) given\.$#'
+			identifier: parameterByRef.type
+			count: 1
+			path: tests/Unit/RectorRunnerTest.php
+
+		-
+			message: '#^Property class@anonymous/tests/Unit/RectorRunnerTest\.php\:2019\:\:\$ref is never read, only written\.$#'
+			identifier: property.onlyWritten
+			count: 1
+			path: tests/Unit/RectorRunnerTest.php
+
+		-
+			message: '#^Result of && is always true\.$#'
+			identifier: booleanAnd.alwaysTrue
+			count: 1
+			path: tests/Unit/RectorRunnerTest.php
+
+		-
+			message: '#^Strict comparison using \!\=\= between resource and false will always evaluate to true\.$#'
+			identifier: notIdentical.alwaysTrue
+			count: 1
+			path: tests/Unit/RectorRunnerTest.php
+
+		-
+			message: '#^Variable \$client in isset\(\) always exists and is not nullable\.$#'
+			identifier: isset.variable
+			count: 1
+			path: tests/Unit/RectorRunnerTest.php

@@ -105,7 +105,6 @@ final class RectorRunnerProcessTreeKillTest extends TestCase
             }
 
             $workerPidProperty = new \ReflectionProperty(RectorRunner::class, 'workerPid');
-            $workerPidProperty->setAccessible(true);
             $workerPid = $workerPidProperty->getValue($runner);
             self::assertIsInt($workerPid);
 
@@ -283,7 +282,7 @@ final class RectorRunnerProcessTreeKillTest extends TestCase
     {
         $deadline = microtime(true) + 5.0;
         do {
-            $alive = \array_values(\array_filter($pids, static fn (int $pid): bool => self::isAlive($pid)));
+            $alive = \array_values(\array_filter($pids, self::isAlive(...)));
             if ($alive === []) {
                 return [];
             }

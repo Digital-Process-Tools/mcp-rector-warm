@@ -334,7 +334,6 @@ final class RectorDiagnosticsSourceTest extends TestCase
     public function testIsAbsolutePathRecognisesBothWindowsAndPosixAbsoluteForms(string $path, bool $expected): void
     {
         $method = new \ReflectionMethod(RectorDiagnosticsSource::class, 'isAbsolutePath');
-        $method->setAccessible(true);
 
         self::assertSame($expected, $method->invoke(null, $path));
     }

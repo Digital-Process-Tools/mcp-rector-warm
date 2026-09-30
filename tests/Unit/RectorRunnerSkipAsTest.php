@@ -115,7 +115,7 @@ final class RectorRunnerSkipAsTest extends TestCase
     private function skipper(bool $pathSkipped): object
     {
         return new class ($pathSkipped) {
-            public function __construct(private bool $pathSkipped)
+            public function __construct(private readonly bool $pathSkipped)
             {
             }
 
@@ -142,6 +142,13 @@ final class RectorRunnerSkipAsTest extends TestCase
     private function classResolver(array $classes): object
     {
         return new class ($classes) {
+            // Not readonly: RectorRunner::overwriteResolved() rewrites this
+            // property via ReflectionProperty::setValue() to graft the buffer
+            // copy's path onto a rule's skip list (see applySkipsOfOriginalPath()),
+            // the same way it treats Rector's real SkippedClassResolver -- a
+            // readonly property here would make PHP throw on that write and
+            // this stub would stop matching production shape (caught by
+            // ReadOnlyPropertyRector wrongly proposing readonly here).
             public function __construct(private ?array $skippedClassesToFiles)
             {
             }
@@ -156,9 +163,9 @@ final class RectorRunnerSkipAsTest extends TestCase
     private function runnerWith(object $skipper, object $pathsResolver, object $classResolver): RectorRunner
     {
         $services = [
-            'Rector\\Skipper\\Skipper\\Skipper' => $skipper,
-            'Rector\\Skipper\\SkipCriteriaResolver\\SkippedPathsResolver' => $pathsResolver,
-            'Rector\\Skipper\\SkipCriteriaResolver\\SkippedClassResolver' => $classResolver,
+            \Rector\Skipper\Skipper\Skipper::class => $skipper,
+            \Rector\Skipper\SkipCriteriaResolver\SkippedPathsResolver::class => $pathsResolver,
+            \Rector\Skipper\SkipCriteriaResolver\SkippedClassResolver::class => $classResolver,
         ];
         $container = new class ($services) {
             public function __construct(private array $services)

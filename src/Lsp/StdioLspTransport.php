@@ -14,12 +14,6 @@ use RuntimeException;
  */
 final class StdioLspTransport
 {
-    /** @var resource */
-    private $in;
-
-    /** @var resource */
-    private $out;
-
     /**
      * @var list<array<string, mixed>> PR #128 E2E review (blocking finding
      *   2): messages read AHEAD by tryRead() -- a peek when called with
@@ -39,10 +33,8 @@ final class StdioLspTransport
      * @param resource $in
      * @param resource $out
      */
-    public function __construct($in, $out)
+    public function __construct(private $in, private $out)
     {
-        $this->in = $in;
-        $this->out = $out;
     }
 
     /**
