@@ -111,6 +111,13 @@ mcp-rector-warm --working-dir=/path/to/project --config=/path/to/project/rector.
 
 **[Full setup →](docs/mcp.md)**
 
+This repo dogfoods exactly that setup on itself (#201): `.supertool.json` runs
+this checkout's own `bin/mcp-rector-warm` and `mcp-phpstan-warm` as
+[claude-supertool](https://github.com/Digital-Process-Tools/claude-supertool)
+validators on every PHP edit, plus phplint/py-compile/bash-check/jsonlint/
+yaml-check for the cheap syntax checks. See `CONTRIBUTING.md` for what that
+means for a pull request.
+
 ## The numbers
 
 **Up to 10× faster per file** on Laravel and Symfony with `MCP_RECTOR_WARM_SESSION=1`, **3.3–4.1×** without it. Every warm answer was byte-identical to cold.

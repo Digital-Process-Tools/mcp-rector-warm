@@ -51,19 +51,19 @@ final class DirectorySnapshot
     private array $dirs = [];
 
     /** @var list<string> */
-    private array $watchRoots;
+    private readonly array $watchRoots;
 
     /** @var list<string> */
-    private array $roots;
+    private readonly array $roots;
 
     /** @var list<string> */
-    private array $fullRoots;
+    private readonly array $fullRoots;
 
     /** @var list<string> */
-    private array $excluded;
+    private readonly array $excluded;
 
     /** @var list<string> */
-    private array $suffixes;
+    private readonly array $suffixes;
 
     /**
      * @param list<string> $roots walked with hidden entries skipped

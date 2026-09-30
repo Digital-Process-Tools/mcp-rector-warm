@@ -1,0 +1,27 @@
+includes:
+    - phpstan-baseline.neon
+
+parameters:
+    level: 5
+    paths:
+        - src
+        - bin
+        - tests
+    excludePaths:
+        - tests/Fixtures/*
+    tmpDir: %currentWorkingDirectory%/.phpstan-cache
+    ignoreErrors:
+        # #185: SessionHooks deliberately reaches into PHPStan's (and
+        # BetterReflection's) internal, non-BC-covered API to reuse the exact
+        # services Rector's own analysis needs for a warm session -- see the
+        # class docblock. These calls are the point of the file, not a bug to
+        # fix, and no public API covers them.
+        -
+            identifier: phpstanApi.class
+            path: src/Warm/SessionHooks.php
+        -
+            identifier: phpstanApi.classConstant
+            path: src/Warm/SessionHooks.php
+        -
+            identifier: phpstanApi.method
+            path: src/Warm/SessionHooks.php

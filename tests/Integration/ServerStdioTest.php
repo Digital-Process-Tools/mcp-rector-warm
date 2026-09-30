@@ -282,7 +282,7 @@ final class ServerStdioTest extends TestCase
         // project's installed bin (e.g. DVSI's libs/bin/mcp-rector-warm) when the
         // config references project-specific custom rules.
         $bin = getenv('MCP_RECTOR_WARM_REPRO_BIN') ?: self::$bin;
-        $files = array_values(array_filter(array_map('trim', explode(',', $filesEnv))));
+        $files = array_values(array_filter(array_map(trim(...), explode(',', $filesEnv))));
         self::assertGreaterThanOrEqual(2, count($files), 'need at least two files to warm then re-use');
 
         $proc = $this->spawnServer($project, $config, $bin);

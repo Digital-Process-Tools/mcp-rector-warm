@@ -20,14 +20,14 @@ use PHPStan\Parser\Parser;
  * cache is keyed by source text: wrapping below that cache would miss a second
  * path whose content is identical to one already parsed.
  */
-final class TrackingParser implements Parser
+final readonly class TrackingParser implements Parser
 {
     /**
      * @param \Closure(string): void $onParseFile
      */
     public function __construct(
-        private readonly Parser $inner,
-        private readonly \Closure $onParseFile,
+        private Parser $inner,
+        private \Closure $onParseFile,
     ) {
     }
 

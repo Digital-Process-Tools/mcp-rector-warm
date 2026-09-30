@@ -174,7 +174,7 @@ class RectorRunner implements RunnerInterface
      *  this as its own constructor argument) still gets the value bin/mcp-rector-warm
      *  set from --call-timeout, without needing a constructor argument only tests
      *  actually pass. */
-    private int $callTimeoutSeconds;
+    private readonly int $callTimeoutSeconds;
 
     /** Set once, at process start, by bin/mcp-rector-warm's --call-timeout parsing,
      *  before any RectorTool/RectorRunner is constructed. bin/rector-cold-call.php
@@ -554,7 +554,7 @@ class RectorRunner implements RunnerInterface
         }
         try {
             $handshake = $this->readFrame($parentSocket, $bootDeadline);
-        } catch (RectorCallTimeoutException $e) {
+        } catch (RectorCallTimeoutException) {
             // The worker pid is known (pcntl_fork() just returned it) even
             // though it never finished booting -- SIGKILL + reap it here so it
             // never lingers as a zombie under THIS process, same as every other

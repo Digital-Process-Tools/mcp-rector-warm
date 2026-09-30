@@ -118,7 +118,6 @@ final class RectorRunnerStandbyWorkerTest extends TestCase
             // that lands before it even hashed the file is simply booted from (warm and
             // correct); this test is about one that lands after.
             $await = new \ReflectionMethod(RectorRunner::class, 'awaitProcWorkerReady');
-            $await->setAccessible(true);
             $await->invoke($runner, null);
 
             file_put_contents($project . '/rector.php', "<?php\n\ndeclare(strict_types=1);\n\n"
@@ -259,7 +258,6 @@ final class RectorRunnerStandbyWorkerTest extends TestCase
             $runner->run(self::argv($project . '/src/Caller.php'));
 
             $retiredProperty = new \ReflectionProperty(RectorRunner::class, 'retiredProcWorkers');
-            $retiredProperty->setAccessible(true);
             $retired = $retiredProperty->getValue($runner);
             self::assertNotEmpty($retired, 'control: the first call must have retired a worker');
             $proc = $retired[0]['proc'];
@@ -312,7 +310,6 @@ final class RectorRunnerStandbyWorkerTest extends TestCase
         $stderrFile = (string) tempnam(sys_get_temp_dir(), 'wasLastCallWarm-test-');
 
         $property = new \ReflectionProperty(RectorRunner::class, 'procWorker');
-        $property->setAccessible(true);
         $property->setValue($runner, [
             'proc' => $proc,
             'pid' => (int) proc_get_status($proc)['pid'],
@@ -324,7 +321,6 @@ final class RectorRunnerStandbyWorkerTest extends TestCase
         ]);
 
         $callProcWorker = new \ReflectionMethod(RectorRunner::class, 'callProcWorker');
-        $callProcWorker->setAccessible(true);
 
         $threw = null;
         try {
@@ -369,7 +365,6 @@ final class RectorRunnerStandbyWorkerTest extends TestCase
 
         try {
             $method = new \ReflectionMethod(RectorRunner::class, 'collectIniOverrideArgs');
-            $method->setAccessible(true);
             $args = $method->invoke(null);
 
             self::assertContains('-d', $args);
@@ -446,7 +441,6 @@ final class RectorRunnerStandbyWorkerTest extends TestCase
     public function testANullBaselineDefaultDoesNotSuppressForwardingAChangedValue(): void
     {
         $method = new \ReflectionMethod(RectorRunner::class, 'isIniOverridden');
-        $method->setAccessible(true);
 
         self::assertTrue(
             $method->invoke(null, null, 'something'),
@@ -485,7 +479,6 @@ final class RectorRunnerStandbyWorkerTest extends TestCase
         $userAgentArg = null;
         try {
             $method = new \ReflectionMethod(RectorRunner::class, 'collectIniOverrideArgs');
-            $method->setAccessible(true);
             $args = $method->invoke(null);
 
             foreach ($args as $i => $arg) {
@@ -539,7 +532,6 @@ final class RectorRunnerStandbyWorkerTest extends TestCase
         $userAgentArg = null;
         try {
             $method = new \ReflectionMethod(RectorRunner::class, 'collectIniOverrideArgs');
-            $method->setAccessible(true);
             $args = $method->invoke(null);
 
             foreach ($args as $i => $arg) {
@@ -695,7 +687,6 @@ final class RectorRunnerStandbyWorkerTest extends TestCase
 
         // Simulate a PRIOR, unrelated call that really was warm.
         $property = new \ReflectionProperty(RectorRunner::class, 'lastCallWasWarm');
-        $property->setAccessible(true);
         $property->setValue($runner, true);
 
         $threw = null;
@@ -919,7 +910,6 @@ final class RectorRunnerStandbyWorkerTest extends TestCase
         self::assertIsResource($proc);
 
         $method = new \ReflectionMethod(RectorRunner::class, 'awaitProcExitOrDeadline');
-        $method->setAccessible(true);
 
         $start = microtime(true);
         $result = null;
@@ -960,7 +950,6 @@ final class RectorRunnerStandbyWorkerTest extends TestCase
         self::assertFalse(proc_get_status($proc)['running'], 'control: the process must actually have exited on its own');
 
         $method = new \ReflectionMethod(RectorRunner::class, 'awaitProcExitOrDeadline');
-        $method->setAccessible(true);
 
         $start = microtime(true);
         $result = $method->invoke(self::noPcntlRunner(), $proc, hrtime(true) - 1_000_000_000);
@@ -992,7 +981,6 @@ final class RectorRunnerStandbyWorkerTest extends TestCase
         $stderrFile = (string) tempnam(sys_get_temp_dir(), 'discard-deadline-control-');
 
         $property = new \ReflectionProperty(RectorRunner::class, 'procWorker');
-        $property->setAccessible(true);
         $property->setValue($runner, [
             'proc' => $proc,
             'pid' => (int) proc_get_status($proc)['pid'],
@@ -1004,7 +992,6 @@ final class RectorRunnerStandbyWorkerTest extends TestCase
         ]);
 
         $discard = new \ReflectionMethod(RectorRunner::class, 'discardProcWorker');
-        $discard->setAccessible(true);
 
         $start = microtime(true);
         $discard->invoke($runner, false, hrtime(true) + 5_000_000_000);
@@ -1037,7 +1024,6 @@ final class RectorRunnerStandbyWorkerTest extends TestCase
         $stderrFile = (string) tempnam(sys_get_temp_dir(), 'destruct-deadline-test-');
 
         $property = new \ReflectionProperty(RectorRunner::class, 'procWorker');
-        $property->setAccessible(true);
         $property->setValue($runner, [
             'proc' => $proc,
             'pid' => (int) proc_get_status($proc)['pid'],

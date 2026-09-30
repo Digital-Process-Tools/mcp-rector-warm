@@ -221,7 +221,7 @@ final class ProcessTree
 
             return;
         }
-        self::run(\array_merge(['kill', '-' . $name], \array_map('strval', $pids)));
+        self::run(\array_merge(['kill', '-' . $name], \array_map(strval(...), $pids)));
     }
 
     /**

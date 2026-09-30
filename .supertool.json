@@ -1,0 +1,119 @@
+{
+  "ops": {
+    "radar": {
+      "radar_tiers": {
+        "gh-prs": {
+          "pr_exclude_events": [
+            "checks_pending",
+            "conflicts_appeared"
+          ]
+        }
+      },
+      "watch_name": "mcp-rector-warm"
+    },
+    "channel": {
+      "watch_name": "mcp-rector-warm"
+    },
+    "unwatch": {
+      "watch_name": "mcp-rector-warm"
+    },
+    "watch": {
+      "watch_name": "mcp-rector-warm"
+    },
+    "watches": {
+      "watch_name": "mcp-rector-warm"
+    }
+  },
+  "no_publish_disclosure": true,
+  "validator_fingerprint_paths": ["composer.lock"],
+  "presets": [
+    "git",
+    "github",
+    "watch",
+    "mcp"
+  ],
+  "mcp": {
+    "rector-warm": {
+      "cmd": [
+        "bin/mcp-rector-warm",
+        "--config=rector.php"
+      ],
+      "match": "*.php",
+      "timeout": 120,
+      "idle_timeout": 1800,
+      "stopOnNewFile": true
+    },
+    "phpstan-warm": {
+      "cmd": [
+        "vendor/bin/mcp-phpstan-warm",
+        "--config=phpstan.neon",
+        "--paths=src,bin,tests"
+      ],
+      "match": "*.php",
+      "timeout": 600,
+      "idle_timeout": 1800,
+      "stopOnNewFile": true,
+      "env": {
+        "MCP_PHPSTAN_CONFIG": "phpstan.neon"
+      }
+    }
+  },
+  "validators": {
+    "phplint": {
+      "cmd": "{python} {supertool_dir}/validators/phplint/phplint.py {file}",
+      "match": "*.{php,phtml}",
+      "hooks_into": ["edit", "replace", "replace_lines", "paste", "vim"],
+      "rollback_on_fail": true,
+      "timeout": 30
+    },
+    "phpstan": {
+      "cmd": "MCP_PHPSTAN_BIN=vendor/bin/mcp-phpstan-warm {python} {supertool_dir}/validators/phpstan-mcp/phpstan-mcp.py {file}",
+      "match": "*.php",
+      "exclude": "tests/Fixtures/*",
+      "hooks_into": ["edit", "replace", "replace_lines", "paste", "vim"],
+      "tier": "slow",
+      "mcp_autospawn": true,
+      "timeout": 600,
+      "fingerprint_paths": ["phpstan.neon", "phpstan-baseline.neon"]
+    },
+    "rector": {
+      "cmd": "MCP_RECTOR_CONFIG=rector.php MCP_RECTOR_BIN=bin/mcp-rector-warm {python} {supertool_dir}/validators/rector-mcp/rector-mcp.py {file}",
+      "match": "*.php",
+      "exclude": "tests/Fixtures/*",
+      "hooks_into": ["edit", "replace", "replace_lines", "paste", "vim"],
+      "tier": "slow",
+      "mcp_autospawn": true,
+      "timeout": 120,
+      "engine_glitches": ["System error:", "toMutatingScope() on null"],
+      "fingerprint_paths": ["rector.php"]
+    },
+    "py-compile": {
+      "cmd": "{python} {supertool_dir}/validators/py-compile/py-compile.py {file}",
+      "match": "*.py",
+      "hooks_into": ["edit", "replace", "replace_lines", "paste", "vim"],
+      "rollback_on_fail": true,
+      "timeout": 10
+    },
+    "bash-check": {
+      "cmd": "{python} {supertool_dir}/validators/bash-check/bash-check.py {file}",
+      "match": "*.sh",
+      "hooks_into": ["edit", "replace", "replace_lines", "paste", "vim"],
+      "rollback_on_fail": true,
+      "timeout": 10
+    },
+    "jsonlint": {
+      "cmd": "{python} {supertool_dir}/validators/jsonlint/jsonlint.py {file}",
+      "match": "*.json",
+      "hooks_into": ["edit", "replace", "replace_lines", "paste", "vim"],
+      "rollback_on_fail": true,
+      "timeout": 10
+    },
+    "yaml-check": {
+      "cmd": "{python} {supertool_dir}/validators/yaml-check/yaml-check.py {file}",
+      "match": "*.{yml,yaml}",
+      "hooks_into": ["edit", "replace", "replace_lines", "paste", "vim"],
+      "rollback_on_fail": true,
+      "timeout": 10
+    }
+  }
+}

@@ -346,7 +346,6 @@ final class RectorRunnerTest extends TestCase
             self::assertTrue($runner->isWarm(), 'a real worker should have booted');
 
             $pidProperty = new \ReflectionProperty(RectorRunner::class, 'workerPid');
-            $pidProperty->setAccessible(true);
             $firstPid = $pidProperty->getValue($runner);
             self::assertIsInt($firstPid);
 
@@ -425,7 +424,6 @@ final class RectorRunnerTest extends TestCase
             }
         };
         $method = new \ReflectionMethod(RectorRunner::class, 'killAndReap');
-        $method->setAccessible(true);
 
         // Positive control.
         $killedPid = \pcntl_fork();
@@ -683,7 +681,6 @@ final class RectorRunnerTest extends TestCase
                 stream_set_timeout($client, 0, 100_000);
 
                 $method = new \ReflectionMethod(RectorRunner::class, 'readExactly');
-                $method->setAccessible(true);
 
                 // Deadline already in the past: the very first timed-out read hits it.
                 $method->invoke($runner, $client, 4, \hrtime(true) - 1_000_000_000);
@@ -769,7 +766,6 @@ final class RectorRunnerTest extends TestCase
             self::assertTrue($runner->isWarm(), 'a real worker must be booted before this test can swap its socket');
 
             $workerSocketProperty = new \ReflectionProperty(RectorRunner::class, 'workerSocket');
-            $workerSocketProperty->setAccessible(true);
             $originalSocket = $workerSocketProperty->getValue($runner);
 
             // A loopback TCP socket nobody ever writes to (same technique as
@@ -789,7 +785,6 @@ final class RectorRunnerTest extends TestCase
                 $workerSocketProperty->setValue($runner, $client);
 
                 $method = new \ReflectionMethod(RectorRunner::class, 'runForked');
-                $method->setAccessible(true);
 
                 $start = microtime(true);
                 try {
@@ -975,7 +970,6 @@ final class RectorRunnerTest extends TestCase
             // THIS worker specifically, so rooting here is exactly what #69
             // (recon: real zombie check) was pinning.
             $workerPidProperty = new \ReflectionProperty(RectorRunner::class, 'workerPid');
-            $workerPidProperty->setAccessible(true);
             $workerPid = $workerPidProperty->getValue($runner);
             self::assertIsInt($workerPid, 'the worker must have a known pid to scope the zombie check to');
             self::assertNoZombieDescendants($workerPid);
@@ -1417,7 +1411,6 @@ final class RectorRunnerTest extends TestCase
     {
         $runner = new RectorRunner();
         $method = new \ReflectionMethod(RectorRunner::class, 'resolveBootstrapFileHashes');
-        $method->setAccessible(true);
 
         // provideArrayParameter() only throws when the stored value is not an
         // array (Webmozart\Assert::isArray()) -- an unset key defaults to [] and
@@ -1493,7 +1486,6 @@ final class RectorRunnerTest extends TestCase
             }
         };
         $method = new \ReflectionMethod(RectorRunner::class, 'daemonPidOrWarn');
-        $method->setAccessible(true);
 
         $result = null;
         $captured = self::captureStderr(function () use (&$result, $method, $runner): void {
@@ -1517,7 +1509,6 @@ final class RectorRunnerTest extends TestCase
     {
         $runner = new RectorRunner();
         $method = new \ReflectionMethod(RectorRunner::class, 'daemonPidOrWarn');
-        $method->setAccessible(true);
 
         $result = null;
         $captured = self::captureStderr(function () use (&$result, $method, $runner): void {
@@ -1541,7 +1532,6 @@ final class RectorRunnerTest extends TestCase
     public function testIniGetAllFailureIsLoggedNotSilentlyTreatedAsNothingToForward(): void
     {
         $method = new \ReflectionMethod(RectorRunner::class, 'collectIniOverrideArgsFrom');
-        $method->setAccessible(true);
 
         $result = null;
         $captured = self::captureStderr(function () use (&$result, $method): void {
@@ -1563,7 +1553,6 @@ final class RectorRunnerTest extends TestCase
     public function testIniGetAllGenuineEmptyResultIsNotLogged(): void
     {
         $method = new \ReflectionMethod(RectorRunner::class, 'collectIniOverrideArgsFrom');
-        $method->setAccessible(true);
 
         $result = null;
         $captured = self::captureStderr(function () use (&$result, $method): void {
@@ -1593,7 +1582,6 @@ final class RectorRunnerTest extends TestCase
             }
         };
         $method = new \ReflectionMethod(RectorRunner::class, 'spawnOrphanWatchdog');
-        $method->setAccessible(true);
 
         $result = 'not set';
         $captured = self::captureStderr(function () use (&$result, $method, $runner): void {
@@ -1621,7 +1609,6 @@ final class RectorRunnerTest extends TestCase
 
         $runner = new RectorRunner();
         $method = new \ReflectionMethod(RectorRunner::class, 'spawnOrphanWatchdog');
-        $method->setAccessible(true);
 
         $result = 'not set';
         $captured = self::captureStderr(function () use (&$result, $method, $runner): void {
@@ -1662,9 +1649,7 @@ final class RectorRunnerTest extends TestCase
             }
         };
         $method = new \ReflectionMethod(RectorRunner::class, 'spawnProcWorker');
-        $method->setAccessible(true);
         $discard = new \ReflectionMethod(RectorRunner::class, 'discardProcWorker');
-        $discard->setAccessible(true);
 
         try {
             $captured = self::captureStderr(function () use ($method, $runner): void {
@@ -1693,9 +1678,7 @@ final class RectorRunnerTest extends TestCase
 
         $runner = new RectorRunner();
         $method = new \ReflectionMethod(RectorRunner::class, 'spawnProcWorker');
-        $method->setAccessible(true);
         $discard = new \ReflectionMethod(RectorRunner::class, 'discardProcWorker');
-        $discard->setAccessible(true);
 
         try {
             $captured = self::captureStderr(function () use ($method, $runner): void {
@@ -1728,7 +1711,6 @@ final class RectorRunnerTest extends TestCase
     {
         $runner = new RectorRunner();
         $method = new \ReflectionMethod(RectorRunner::class, 'encodeHandshakeFrame');
-        $method->setAccessible(true);
 
         $invalidUtf8Path = "/tmp/bad_\xE9_bootstrap.php";
         $encoded = $method->invoke($runner, [
@@ -1957,7 +1939,6 @@ final class RectorRunnerTest extends TestCase
 
                 $runner = new RectorRunner(0);
                 $method = new \ReflectionMethod(RectorRunner::class, 'serveWorker');
-                $method->setAccessible(true);
                 try {
                     $method->invoke($runner, $childSocket, null);
                     // serveWorker() is documented to always exit() -- reaching
@@ -2054,7 +2035,6 @@ final class RectorRunnerTest extends TestCase
         $this->setPrivateRunnerState($runner, $application);
 
         $method = new \ReflectionMethod(RectorRunner::class, 'execute');
-        $method->setAccessible(true);
         $method->invoke($runner, ['rector', 'process', '--dry-run'], true);
 
         self::assertSame(
@@ -2089,7 +2069,6 @@ final class RectorRunnerTest extends TestCase
             $this->setPrivateRunnerState($runner, $application);
 
             $method = new \ReflectionMethod(RectorRunner::class, 'execute');
-            $method->setAccessible(true);
             $method->invoke($runner, ['rector', 'process', '--dry-run'], true);
 
             self::assertSame(
@@ -2141,7 +2120,6 @@ final class RectorRunnerTest extends TestCase
             $this->setPrivateRunnerState($runner, $application);
 
             $method = new \ReflectionMethod(RectorRunner::class, 'execute');
-            $method->setAccessible(true);
             $method->invoke($runner, ['rector', 'process', '--dry-run'], true);
 
             self::assertFalse(
@@ -2181,7 +2159,6 @@ final class RectorRunnerTest extends TestCase
             'outputClass' => RectorRunnerTest184FakeOutput::class,
         ] as $prop => $value) {
             $property = new \ReflectionProperty(RectorRunner::class, $prop);
-            $property->setAccessible(true);
             $property->setValue($runner, $value);
         }
     }
@@ -2310,7 +2287,7 @@ final class RectorRunnerTest extends TestCase
  * which live under Rector's own build-time namespace prefix and are not reachable by their
  * normal FQCN from a test process.
  */
-final class RectorRunnerTest184FakeInput
+final readonly class RectorRunnerTest184FakeInput
 {
     /** @param list<string> $argv */
     public function __construct(array $argv)
