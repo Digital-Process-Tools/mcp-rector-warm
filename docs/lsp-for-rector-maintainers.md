@@ -49,13 +49,16 @@ an agent calling a tool:
   id X always reaches this one-message-at-a-time server after id X's own
   response was already written (#111).
 - **Workspace-wide fix (#102).** `workspace/executeCommand` advertises
-  `rector-warm.fixWorkspace` when the client's `initialize` declared
-  `workspace.applyEdit`. It dry-runs the same warm oracle over the whole
+  `rector-warm.fixWorkspace` only when the client's `initialize` declared
+  `workspace.applyEdit` (#141: gated on `canApplyWorkspaceEdit`, not only on
+  the diagnostics source type -- a client that never declared it never even
+  sees the command). It dry-runs the same warm oracle over the whole
   working directory and returns every changed file in one
   `workspace/applyEdit` request, framed by its own `$/progress` token
-  (distinct from the cold-boot one above). A client without
-  `workspace.applyEdit` gets a JSON-RPC error rather than a command that
-  silently does nothing. The fix is computed from disk, so a file with an
+  (distinct from the cold-boot one above). Running the command anyway (a
+  client that ignores the advertisement) still gets a JSON-RPC error rather
+  than a silent no-op, via `executeCommand()`'s own independent check. The
+  fix is computed from disk, so a file with an
   unsaved (dirty) buffer is skipped instead of being overwritten with a
   disk-derived edit that would silently discard the unsaved changes
   (#140); skipped URIs are reported back in the command's result under
