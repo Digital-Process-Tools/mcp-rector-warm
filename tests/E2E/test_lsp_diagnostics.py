@@ -350,19 +350,26 @@ def test_did_open_on_an_already_clean_crlf_file_publishes_empty_diagnostics(serv
     assert notification["params"]["diagnostics"] == []
 
 
-def test_code_action_edit_applied_to_a_crlf_file_preserves_crlf_line_endings(server, project):
-    # #160: RectorDiffParser::hunkNewText() rejoins a hunk's kept lines with
-    # a hardcoded "\n". #91.3/#96 added CRLF fixtures and covered
-    # didOpen/diagnostics for them, but no test ever actually requested a
-    # codeAction and applied its edit against a real CRLF file -- so
-    # hunkNewText()'s own join was never exercised end to end. This test
-    # does exactly that and asserts the resulting text keeps the file's own
-    # CRLF convention throughout, not a mix of CRLF and bare LF.
+def test_code_action_edit_applied_to_a_crlf_file_matches_a_cold_rector_apply(server, project):
+    # #160, self-review reversal (see RectorDiffParser.php's own docblocks
+    # for the full story): this test originally asserted the applied edit
+    # kept a UNIFORM CRLF convention throughout. CI caught that this is the
+    # wrong bar -- a COLD, real `vendor/bin/rector process` apply on this
+    # exact CRLF fixture ALSO writes its replacement lines with a bare
+    # "\n" (Rector's own pretty-printer output, never normalized to the
+    # file's original convention), so "uniform CRLF" is not what this
+    # server is supposed to produce. This server's actual contract
+    # (CLAUDE.md's warm-vs-cold oracle, and the module docstring above) is
+    # byte-for-byte parity with cold -- same pattern as
+    # test_code_action_edit_matches_a_cold_rector_apply above, just against
+    # the CRLF fixture #91.3/#96 added (which #160 identified as never
+    # actually having its own codeAction+apply path exercised at all,
+    # CRLF-mixed-ending oracle included).
     path = project / "src" / "CrlfFixable.php"
+    uri = path.as_uri()
     original = path.read_bytes().decode("utf-8")
     assert "\r\n" in original  # positive control: the fixture really is CRLF
 
-    uri = path.as_uri()
     notification = did_open(server, uri)
     diagnostic = notification["params"]["diagnostics"][0]
 
@@ -380,19 +387,21 @@ def test_code_action_edit_applied_to_a_crlf_file_preserves_crlf_line_endings(ser
     actions = read_frame(server.stdout)["result"]
     quickfix = next(a for a in actions if a["title"].startswith("Apply Rector:"))
     edit = quickfix["edit"]["changes"][uri][0]
+    warm_applied = apply_edit(original, edit)
 
-    result = apply_edit(original, edit)
+    # Cold oracle: apply Rector for real on a fresh copy of the ORIGINAL file.
+    cold_copy = project.parent / "cold-crlf"
+    copy_fixture(cold_copy)
+    done = subprocess.run(
+        [php_binary(), str(REPO / "vendor" / "bin" / "rector"), "process",
+         "--config=rector.php", "--no-progress-bar", "--",
+         "src/CrlfFixable.php"],
+        cwd=cold_copy, capture_output=True, text=True, timeout=60,
+    )
+    assert done.returncode == 0, done.stderr
+    cold_applied = (cold_copy / "src" / "CrlfFixable.php").read_bytes().decode("utf-8")
 
-    lone_lf_in_new_text = edit["newText"].replace("\r\n", "").count("\n")
-    assert lone_lf_in_new_text == 0, (
-        "hunkNewText() joined the replacement with a bare \\n, losing the "
-        f"file's own CRLF convention: {edit['newText']!r}"
-    )
-    lone_lf_in_result = result.replace("\r\n", "").count("\n")
-    assert lone_lf_in_result == 0, (
-        "applying the edit produced a lone \\n not preceded by \\r -- "
-        f"mixed line endings in the result: {result!r}"
-    )
+    assert warm_applied == cold_applied
 
 
 @pytest.fixture

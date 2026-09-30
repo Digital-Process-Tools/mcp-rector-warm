@@ -88,7 +88,6 @@ final class RectorDiffParserTest extends TestCase
             'hasChange' => true,
             'changeFrom' => 2,
             'changeToExclusive' => 2,
-            'eol' => "\n",
         ]], $hunks);
     }
 
@@ -296,93 +295,26 @@ final class RectorDiffParserTest extends TestCase
         self::assertSame([], $fixes[1]['rectors']);
     }
 
-    public function testHunkNewTextUsesCrlfWhenTheKeptLinesInTheHunkAreCrlf(): void
+    public function testHunkNewTextJoinsWithABareLfEvenForAKeptCrlfLine(): void
     {
-        // #160 unit-level coverage (self-review: independent Explore review
-        // pass flagged that only the slow, full-stack E2E test exercised
-        // this at all): context lines carry a trailing \r, exactly the
-        // shape a real CRLF file's diff has -- Rector's own printer still
-        // emits the `+` line with a bare "\n".
+        // #160 self-review reversal (see parseHunks()'s and hunkNewText()'s
+        // own docblocks for the full story): a per-hunk CRLF-preserving
+        // rejoin used to live here. CI's own warm-vs-cold oracle test
+        // (tests/E2E/test_lsp_execute_command.py::
+        // test_fix_workspace_matches_a_cold_rector_apply_across_every_changed_file)
+        // failed on the CrlfFixable.php fixture because a COLD, real
+        // `vendor/bin/rector process` apply on a CRLF file ALSO rejoins its
+        // replacement lines with a bare "\n" (Rector's own pretty-printer
+        // output, never normalized to the file's original convention) --
+        // this hardcoded join is what actually matches cold byte for byte,
+        // which is this server's real contract. Context lines here carry a
+        // trailing \r (a real CRLF file's diff shape); the replacement
+        // must NOT inherit it.
         $diff = "--- Original\n+++ New\n@@ -1,3 +1,3 @@\n <?php\r\n-old\r\n+new\n <?php\r\n";
 
         $fixes = RectorDiffParser::buildFixes($diff, ['SomeRector'], []);
 
-        self::assertSame("new\r\n", $fixes[0]['newText']);
-    }
-
-    public function testParseHunksDetectsEolPerHunkNotFileWide(): void
-    {
-        // Self-review (independent Explore review pass): a single
-        // file-wide `eol` used to be stamped onto every hunk -- wrong for a
-        // source file with genuinely mixed line endings (a real, if rare,
-        // shape after a partial bad conversion). Hunk 1's own kept lines
-        // are CRLF; hunk 2's own kept lines are plain LF -- each hunk must
-        // keep its OWN convention rather than one bleeding into the other.
-        $diff = "--- Original\n+++ New\n"
-            . "@@ -1,3 +1,3 @@\n <?php\r\n-old1\r\n+new1\n <?php\r\n"
-            . "@@ -10,3 +10,3 @@\n <?php\n-old2\n+new2\n <?php\n";
-
-        $hunks = RectorDiffParser::parseHunks($diff);
-
-        self::assertCount(2, $hunks);
-        self::assertSame("\r\n", $hunks[0]['eol']);
-        self::assertSame("\n", $hunks[1]['eol']);
-    }
-
-    public function testParseHunksFallsBackToTheFileWideEolWhenAHunkHasNoKeptLineOfItsOwn(): void
-    {
-        // Self-review (independent auditor pass, then a SECOND-ROUND
-        // Explore review pass on THIS test itself): a pure-insertion hunk
-        // with no surrounding context has no `-`/` ` line of its own to
-        // read -- it must fall back to what the REST of the diff's kept
-        // lines say rather than defaulting to a bare "\n" and silently
-        // reproducing #160 in this narrow shape.
-        //
-        // Second-round finding: an earlier version of this test used only
-        // ONE distinct eol signal in the whole diff (hunk 1's own CRLF
-        // WAS the file-wide fallback value too), so it passed identically
-        // under the OLD file-wide-only implementation (which stamps the
-        // same value onto every hunk regardless of that hunk's own kept
-        // lines) -- it pinned nothing. Three hunks now: hunk 1's own kept
-        // lines are LF-only, hunk 3's are CRLF (the only source of the
-        // file-wide fallback signal), and hunk 2 is the pure-insertion
-        // hunk with no kept line of its own. A regression to file-wide-
-        // only stamping would incorrectly give hunk 1 the CRLF fallback
-        // too (it has no per-hunk override in that implementation),
-        // failing the hunks[0] assertion below.
-        $diff = "--- Original\n+++ New\n"
-            . "@@ -1,3 +1,3 @@\n <?php\n-old1\n+new1\n <?php\n"
-            . "@@ -20,0 +20,1 @@\n+inserted\n"
-            . "@@ -40,3 +40,3 @@\n <?php\r\n-old3\r\n+new3\n <?php\r\n";
-
-        $hunks = RectorDiffParser::parseHunks($diff);
-
-        self::assertCount(3, $hunks);
-        // Hunk 1's OWN kept lines are LF-only -- must stay "\n" even
-        // though the file-wide fallback (fed by hunk 3) is CRLF.
-        self::assertSame("\n", $hunks[0]['eol']);
-        // Hunk 2 has no kept line of its own -- falls back to the
-        // file-wide signal (from hunk 3), not a hardcoded "\n".
-        self::assertSame("\r\n", $hunks[1]['eol']);
-        self::assertSame("\r\n", $hunks[2]['eol']);
-    }
-
-    public function testParseHunksDoesNotOverStripARealTrailingCarriageReturn(): void
-    {
-        // Self-review (independent Explore review pass): the CRLF fix used
-        // to strip stored line text with `rtrim($text, "\r")`, which
-        // removes EVERY trailing \r rather than just the single one a
-        // CRLF-terminated diff line carries -- wrong for a line whose real
-        // content genuinely ends in a literal \r (rare, but this function's
-        // whole purpose is byte-exact fidelity). Two trailing \r bytes
-        // here: one is the line's own content, the other is the CRLF
-        // terminator this function's `explode("\n", ...)` leaves attached.
-        // Only the terminator must be stripped.
-        $diff = "--- Original\n+++ New\n@@ -1,1 +1,1 @@\n-old\r\n+line ending in a real carriage return\r\r\n";
-
-        $hunks = RectorDiffParser::parseHunks($diff);
-
-        self::assertSame("line ending in a real carriage return\r", $hunks[0]['newLines'][0]);
+        self::assertSame("new\n", $fixes[0]['newText']);
     }
 
     public function testBuildFixesAttributesTheSoleAppliedRuleToEveryUnattributedHunk(): void

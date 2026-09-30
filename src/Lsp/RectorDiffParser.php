@@ -22,7 +22,7 @@ namespace Dpt\McpRectorWarm\Lsp;
 final class RectorDiffParser
 {
     /**
-     * @return list<array{oldStart: int, oldCount: int, newLines: list<string>, hasChange: bool, changeFrom: int|null, changeToExclusive: int|null, eol: string}>
+     * @return list<array{oldStart: int, oldCount: int, newLines: list<string>, hasChange: bool, changeFrom: int|null, changeToExclusive: int|null}>
      *   `hasChange` (#91.3) is false for a hunk whose body is entirely context
      *   lines -- Rector has been observed emitting exactly this for a
      *   line-ending-only (CRLF) difference. `changeFrom`/`changeToExclusive`
@@ -30,38 +30,35 @@ final class RectorDiffParser
      *   lines actually touch, narrower than the full `oldStart..oldStart+
      *   oldCount-1` span whenever the hunk carries unified-diff context
      *   lines (3 on each side, by default) -- both null when `hasChange` is
-     *   false. `eol` (#160) is THIS HUNK's own line-ending convention --
-     *   "\r\n" when any of ITS OWN kept `-`/` ` lines still carries a
-     *   trailing `\r` (this function only explodes on "\n", so a CRLF
-     *   source file's own lines keep it), "\n" when it has at least one
-     *   kept line and none of them do. A hunk with NO kept lines at all
-     *   (e.g. a pure insertion with no surrounding context) has no signal
-     *   of its own, so it falls back to whatever the REST of the diff's
-     *   kept lines say (self-review: reviewed independently and found to
-     *   default to a bare "\n" even for a CRLF file otherwise, silently
-     *   reproducing #160 in that narrow shape -- the file-wide fallback
-     *   closes it for every diff that has at least one hunk with context).
-     *   Rector's pretty-printer emits newly ADDED (`+`) lines with a bare
-     *   "\n" regardless of the source file's convention, so `+` lines
-     *   cannot be used to detect it -- only `-`/` ` lines, which are
-     *   verbatim copies of the original file, can. Per-hunk (rather than
-     *   file-wide only) so a source file with genuinely mixed line
-     *   endings does not have one hunk's convention bleed into another's.
+     *   false.
+     *
+     *   #160 self-review reversal: a per-hunk line-ending ("eol") detector
+     *   used to live here, rejoining `hunkNewText()`'s output with the
+     *   ORIGINAL file's own CRLF convention instead of a hardcoded "\n".
+     *   PR review caught it BEFORE merge: CI's own warm-vs-cold oracle test
+     *   (tests/E2E/test_lsp_execute_command.py::
+     *   test_fix_workspace_matches_a_cold_rector_apply_across_every_changed_file)
+     *   failed on the CrlfFixable.php fixture, because a COLD, real
+     *   `vendor/bin/rector process` apply on a CRLF file ALSO writes its
+     *   replacement lines with a bare "\n" (Rector's own pretty-printer
+     *   output, never normalized to the file's original convention) --
+     *   the "mixed CRLF context / LF replacement" result #160 called a bug
+     *   is Rector's own real, upstream behaviour, and this server's entire
+     *   contract (CLAUDE.md's warm-vs-cold oracle) is to match cold BYTE
+     *   FOR BYTE, not to improve on it. The per-hunk eol fix made warm
+     *   diverge from cold instead. Reverted; #160 is closed by the E2E
+     *   test added alongside this reversal, which asserts warm equals cold
+     *   for this exact fixture instead of asserting a uniform-CRLF result
+     *   that cold itself does not produce.
      */
     public static function parseHunks(string $diff): array
     {
-        // #160: a file-wide FALLBACK only, used for a hunk with no kept
-        // line of its own to read -- see the `eol` doc above.
-        $fallbackEol = preg_match('/^[- ].*\r$/m', $diff) === 1 ? "\r\n" : "\n";
-
         $hunks = [];
         $current = null;
         $oldLine = 0;
         $rawNew = [];
-        $hunkHasKeptLine = false;
-        $hunkKeptLineIsCrlf = false;
 
-        $finalize = static function () use (&$current, &$rawNew, &$hunkHasKeptLine, &$hunkKeptLineIsCrlf, $fallbackEol): ?array {
+        $finalize = static function () use (&$current, &$rawNew): ?array {
             if ($current === null) {
                 return null;
             }
@@ -93,7 +90,6 @@ final class RectorDiffParser
                 }
             }
             $current['newLines'] = $core;
-            $current['eol'] = $hunkHasKeptLine ? ($hunkKeptLineIsCrlf ? "\r\n" : "\n") : $fallbackEol;
 
             return $current;
         };
@@ -112,12 +108,9 @@ final class RectorDiffParser
                     'hasChange' => false,
                     'changeFrom' => null,
                     'changeToExclusive' => null,
-                    'eol' => $fallbackEol,
                 ];
                 $rawNew = [];
                 $oldLine = $oldStart;
-                $hunkHasKeptLine = false;
-                $hunkKeptLineIsCrlf = false;
                 continue;
             }
 
@@ -131,43 +124,17 @@ final class RectorDiffParser
                 $current['changeFrom'] ??= $oldLine;
                 $oldLine++;
                 $current['changeToExclusive'] = $oldLine;
-                $hunkHasKeptLine = true;
-                if (str_ends_with($line, "\r")) {
-                    $hunkKeptLineIsCrlf = true;
-                }
                 continue;
             }
             if ($marker === '+') {
                 $current['hasChange'] = true;
                 $current['changeFrom'] ??= $oldLine;
                 $current['changeToExclusive'] = max($current['changeToExclusive'] ?? $oldLine, $oldLine);
-                // #160: strip a single trailing \r a CRLF source line still
-                // carries (see the `eol` doc above) -- newLines stores bare
-                // text, and hunkNewText() re-adds the detected `eol` itself,
-                // so a kept trailing \r here would double up into \r\r\n.
-                // Self-review (independent Explore review pass): `rtrim`
-                // used to strip here, which removes EVERY trailing \r --
-                // wrong for a line whose real content genuinely ends in one,
-                // however rare. Only ever one \r to remove (this function's
-                // own explode("\n", ...) leaves at most one), so strip
-                // exactly that one instead.
-                $text = substr($line, 1);
-                if (str_ends_with($text, "\r")) {
-                    $text = substr($text, 0, -1);
-                }
-                $rawNew[] = ['pos' => $oldLine, 'text' => $text, 'isAdd' => true];
+                $rawNew[] = ['pos' => $oldLine, 'text' => substr($line, 1), 'isAdd' => true];
                 continue;
             }
             if ($marker === ' ') {
-                $hunkHasKeptLine = true;
-                if (str_ends_with($line, "\r")) {
-                    $hunkKeptLineIsCrlf = true;
-                }
-                $text = substr($line, 1);
-                if (str_ends_with($text, "\r")) {
-                    $text = substr($text, 0, -1);
-                }
-                $rawNew[] = ['pos' => $oldLine, 'text' => $text, 'isAdd' => false];
+                $rawNew[] = ['pos' => $oldLine, 'text' => substr($line, 1), 'isAdd' => false];
                 $oldLine++;
             }
         }
@@ -347,7 +314,7 @@ final class RectorDiffParser
     }
 
     /**
-     * @param array{oldStart: int, oldCount: int, newLines: list<string>, eol: string} $hunk
+     * @param array{oldStart: int, oldCount: int, newLines: list<string>} $hunk
      */
     private static function hunkNewText(array $hunk): string
     {
@@ -355,11 +322,11 @@ final class RectorDiffParser
             return '';
         }
 
-        // #160: rejoin with the ORIGINAL file's own line-ending convention
-        // (parseHunks()'s `eol`), not a hardcoded "\n" -- a CRLF source file
-        // used to come back with the hunk's kept lines joined by a bare
-        // "\n" regardless, producing a mixed-ending result once applied
-        // against the rest of the (untouched, still-CRLF) file.
-        return implode($hunk['eol'], $hunk['newLines']) . $hunk['eol'];
+        // #160 self-review reversal: see parseHunks()'s docblock. A cold,
+        // real `vendor/bin/rector process` apply on a CRLF file ALSO
+        // rejoins its replacement lines with a bare "\n" -- this hardcoded
+        // join matches that byte for byte, which is this server's actual
+        // contract (CLAUDE.md's warm-vs-cold oracle).
+        return implode("\n", $hunk['newLines']) . "\n";
     }
 }
