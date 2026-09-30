@@ -372,7 +372,7 @@ rather than at the ambient umask's default mode and only narrowed to `0600` afte
 
 ### Fixed
 
-- Fixed: the warm server now loads the target project's own `vendor/autoload.php`, the same way cold Rector does for a composer-global install, so a class that only resolves through the project's own Composer autoloader (most commonly a parent class) is no longer invisible to warm calls (#30).
+- Fixed: the warm server now loads the target project's own `vendor/autoload.php`, the same way cold Rector does for a composer-global install, so a class that only resolves through the project's own Composer autoloader (most commonly a parent class) is no longer invisible to warm calls (#30). Narrowed by #195: a project that ships its own `vendor/rector/rector` is exactly the case cold Rector's own guard does NOT load that autoloader for, and warm now matches -- see the `## [Unreleased]`-or-later entry for #195.
 - Fixed: a warm call whose analysis outlasts `default_socket_timeout` (60s by default) no longer fails with "forked rector call produced no output" -- a read timeout is now told apart from the analysis process actually closing its end of the socket (#32).
 - Fixed: an edit to a `withBootstrapFiles()` file mid-session is now picked up on the next call, the same way an edit to `rector.php` itself already was (#20) -- the warm worker reboots when a bootstrap file's content changes instead of staying pinned to what it first required (#33).
 
