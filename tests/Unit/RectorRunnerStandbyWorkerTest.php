@@ -899,6 +899,176 @@ final class RectorRunnerStandbyWorkerTest extends TestCase
         }
     }
 
+    /**
+     * #153: proc_close() has no timeout of its own and blocks unconditionally
+     * until the OS reports the child dead. discardProcWorker()'s new bounded
+     * wait (awaitProcExitOrDeadline()) must return false, WITHOUT blocking
+     * past its own deadline, when the process is genuinely still running --
+     * exercised directly, with the process deliberately never signalled at
+     * all, so this is deterministic regardless of how fast a real kill
+     * resolves on whatever platform the suite runs on.
+     */
+    public function testAwaitProcExitOrDeadlineReturnsFalseWithoutBlockingPastAnAlreadyPastDeadline(): void
+    {
+        $null = \PHP_OS_FAMILY === 'Windows' ? 'NUL' : '/dev/null';
+        $proc = proc_open(
+            [\PHP_BINARY, '-r', 'sleep(60);'],
+            [0 => ['file', $null, 'r'], 1 => ['file', $null, 'w'], 2 => ['file', $null, 'w']],
+            $pipes,
+        );
+        self::assertIsResource($proc);
+
+        $method = new \ReflectionMethod(RectorRunner::class, 'awaitProcExitOrDeadline');
+        $method->setAccessible(true);
+
+        $start = microtime(true);
+        $result = null;
+        try {
+            self::assertTrue(proc_get_status($proc)['running'], 'control: the process must actually still be running when checked');
+            $result = $method->invoke(self::noPcntlRunner(), $proc, hrtime(true) - 1_000_000_000);
+        } finally {
+            proc_terminate($proc, 9);
+            proc_close($proc);
+        }
+        $elapsed = microtime(true) - $start;
+
+        self::assertFalse($result, 'must fire: a still-running process past its deadline must report false, never true');
+        self::assertLessThan(1.0, $elapsed, "an already-past deadline must not block at all (took {$elapsed}s)");
+    }
+
+    /**
+     * #153 positive control, paired with the test above: a process that has
+     * ALREADY exited by the time awaitProcExitOrDeadline() is called must
+     * report true promptly even with a deadline that is itself already in
+     * the past -- the negative case above must not be passing merely
+     * because nothing is ever checked.
+     */
+    public function testAwaitProcExitOrDeadlineReturnsTrueOnceTheProcessHasActuallyExited(): void
+    {
+        $null = \PHP_OS_FAMILY === 'Windows' ? 'NUL' : '/dev/null';
+        $proc = proc_open(
+            [\PHP_BINARY, '-r', 'exit(0);'],
+            [0 => ['file', $null, 'r'], 1 => ['file', $null, 'w'], 2 => ['file', $null, 'w']],
+            $pipes,
+        );
+        self::assertIsResource($proc);
+
+        $deadline = microtime(true) + 15.0;
+        while (proc_get_status($proc)['running'] && microtime(true) < $deadline) {
+            usleep(50_000);
+        }
+        self::assertFalse(proc_get_status($proc)['running'], 'control: the process must actually have exited on its own');
+
+        $method = new \ReflectionMethod(RectorRunner::class, 'awaitProcExitOrDeadline');
+        $method->setAccessible(true);
+
+        $start = microtime(true);
+        $result = $method->invoke(self::noPcntlRunner(), $proc, hrtime(true) - 1_000_000_000);
+        $elapsed = microtime(true) - $start;
+        proc_close($proc);
+
+        self::assertTrue($result, 'must fire: an already-exited process must report true even past an already-past deadline');
+        self::assertLessThan(1.0, $elapsed, "an already-exited process must resolve immediately (took {$elapsed}s)");
+    }
+
+    /**
+     * #153 integration: discardProcWorker() given a deadline still fully
+     * cleans up (proc_close()s and unlinks the stderr temp file) a worker
+     * that exits promptly -- the bounded path must not regress the ordinary
+     * case where nothing is ever mid-boot.
+     */
+    public function testDiscardProcWorkerWithADeadlineStillCleansUpAWorkerThatExitsPromptly(): void
+    {
+        $runner = self::noPcntlRunner();
+        $server = stream_socket_server('tcp://127.0.0.1:0', $errno, $errstr);
+        self::assertNotFalse($server);
+        $null = \PHP_OS_FAMILY === 'Windows' ? 'NUL' : '/dev/null';
+        $proc = proc_open(
+            [\PHP_BINARY, '-r', 'exit(0);'],
+            [0 => ['file', $null, 'r'], 1 => ['file', $null, 'w'], 2 => ['file', $null, 'w']],
+            $pipes,
+        );
+        self::assertIsResource($proc);
+        $stderrFile = (string) tempnam(sys_get_temp_dir(), 'discard-deadline-control-');
+
+        $property = new \ReflectionProperty(RectorRunner::class, 'procWorker');
+        $property->setAccessible(true);
+        $property->setValue($runner, [
+            'proc' => $proc,
+            'pid' => (int) proc_get_status($proc)['pid'],
+            'server' => $server,
+            'socket' => null,
+            'token' => str_repeat('a', 32),
+            'stderr' => $stderrFile,
+            'ready' => false,
+        ]);
+
+        $discard = new \ReflectionMethod(RectorRunner::class, 'discardProcWorker');
+        $discard->setAccessible(true);
+
+        $start = microtime(true);
+        $discard->invoke($runner, false, hrtime(true) + 5_000_000_000);
+        $elapsed = microtime(true) - $start;
+
+        self::assertLessThan(2.0, $elapsed, "a worker that exits promptly must not be held up by the new bounded wait (took {$elapsed}s)");
+        self::assertFileDoesNotExist($stderrFile, 'the worker was fully discarded, so its stderr temp file must be removed as before');
+    }
+
+    /**
+     * #153: the destructor's own new bounded deadline must not block the
+     * calling process past it when the standby it discards is still
+     * running -- the exact race the issue reports (client closes stdin
+     * right as a fresh standby is mid-boot). $tree is false in __destruct(),
+     * so this simulates the same shape by installing a still-running
+     * process directly and letting the object go out of scope.
+     */
+    public function testDestructorDoesNotBlockPastItsBoundedDeadlineWhenTheStandbyIsStillRunning(): void
+    {
+        $runner = self::noPcntlRunner();
+        $server = stream_socket_server('tcp://127.0.0.1:0', $errno, $errstr);
+        self::assertNotFalse($server);
+        $null = \PHP_OS_FAMILY === 'Windows' ? 'NUL' : '/dev/null';
+        $proc = proc_open(
+            [\PHP_BINARY, '-r', 'sleep(60);'],
+            [0 => ['file', $null, 'r'], 1 => ['file', $null, 'w'], 2 => ['file', $null, 'w']],
+            $pipes,
+        );
+        self::assertIsResource($proc);
+        $stderrFile = (string) tempnam(sys_get_temp_dir(), 'destruct-deadline-test-');
+
+        $property = new \ReflectionProperty(RectorRunner::class, 'procWorker');
+        $property->setAccessible(true);
+        $property->setValue($runner, [
+            'proc' => $proc,
+            'pid' => (int) proc_get_status($proc)['pid'],
+            'server' => $server,
+            'socket' => null,
+            'token' => str_repeat('a', 32),
+            'stderr' => $stderrFile,
+            'ready' => false,
+        ]);
+
+        $start = microtime(true);
+        unset($runner);
+        $elapsed = microtime(true) - $start;
+
+        try {
+            // #153 follow-up (audit finding): the bound must clear
+            // tests/E2E/stdio_tap.py's own 1.5s EXIT_GRACE, the exact window
+            // the flaky harness measures -- not merely be "generous" in the
+            // abstract. __destruct() budgets 1.2s combined for both
+            // discardProcWorker() and stopRetiredProcWorkers(); 1.5 asserted
+            // here (not 1.2) leaves slack for this test's own overhead.
+            self::assertLessThan(1.5, $elapsed, "__destruct() must clear the E2E harness's own 1.5s EXIT_GRACE (took {$elapsed}s)");
+        } finally {
+            if (is_resource($proc)) {
+                proc_terminate($proc, 9);
+                proc_close($proc);
+            }
+            @unlink($stderrFile);
+        }
+    }
+
     private static function isAlive(int $pid): bool
     {
         if (\PHP_OS_FAMILY === 'Windows') {

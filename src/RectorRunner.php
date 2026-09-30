@@ -307,6 +307,54 @@ class RectorRunner implements RunnerInterface
             && \function_exists('stream_socket_pair');
     }
 
+    /**
+     * #157: this process's own pid, taken the same way boot() always has --
+     * but logged, not silently folded into null, when \getmypid() itself
+     * returns false (a documented-but-essentially-never-seen PHP edge case).
+     * A null $daemonPid makes forkAndExecute()'s wait loop skip #127's whole
+     * mid-call orphan-kill check with no signal that it did; this is the one
+     * place that decision is made, so it is the one place that can log it.
+     * \getmypid() is wrapped in its own overridable method (protected, same
+     * seam canFork()/hasPosixKill() already use) purely so a test can force
+     * the branch: forcing the real builtin to return false is not achievable
+     * from a test, matching the issue's own stated limit.
+     */
+    protected function currentPid()
+    {
+        return \getmypid();
+    }
+
+    private function daemonPidOrWarn(): ?int
+    {
+        $pid = $this->currentPid();
+        if ($pid === false) {
+            $this->logGetmypidFailure("#127's mid-call orphan-kill detection is disabled for this warm worker");
+
+            return null;
+        }
+
+        return $pid;
+    }
+
+    /**
+     * Self-review finding on #157: two sibling call sites in this file also
+     * read \getmypid() raw -- spawnProcWorker()'s 'daemon_pid' payload (the
+     * no-pcntl standby worker's own idle-wait daemonPid, already coerced to
+     * null downstream by bin/rector-warm-worker.php's is_int() check, so
+     * failing open there was already safe -- only the signal was missing)
+     * and spawnOrphanWatchdog()'s own workerPid argv (where a false here
+     * becomes an empty string, then (int) '' === 0, tripping the watchdog's
+     * own <= 0 guard and exiting silently -- the same #134-inert shape #159
+     * describes, one level further out). Neither call site changes shape
+     * here, same as #157's own fix: this only adds the missing log line.
+     */
+    private function logGetmypidFailure(string $consequence): void
+    {
+        if (\defined('STDERR') && \is_resource(\STDERR)) {
+            @\fwrite(\STDERR, "mcp-rector-warm: getmypid() returned false; {$consequence} (#157)\n");
+        }
+    }
+
     /** Extra seconds runForked()'s own (daemon-side) deadline gets on top of
      *  $callTimeoutSeconds, so forkAndExecute()'s deadline (inside the worker,
      *  same $callTimeoutSeconds, no grace) reliably fires FIRST and gets the
@@ -415,7 +463,7 @@ class RectorRunner implements RunnerInterface
         // kill -9 closes no fd the worker is waiting on mid-call -- see
         // forkAndExecute()'s orphan check) rather than only when it happens
         // to be idle between calls (where EOF on $socket already covers it).
-        $daemonPid = \getmypid();
+        $daemonPid = $this->daemonPidOrWarn();
 
         $pid = \pcntl_fork();
         if ($pid === -1) {
@@ -426,7 +474,7 @@ class RectorRunner implements RunnerInterface
 
         if ($pid === 0) {
             \fclose($parentSocket);
-            $this->serveWorker($childSocket, $daemonPid !== false ? $daemonPid : null);
+            $this->serveWorker($childSocket, $daemonPid);
             // serveWorker() always exit()s; this line is unreachable.
         }
 
@@ -1232,9 +1280,38 @@ class RectorRunner implements RunnerInterface
      */
     private static function collectIniOverrideArgs(): array
     {
+        return self::collectIniOverrideArgsFrom(\ini_get_all(null, true));
+    }
+
+    /**
+     * Split out from collectIniOverrideArgs() so a test can force the
+     * ini_get_all()-failed branch directly, without needing the real builtin
+     * itself to return false (#156: no concrete trigger for that has been
+     * constructed in this daemon's own runtime -- plain CLI SAPI, no
+     * extension-name argument passed). $iniAll is exactly what
+     * \ini_get_all(null, true) returns: an array of directives, or false when
+     * it could not enumerate them at all -- previously collapsed by the
+     * caller's own `?: []` into "nothing to forward", indistinguishable from
+     * the genuinely-empty case.
+     *
+     * @param array<string, array<string, mixed>>|false $iniAll
+     * @return list<string>
+     */
+    private static function collectIniOverrideArgsFrom($iniAll): array
+    {
+        if ($iniAll === false) {
+            // Fail open (still forward nothing): a worker that boots with no
+            // -d overrides is better than one that fails to boot at all, but
+            // this must never look identical to the genuinely-empty case.
+            if (\defined('STDERR') && \is_resource(\STDERR)) {
+                @\fwrite(\STDERR, 'mcp-rector-warm: ini_get_all() could not enumerate ini directives; '
+                    . "no -d overrides will be forwarded to this warm worker (#156)\n");
+            }
+            $iniAll = [];
+        }
         $baseline = self::loadPristineIniBaseline();
         $args = [];
-        foreach (\ini_get_all(null, true) ?: [] as $name => $info) {
+        foreach ($iniAll as $name => $info) {
             if (!\is_array($info)) {
                 continue;
             }
@@ -1339,13 +1416,17 @@ class RectorRunner implements RunnerInterface
             @\unlink($stderrFile);
             throw new \RuntimeException('Could not spawn the warm worker process (no-pcntl path, #108).');
         }
+        $ownPid = $this->currentPid();
+        if ($ownPid === false) {
+            $this->logGetmypidFailure('the standby worker will not receive a daemon pid to watch, disabling #127-style orphan detection there too');
+        }
         \fwrite($pipes[0], (string) \json_encode(
             [
                 'daemon_argv' => $_SERVER['argv'] ?? [],
                 'cwd' => \getcwd(),
                 'address' => $address,
                 'token' => $token,
-                'daemon_pid' => \getmypid(),
+                'daemon_pid' => $ownPid,
                 'stderr_file' => $stderrFile,
             ],
             \JSON_INVALID_UTF8_SUBSTITUTE,
@@ -1535,8 +1616,22 @@ class RectorRunner implements RunnerInterface
      * Stop the current worker now. $tree: kill its whole process tree first (#112) --
      * the call-timeout path; otherwise the worker alone, which holds nothing worth a
      * graceful shutdown.
+     *
+     * $deadlineNs (#153): proc_close() blocks unconditionally until the OS reports
+     * the child dead, with no timeout of its own. Sending it a kill signal first
+     * makes that wait bounded IN PRACTICE almost everywhere -- the same reasoning
+     * killAndReap() above already relies on for the pcntl path -- but a worker
+     * killed while still mid-boot (loading its own PHP extensions) can rarely take
+     * Windows noticeably longer to actually die than an already-connected one
+     * does, because TerminateProcess() there can be deferred behind that process's
+     * own DLL loader lock. Given a deadline, this polls instead of blocking
+     * unconditionally and, past the deadline, returns without proc_close()ing --
+     * a real resource "leak" (the handle -- not the OS process, which is still
+     * being torn down) that only matters if this instance keeps running
+     * afterwards. $deadlineNs is null everywhere except __destruct(), where the
+     * whole PHP process is exiting anyway and the OS reclaims it regardless.
      */
-    private function discardProcWorker(bool $tree): void
+    private function discardProcWorker(bool $tree, ?int $deadlineNs = null): void
     {
         if ($this->procWorker === null) {
             return;
@@ -1557,8 +1652,36 @@ class RectorRunner implements RunnerInterface
             // 9, not \SIGKILL: that constant belongs to pcntl, absent here.
             \proc_terminate($worker['proc'], 9);
         }
+        if ($deadlineNs !== null && !$this->awaitProcExitOrDeadline($worker['proc'], $deadlineNs)) {
+            // Still running past the deadline: do not let proc_close() hold this
+            // caller's own exit hostage waiting for it (#153). Its stderr temp
+            // file is left behind too -- unlinking it while the process might
+            // still have it open is itself platform-risky on Windows.
+            return;
+        }
         \proc_close($worker['proc']);
         @\unlink($worker['stderr']);
+    }
+
+    /**
+     * Poll $proc's status until it is no longer running or $deadlineNs passes,
+     * whichever comes first -- never a single unconditional blocking wait.
+     * Extracted so #153's regression test can drive it directly with a process
+     * that is deliberately never signalled, independent of how fast SIGKILL/
+     * TerminateProcess actually resolves on whatever platform the test runs on.
+     *
+     * @param resource $proc
+     */
+    private function awaitProcExitOrDeadline($proc, int $deadlineNs): bool
+    {
+        while (\proc_get_status($proc)['running']) {
+            if (\hrtime(true) >= $deadlineNs) {
+                return false;
+            }
+            \usleep(10_000);
+        }
+
+        return true;
     }
 
     private function reapRetiredProcWorkers(): void
@@ -1577,21 +1700,46 @@ class RectorRunner implements RunnerInterface
     /**
      * The daemon exiting must not leave a booted standby behind -- on Windows a child
      * holding inherited handles can also keep the host's pipes open.
+     *
+     * Bounded (#153): the standby this discards may still be mid-boot -- the
+     * client closing stdin right after a call that forced a config-change
+     * reboot (runViaStandbyWorker()'s finally block always starts a fresh one,
+     * fire-and-forget) races exactly this destructor. The E2E harness this
+     * issue was filed against (tests/E2E/stdio_tap.py's EXIT_GRACE) gives the
+     * whole daemon only 1.5s to exit after stdin closes, so ONE shared 1.2s
+     * budget covers both this call and stopRetiredProcWorkers() below, with
+     * margin under that window for the rest of this method's own work --
+     * not 2s per call, which could clear either wait alone yet still miss
+     * the harness's own combined deadline. See discardProcWorker()'s own
+     * docblock for why the wait is bounded rather than unconditional at all.
      */
     public function __destruct()
     {
-        $this->discardProcWorker(false);
-        $this->stopRetiredProcWorkers();
+        $deadlineNs = \hrtime(true) + 1_200_000_000;
+        $this->discardProcWorker(false, $deadlineNs);
+        $this->stopRetiredProcWorkers($deadlineNs);
     }
 
-    /** Stop and reap every retired worker now, rather than waiting for it to exit on
-     *  its own -- they have all served their call already. */
-    private function stopRetiredProcWorkers(): void
+    /**
+     * Stop and reap every retired worker now, rather than waiting for it to exit on
+     * its own -- they have all served their call already.
+     *
+     * $deadlineNs (#153): shared with __destruct()'s own discardProcWorker() call --
+     * a retired worker has already connected and served its call, so it is far less
+     * likely to be caught by the mid-boot DLL-loader-lock race that section theorizes
+     * about, but nothing rules it out, and an unconditional proc_close() here would
+     * undo the whole point of bounding the standby's own wait right above it. null
+     * (every other call site, via reboot()) keeps the old fully-blocking behaviour.
+     */
+    private function stopRetiredProcWorkers(?int $deadlineNs = null): void
     {
         foreach ($this->retiredProcWorkers as $retired) {
             $status = \proc_get_status($retired['proc']);
             if ($status['running']) {
                 \proc_terminate($retired['proc'], 9);
+            }
+            if ($deadlineNs !== null && !$this->awaitProcExitOrDeadline($retired['proc'], $deadlineNs)) {
+                continue;
             }
             \proc_close($retired['proc']);
             @\unlink($retired['stderr']);
@@ -1713,6 +1861,19 @@ class RectorRunner implements RunnerInterface
         if ($daemonPid === null || !\function_exists('proc_open')) {
             return null;
         }
+        $ownPid = $this->currentPid();
+        if ($ownPid === false) {
+            // Unlike spawnProcWorker()'s own getmypid() (also #157-adjacent, see
+            // logGetmypidFailure()'s own docblock): there is no safe payload to
+            // send here at all -- the watchdog's own argv parsing treats a
+            // missing/zero workerPid as a hard refusal (<= 0 guard, exit(1)),
+            // silently. Skip spawning it, same "best effort, no watchdog" shape
+            // $daemonPid === null already takes above, instead of spawning one
+            // that will exit immediately with nothing to show for it.
+            $this->logGetmypidFailure('#134\'s orphan watchdog will not be spawned for this call (no worker pid to give it)');
+
+            return null;
+        }
         $null = \PHP_OS_FAMILY === 'Windows' ? 'NUL' : '/dev/null';
         $descriptors = [0 => ['file', $null, 'r'], 1 => ['file', $null, 'w'], 2 => ['file', $null, 'w']];
         $watchdog = @\proc_open(
@@ -1720,7 +1881,7 @@ class RectorRunner implements RunnerInterface
                 \PHP_BINARY,
                 \dirname(__DIR__) . '/bin/rector-warm-orphan-watchdog.php',
                 (string) $daemonPid,
-                (string) \getmypid(),
+                (string) $ownPid,
                 (string) self::ORPHAN_POLL_SECONDS,
             ],
             $descriptors,

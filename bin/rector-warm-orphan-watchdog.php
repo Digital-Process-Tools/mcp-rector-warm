@@ -43,6 +43,10 @@ if ($daemonPid <= 0 || $workerPid <= 0) {
     exit(1);
 }
 
+// #159: logged at most once -- run() (inside isAlive()/parentOf()) can fail
+// this way on EVERY poll in an environment with no `ps`, and this loop polls
+// every $pollSeconds forever; one line is the signal, not a stream of them.
+$loggedProbeFailure = false;
 while (true) {
     if (ProcessTree::isAlive($workerPid) === false) {
         // The call already finished (or the worker died some other way) -- nothing
@@ -59,9 +63,42 @@ while (true) {
     // Windows has no such reparenting concept to read: isAlive($daemonPid) is the
     // only signal there, same as the rest of this no-pcntl path.
     $parent = ProcessTree::parentOf($workerPid);
-    $orphaned = $parent !== null
-        ? $parent !== $daemonPid
-        : (\PHP_OS_FAMILY === 'Windows' && ProcessTree::isAlive($daemonPid) === false);
+    // #159: a null $parent means either "the worker's parent is simply not
+    // $daemonPid any more" (the case the Windows fallback below already
+    // handles) or "`ps` itself could not be run at all" -- on POSIX, the
+    // fallback is unconditionally false, so the second case used to read as
+    // "not orphaned" forever with no signal. lastProbeRanOk() distinguishes
+    // them without changing that fallback's behaviour. Read IMMEDIATELY
+    // after the probe it is reporting on -- lastProbeRanOk() is one piece of
+    // shared, order-dependent state, and the Windows branch below makes its
+    // OWN, separate isAlive($daemonPid) probe call; reading this flag once,
+    // here, for BOTH platforms (self-review finding) would silently report
+    // on the wrong probe's outcome on Windows once that later call runs.
+    $parentProbeFailed = $parent === null && ProcessTree::lastProbeRanOk() === false;
+    if ($parentProbeFailed && \PHP_OS_FAMILY !== 'Windows' && !$loggedProbeFailure) {
+        $loggedProbeFailure = true;
+        if (\defined('STDERR') && \is_resource(\STDERR)) {
+            @\fwrite(\STDERR, 'rector-warm-orphan-watchdog: could not run `ps` '
+                . "to check whether worker {$workerPid} is orphaned; "
+                . "#134's kill-detection is degraded to best-effort here until this recovers (#159)\n");
+        }
+    }
+    if ($parent !== null) {
+        $orphaned = $parent !== $daemonPid;
+    } elseif (\PHP_OS_FAMILY === 'Windows') {
+        $daemonAlive = ProcessTree::isAlive($daemonPid);
+        if ($daemonAlive === null && ProcessTree::lastProbeRanOk() === false && !$loggedProbeFailure) {
+            $loggedProbeFailure = true;
+            if (\defined('STDERR') && \is_resource(\STDERR)) {
+                @\fwrite(\STDERR, 'rector-warm-orphan-watchdog: could not run `tasklist` '
+                    . "to check whether daemon {$daemonPid} is still alive; "
+                    . "#134's kill-detection is degraded to best-effort here until this recovers (#159)\n");
+            }
+        }
+        $orphaned = $daemonAlive === false;
+    } else {
+        $orphaned = false;
+    }
     if ($orphaned) {
         // Same tree-kill as a --call-timeout kill (#112), and in the SAME order
         // RectorRunner::discardProcWorker() already uses it in ("Before
