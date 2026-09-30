@@ -12,6 +12,7 @@ from __future__ import annotations
 import argparse
 import importlib.util
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -171,3 +172,89 @@ def test_smoke_run_rerun_into_same_out_does_not_reuse_stale_cache(tmp_path):
         assert done.returncode == 0, f"stdout={done.stdout!r} stderr={done.stderr!r}"
     report = json.loads((out / "report.json").read_bytes().decode("utf-8"))
     assert report["summary"]["mismatch"] == 0
+
+
+# --------------------------------------------------------------------------- #192: a foreign php-parser copy
+
+FOREIGN_PHP_PARSER_PROJECT = REPO / "tests" / "Fixtures" / "foreign-php-parser-project"
+FOREIGN_MARKER = "foreign nikic/php-parser copy used"
+
+
+def test_foreign_php_parser_fixture_is_live():
+    """Positive control for the test below: the fixture's own PhpParser\\NodeVisitorAbstract
+    really is what its autoloader serves, and it really throws the marker. Without this, a
+    fixture that silently stopped loading (a typo in the map, a moved file) would let the
+    warm == cold test below pass with nothing left to catch."""
+    script = (
+        f"require {warm_vs_cold.php_str(str(REPO / 'vendor' / 'autoload.php'))};"
+        f"require {warm_vs_cold.php_str(str(FOREIGN_PHP_PARSER_PROJECT / 'vendor' / 'autoload.php'))};"
+        "$v = new class extends PhpParser\\NodeVisitorAbstract {};"
+        "echo (new ReflectionClass(PhpParser\\NodeVisitorAbstract::class))->getFileName(), PHP_EOL;"
+        "try { $v->beforeTraverse([]); echo 'no exception'; } catch (LogicException $e) { echo $e->getMessage(); }"
+    )
+    done = subprocess.run([php_binary(), "-r", script], capture_output=True, text=True, timeout=60)
+    assert done.returncode == 0, f"stdout={done.stdout!r} stderr={done.stderr!r}"
+    loaded_from, message = done.stdout.splitlines()
+    assert Path(loaded_from).resolve().is_relative_to(FOREIGN_PHP_PARSER_PROJECT.resolve())
+    assert message == FOREIGN_MARKER
+
+
+def run_tool_from_empty_tmpdir(tmp_path: Path, project: Path) -> tuple[dict, str]:
+    """Run the tool on every src/*.php of `project` with TMPDIR (TMP/TEMP on Windows)
+    pointing at a fresh empty directory -- a first run on a new machine or CI runner:
+    PHPStan's own cache lives under sys_get_temp_dir()/cache/PHPStan, and the tool
+    only redirects Rector's cache, not that one (#192). Returns the report and its
+    markdown; asserts the run happened at all, so a caller's 'must not' is not vacuous."""
+    empty_tmp = tmp_path / "tmp"
+    empty_tmp.mkdir()
+    env = {**os.environ, "TMPDIR": str(empty_tmp), "TMP": str(empty_tmp), "TEMP": str(empty_tmp)}
+    out = tmp_path / "out"
+    done = subprocess.run(
+        [sys.executable, str(TOOL), "--project", str(project),
+         "--files", "src/*.php", "--php", php_binary(), "--out", str(out)],
+        capture_output=True, text=True, timeout=120, env=env,
+    )
+    report_md = (out / "report.md").read_text(encoding="utf-8") if (out / "report.md").is_file() else ""
+    assert (out / "report.json").is_file(), f"stdout={done.stdout!r} stderr={done.stderr!r}"
+    # The PHPStan cache really was built from nothing, in the empty dir this run chose.
+    assert (empty_tmp / "cache" / "PHPStan").is_dir(), sorted(p.name for p in empty_tmp.iterdir())
+    report = json.loads((out / "report.json").read_bytes().decode("utf-8"))
+    assert report["meta"]["mode"] == "checkout"
+    return report, report_md
+
+
+def assert_all_match_with_a_real_diff(report: dict, report_md: str) -> None:
+    assert report["summary"]["mismatch"] == 0, report_md
+    assert report["summary"]["warm_error"] == 0, report_md
+    assert report["summary"]["cold_error"] == 0, report_md
+    assert report["summary"]["match"] == 1, report_md
+    # Not a vacuous match of two empty answers: cold really changes the file.
+    assert report["summary"]["changed_cold"] == 1, report_md
+    assert report["summary"]["changed_warm"] == 1, report_md
+
+
+def test_foreign_php_parser_in_project_vendor_matches_cold_from_empty_tmpdir(tmp_path):
+    """#192: the project's autoloader can resolve PhpParser\\* classes from its own copy
+    (laravel/symfony ship one; phpstan.phar carries another) and is registered ahead of
+    Rector's. Cold `rector process` requires Rector's preload.php before any of that, so
+    every php-parser class comes from Rector's bundled copy; warm must too. Before the
+    fix the warm worker took the fixture's copy and reported its marker as an error."""
+    report, report_md = run_tool_from_empty_tmpdir(tmp_path, FOREIGN_PHP_PARSER_PROJECT)
+    assert FOREIGN_MARKER not in report_md, report_md
+    assert_all_match_with_a_real_diff(report, report_md)
+
+
+STD_STREAMS_PROJECT = REPO / "tests" / "Fixtures" / "std-streams-project"
+
+
+def test_std_stream_constants_stay_open_in_the_analysing_process_from_empty_tmpdir(tmp_path):
+    """#192: on an empty PHPStan cache, resolving a native function's default argument
+    (debug_backtrace()'s here) builds PhpStorm-stub reflection for every constant in
+    the same stub file, STDIN/STDOUT/STDERR included, from their runtime values.
+    Warm used to fclose() those three in the forked process that analyses the file,
+    so the values were closed resources, is_resource() said false, and
+    BuilderHelpers::normalizeValue() threw 'Invalid value' (line 216) where cold,
+    with its streams open, returned the diff. A populated PHPStan cache hid it."""
+    report, report_md = run_tool_from_empty_tmpdir(tmp_path, STD_STREAMS_PROJECT)
+    assert "Invalid value" not in report_md, report_md
+    assert_all_match_with_a_real_diff(report, report_md)
