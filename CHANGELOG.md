@@ -6,6 +6,25 @@ This project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.7.1] - 2026-09-30
+
+### Fixed
+
+- Fixed: `rector-warm.fixWorkspace` (`workspace/executeCommand`) was advertised in `executeCommandProvider` even to a client that never declared `workspace.applyEdit`, though the docs always said it required it (`initialize` now gates the advertisement on `canApplyWorkspaceEdit` too, not only on the diagnostics source type); and a file that failed (e.g. a syntax error) alongside others that succeeded read as plain success with no indication anything was skipped -- the server now sends a `window/showMessage` (Warning) naming the failing file(s) while still applying the rest (#141).
+
+- Fixed: `workspace/executeCommand` `rector-warm.fixWorkspace` now recognises a dirty buffer opened through a symlinked path (e.g. macOS's `/tmp` -> `/private/tmp`) or reached with a different percent-encoding of the same URI (`%20` vs a literal space), instead of silently applying a disk-derived fix over the unsaved edits. `isBufferDirty()` now compares device+inode for every open buffer unconditionally, falling back to the previous case-insensitive URI comparison only when `stat()` cannot resolve one side (#147, folds in #150).
+
+- Fixed: the daemon (`bin/mcp-rector-warm`) could take unusually long to exit after the client closed stdin when its standby worker (#108, the no-pcntl/Windows path) was still mid-boot at that moment -- `proc_close()` has no timeout of its own, so a shutdown-time kill of a worker that survives past a short bound no longer blocks the daemon's own exit on it (#153).
+
+- Fixed: ADR 0001's line citations for `RectorRunner::boot()`, `forkAndExecute()`
+  and `readExactly()` pointed at the wrong lines (the file has grown from ~600 to
+  2500+ lines since the ADR was written) and the same stale citations, plus one
+  for `RectorTool.php`, had been copied into `docs/lsp-for-rector-maintainers.md`.
+  Both docs now name the function only, dropping line numbers so the citation
+  cannot drift again as the file grows further (#155).
+
+- Three daemon-internal degraded states that used to read as "nothing happened" now log a diagnostic line to stderr instead of failing silently: `ini_get_all()` failing while collecting `-d` overrides for a standby worker (#156), `getmypid()` returning `false` before a fork (which silently disabled the #127 mid-call orphan-kill check) (#157), and `ps` being unrunnable at all inside `ProcessTree::parentOf()` (which silently disabled the #134 orphan watchdog on POSIX hosts with no `ps` binary) (#159). All three keep failing open (no behaviour change) -- only the missing signal was added.
+
 ## [0.7.0] - 2026-09-30
 
 ### Added
@@ -489,7 +508,8 @@ MCP `output` field now contains `file_diffs[].applied_rectors` + `diff` so consu
 - PHPUnit unit + integration tests covering boot, tool listing, warm reuse (`warm_boot: true` on second call).
 - Standalone CLI: `--working-dir`, `--config` flags pinned at server start.
 
-[Unreleased]: https://github.com/Digital-Process-Tools/mcp-rector-warm/compare/v0.7.0...HEAD
+[Unreleased]: https://github.com/Digital-Process-Tools/mcp-rector-warm/compare/v0.7.1...HEAD
+[0.7.1]: https://github.com/Digital-Process-Tools/mcp-rector-warm/releases/tag/v0.7.1
 [0.7.0]: https://github.com/Digital-Process-Tools/mcp-rector-warm/releases/tag/v0.7.0
 [0.6.0]: https://github.com/Digital-Process-Tools/mcp-rector-warm/releases/tag/v0.6.0
 [0.5.0]: https://github.com/Digital-Process-Tools/mcp-rector-warm/releases/tag/v0.5.0
