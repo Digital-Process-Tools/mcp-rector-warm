@@ -106,8 +106,7 @@
       "resolve": "bash .claude/scripts/validators/resolve_test.sh {file}",
       "cache": false,
       "mcp_autospawn": true,
-      "timeout": 60,
-      "fingerprint_paths": ["phpunit.xml"]
+      "timeout": 90
     },
     "py-compile": {
       "cmd": "{python} {supertool_dir}/validators/py-compile/py-compile.py {file}",

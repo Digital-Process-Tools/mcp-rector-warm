@@ -12,9 +12,13 @@
 #         only the advice rule reads stderr)
 #
 # Mapping is a plain, exact filename match -- never a glob:
-#   src/X.php          -> tests/Unit/XTest.php
-#   src/Sub/X.php       -> tests/Unit/Sub/XTest.php
+#   src/X.php          -> tests/Unit/XTest.php, else tests/Integration/XTest.php
+#   src/Sub/X.php       -> tests/Unit/Sub/XTest.php, else tests/Integration/Sub/XTest.php
 #   tests/**/*Test.php  -> itself (editing a test runs that test)
+#
+# phpunit.xml declares both an "unit" and an "integration" testsuite; a
+# class exercised only by an integration test (no tests/Unit sibling) would
+# otherwise look test-less to both the validator and the newTest advice.
 #
 # Why exact-name only, never `<Name>*Test.php`: several src files here have
 # more than one *Test.php exercising them. src/RectorRunner.php alone has
@@ -54,15 +58,27 @@ case "$file" in
     dir="$(dirname "$rel")"
     base="$(basename "$rel" .php)"
     if [ "$dir" = "." ]; then
-      target="tests/Unit/${base}Test.php"
+      unit_target="tests/Unit/${base}Test.php"
+      integration_target="tests/Integration/${base}Test.php"
     else
-      target="tests/Unit/${dir}/${base}Test.php"
+      unit_target="tests/Unit/${dir}/${base}Test.php"
+      integration_target="tests/Integration/${dir}/${base}Test.php"
     fi
-    if [ -f "$target" ]; then
-      printf '%s' "$target"
+    # phpunit.xml declares both an "unit" (tests/Unit) and an "integration"
+    # (tests/Integration) testsuite -- prefer the unit test when both exist
+    # (it is almost always the faster, more targeted one), but fall back to
+    # the integration test so a class exercised only there (e.g. the
+    # ServerStdioTest.php shape) is not silently skipped nor flagged by the
+    # newTest advice as test-less when it genuinely has one.
+    if [ -f "$unit_target" ]; then
+      printf '%s' "$unit_target"
       exit 0
     fi
-    >&2 printf '%s' "$target"
+    if [ -f "$integration_target" ]; then
+      printf '%s' "$integration_target"
+      exit 0
+    fi
+    >&2 printf '%s' "$unit_target"
     exit 3
     ;;
 esac

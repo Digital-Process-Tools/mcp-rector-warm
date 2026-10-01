@@ -63,32 +63,51 @@ so the interactive `phpstan-mcp` validator can show findings the CI
 `static-analysis` job (which runs cold) does not. Trust CI, not the live
 validator count, for whether phpstan is actually green.
 
-A `phpunit` validator (#231) runs the matching test on every `src/**/*.php`
-edit, the same `tier: slow`/warm-daemon shape as `phpstan`/`rector`: it
-requires-dev `dpt/mcp-phpunit-warm`, spawns `mcp.phpunit-warm` on first use
-(`cache: false` -- a warm PHPUnit process keeps bootstrap state across calls,
-so its result is never cached as if it were a fresh run), and reports
-failures without rolling anything back, same as the other slow validators.
-It never runs the whole suite: `.claude/scripts/validators/resolve_test.sh`
-maps the edited file to the one test file PHPUnit should run (`src/X.php` ->
-`tests/Unit/XTest.php`, `src/Sub/X.php` -> `tests/Unit/Sub/XTest.php`,
-editing a test runs that test), or to nothing at all when no such file
-exists -- in which case the validator is silently skipped, not failed, and
-(for a brand-new `src/**/*.php` file with no sibling test yet) the `advice`
-block's `newTest` rule prints a one-line, non-blocking
-`[advice] new class without test` reminder instead.
+A `phpunit` validator (#231) runs on every `*.php` edit -- like `phpstan`/
+`rector`, its own `match` is not restricted to `src/`, so editing a test file
+goes through it too (that is what lets "editing a test runs that test" work,
+below). It requires-dev `dpt/mcp-phpunit-warm`, spawns `mcp.phpunit-warm` on
+first use (`cache: false` -- a warm PHPUnit process keeps bootstrap state
+across calls, so its result is never cached as if it were a fresh run), and
+reports failures without rolling anything back, same as the other slow
+validators. It never runs the whole suite:
+`.claude/scripts/validators/resolve_test.sh` maps the edited file to the one
+test file PHPUnit should run -- `src/X.php` -> `tests/Unit/XTest.php` (or,
+when no `tests/Unit` match exists, `tests/Integration/XTest.php`, since
+`phpunit.xml` declares both testsuites and a class exercised only by an
+integration test should not look test-less), `src/Sub/X.php` ->
+`tests/Unit/Sub/XTest.php` the same way, editing a test runs that test -- or
+to nothing at all when no such file exists, in which case the validator is
+silently skipped, not failed, and (for a brand-new `src/*.php` file with no
+sibling test yet -- this narrower `match` is what scopes the advice to
+source files only) the `advice` block's `newTest` rule prints a one-line,
+non-blocking `[advice] new class without test` reminder instead.
 
 The mapping is an **exact filename match only, deliberately never a glob**.
 Several classes here have more than one `*Test.php` file -- `RectorRunner.php`
 has six, most of them the slow fork/kill-deadline suites -- and running all
-of them on every edit measured at ~87s (JUnit log, 2026-10-01), well past the
-validator's own 60s timeout, chosen from the slowest *single* exact-name
-match in the repo (`RectorRunnerTest.php`, ~32s for 34 tests on the same
-run). The resolver picks only the exact `<Name>Test.php`, leaving the
-rest of a multi-test class to the normal `./vendor/bin/phpunit` run in CI;
-see the comment at the top of `resolve_test.sh` for the concrete numbers and
-the `RectorTool.php` case (no exact-name test file at all, so it resolves to
+of them on every edit measured at ~87s (JUnit log, 2026-10-01), well past any
+reasonable per-edit budget. The resolver picks only the exact `<Name>Test.php`
+(falling back to `tests/Integration` as above), leaving the rest of a
+multi-test class to the normal `./vendor/bin/phpunit` run in CI; see the
+comment at the top of `resolve_test.sh` for the concrete numbers and the
+`RectorTool.php` case (no exact-name test file at all, so it resolves to
 "skip" rather than guessing among its four `RectorTool*Test.php` siblings).
+
+The validator's own `timeout` (90s) budgets for a **cold** `mcp-phpunit-warm`
+spawn plus the run, the same headroom rule [docs/mcp.md](https://github.com/Digital-Process-Tools/claude-supertool/blob/main/docs/mcp.md)
+documents for `rector`: the adapter's own hardcoded spawn budget (30s, not
+configurable from here) plus the slowest single exact-name match measured in
+this repo's own JUnit log (`RectorRunnerTest.php`, ~32s for 34 tests) needs
+room to both happen on the very first call, not just in sequence once warm.
+
+`resolve_test.sh` is a bash script, invoked as `bash
+.claude/scripts/validators/resolve_test.sh {file}` -- on Windows this needs a
+`bash` on `PATH` (git-bash or WSL), unlike every sibling validator here,
+which runs through `{python}`. This is an opt-in, Claude-Code-agent-only
+path (no CI job exercises supertool's edit hooks on any OS), so it does not
+block a contribution on a machine without `bash`, but the validator and the
+advice reminder simply will not fire there.
 
 ## What we'll merge
 
