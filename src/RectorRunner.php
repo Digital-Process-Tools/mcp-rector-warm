@@ -870,10 +870,14 @@ class RectorRunner implements RunnerInterface
             // Instead: every byte PHP's output layer would write to fd 1 goes into a
             // buffer that discards it (execute()'s own ob_start() nests inside it,
             // and a fatal's flush at shutdown lands here too), and PHP's own error
-            // messages bound for fd 2 are switched off, as /dev/null had them. Not
-            // covered any more: code that writes to STDOUT/STDERR or php://stdout
-            // directly -- the same channel Rector's SymfonyStyle already had, since
-            // it opens php://stdout in the worker, before this fork.
+            // messages bound for fd 2 are switched off, as /dev/null had them. A
+            // direct write (fwrite(STDOUT, ...), php://stdout, Rector's own
+            // SymfonyStyle) still bypasses all of that -- but as of #194, fd 1
+            // ITSELF is the null device by the time this grandchild is forked
+            // (ProtocolStdoutIsolator re-execs the whole daemon before it ever
+            // forks anything), so a direct write lands there too, harmless. Kept
+            // unredirected relative to the ISOLATED daemon's own fd 1/2, same
+            // reasoning as above: this method's job is only the output-layer half.
             \fclose($parentSocket);
             self::silenceChildOutput();
 
@@ -1004,10 +1008,15 @@ class RectorRunner implements RunnerInterface
      * a closed stream there throws "Invalid value". Every byte PHP's output
      * layer would write goes into a buffer that discards it (execute()'s own
      * ob_start() nests inside it, and a fatal's flush at shutdown lands here
-     * too), and PHP's own error messages bound for fd 2 are switched off. Not
-     * covered: code writing to STDOUT/STDERR or php://stdout directly. Used by
-     * forkAndExecute()'s grandchild (as #193 introduced it) and by the #185
-     * session child; a grandchild forked from the session applies it again.
+     * too), and PHP's own error messages bound for fd 2 are switched off. A
+     * direct write to STDOUT/STDERR/php://stdout still bypasses all of that at
+     * THIS method's own level -- but as of #194, ProtocolStdoutIsolator points
+     * the daemon's own fd 1 at the null device before it ever forks anything,
+     * so by the time a grandchild inherits fd 1 here, a direct write already
+     * lands on the null device too; this method no longer carries that gap
+     * alone. Used by forkAndExecute()'s grandchild (as #193 introduced it) and
+     * by the #185 session child; a grandchild forked from the session applies
+     * it again.
      *
      * @param int $chunkSize 0 for the grandchild, which exits after one call; a
      *   size for the long-lived session child, so it discards stray output as it

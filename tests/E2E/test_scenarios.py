@@ -329,6 +329,7 @@ async def call_step(
     where: str,
     expect_reboot: bool = False,
     session_on: bool = False,
+    php_ini: dict[str, Any] | None = None,
 ) -> None:
     """One rector_process call, checked against the cold oracle and the step's 'expect'."""
     rel = step["call"]
@@ -409,7 +410,17 @@ async def call_step(
         # docblock for why this layer exists and why it is kept alive rather
         # than collapsed back into the original pid, which PHP's lack of
         # dup2() makes impossible).
-        isolation_active = not NO_PCNTL_PLATFORM
+        # A scenario can also disable pcntl for ITS OWN server via its own
+        # php_ini fixture (same mechanism warm-stdout-direct-write-no-pcntl.yaml
+        # uses) -- NO_PCNTL_PLATFORM alone cannot see that per-scenario
+        # override, so isolation_active has to check both, or this threshold
+        # silently stays one too loose for exactly that combination.
+        disabled_here = any(
+            "pcntl_fork" in str(value).split(",")
+            for key, value in (php_ini or {}).items()
+            if key == "disable_functions"
+        )
+        isolation_active = not NO_PCNTL_PLATFORM and not disabled_here
         max_live = (2 if session_on else 1) + (1 if isolation_active else 0)
         assert_no_zombie_descendants(server.record_dir, max_live=max_live)
 
@@ -461,6 +472,7 @@ def test_scenario(scenario_file: Path, data: dict[str, Any], tmp_path: Path) -> 
                         server, step, cold_tree, tree.root, in_tree_calls == 0, where,
                         expect_reboot=config_touched_since_last_call,
                         session_on=session_on,
+                        php_ini=data.get("php_ini"),
                     )
                     config_touched_since_last_call = False
                     calls_made += 1

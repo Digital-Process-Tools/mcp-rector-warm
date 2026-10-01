@@ -152,6 +152,14 @@ final class ProtocolStdoutIsolator
         $pipes = [];
         $process = @\proc_open($command, $descriptorspec, $pipes, null, $env);
         if (!\is_resource($process)) {
+            // fd 2 (STDERR) is handed through to this process unmodified at
+            // this point -- an operator watching the daemon's real stderr
+            // must be able to tell "isolation never engaged" apart from
+            // "isolation tried and silently fell back", or a mysteriously
+            // silent daemon has nothing to go on.
+            @\fwrite(\STDERR, "mcp-rector-warm: #194 fd isolation could not start "
+                . "(proc_open() failed); continuing unisolated\n");
+
             return false;
         }
 
@@ -174,16 +182,29 @@ final class ProtocolStdoutIsolator
         while (true) {
             \pcntl_signal_dispatch();
             $waited = \pcntl_waitpid($childPid, $exitStatus, \WNOHANG);
-            if ($waited === $childPid || $waited === -1) {
+            if ($waited === $childPid) {
+                break;
+            }
+            if ($waited === -1) {
+                // waitpid() itself failed (e.g. ECHILD) -- $exitStatus was
+                // never filled in. Fall through to proc_close()'s own wait
+                // below rather than treating this the same as a clean exit:
+                // its return IS the real termination status PHP's own
+                // proc_open bookkeeping observed, independent of our own
+                // polling loop having missed it.
                 break;
             }
             \usleep(20_000);
         }
-        \proc_close($process);
+        $procCloseStatus = \proc_close($process);
 
-        $exitCode = (\is_int($exitStatus) && \pcntl_wifexited($exitStatus))
-            ? \pcntl_wexitstatus($exitStatus)
-            : 1;
+        if (\is_int($exitStatus) && \pcntl_wifexited($exitStatus)) {
+            $exitCode = \pcntl_wexitstatus($exitStatus);
+        } elseif ($procCloseStatus >= 0) {
+            $exitCode = $procCloseStatus;
+        } else {
+            $exitCode = 1;
+        }
         exit($exitCode);
     }
 
@@ -202,7 +223,12 @@ final class ProtocolStdoutIsolator
             // but if something stripped it, STDOUT is now the null device we
             // redirected it to -- the daemon goes silent rather than corrupt
             // or crash, and whatever supervises it sees a dead protocol and
-            // restarts it, same as any other wedged daemon.
+            // restarts it, same as any other wedged daemon. Logged to the
+            // real STDERR (handed through to this process unmodified) so an
+            // operator can tell this apart from isolation never having run.
+            @\fwrite(\STDERR, "mcp-rector-warm: #194 fd isolation's own fd 3 "
+                . "is gone; the protocol stream is now silent (fd 1 is the "
+                . "null device)\n");
         }
 
         return \STDOUT;
