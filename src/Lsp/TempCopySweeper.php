@@ -243,7 +243,7 @@ final class TempCopySweeper
         }
 
         $lockPath = $path . DIRECTORY_SEPARATOR . self::LOCK_FILE_NAME;
-        if (self::isLinkOrJunction($lockPath) || !is_file($lockPath)) {
+        if (self::isLinkOrJunction($lockPath) || !self::isRegularFile($lockPath)) {
             return false;
         }
 
@@ -268,13 +268,35 @@ final class TempCopySweeper
         // but nothing prevents a symlink swap between that check and this
         // unlink() if $path (or #225: $lockPath itself) is ever reachable
         // by another writer.
-        if (self::isLinkOrJunction($path) || self::isLinkOrJunction($lockPath) || !is_file($lockPath)) {
+        if (self::isLinkOrJunction($path) || self::isLinkOrJunction($lockPath) || !self::isRegularFile($lockPath)) {
             return false;
         }
 
         @unlink($lockPath);
 
         return @rmdir($path);
+    }
+
+    /**
+     * #225 self-review (PHPStan): a bare is_file($lockPath) here reads,
+     * to PHPStan's static analysis, as the identical call already made a
+     * few lines above (and again at the top of this method) -- with
+     * nothing in between marked as able to change the filesystem, it
+     * narrows the second call's result to the first's and flags the
+     * re-check as `booleanNot.alwaysFalse`. The re-check is deliberate
+     * (see the comment above its call site): the lock can go from free to
+     * a symlink between the two checks, so is_file()'s return value is
+     * NOT invariant across calls the way PHPStan assumes for a native
+     * function with no side effects. Wrapping it in a function PHPStan
+     * cannot prove pure -- `@phpstan-impure`, same as isLinkOrJunction()
+     * just below -- tells it so, instead of silencing the warning with an
+     * inline ignore comment over code that is correct and needs to stay.
+     *
+     * @phpstan-impure
+     */
+    private static function isRegularFile(string $path): bool
+    {
+        return is_file($path);
     }
 
     /**
