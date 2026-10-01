@@ -533,7 +533,9 @@ final class TempCopySweeperTest extends TestCase
         $externalTarget = sys_get_temp_dir() . '/mcp-rector-sweep-lock-target-' . bin2hex(random_bytes(4));
 
         self::assertFileDoesNotExist($externalTarget, 'the external target must not exist before the call');
-        self::assertTrue(symlink($externalTarget, $lockPath), 'could not create the test symlink');
+        if (!@symlink($externalTarget, $lockPath)) {
+            self::markTestSkipped('could not create a symlink on this platform (needs elevated/Developer-Mode privilege on Windows).');
+        }
 
         try {
             self::assertFalse(TempCopySweeper::reclaimStaleOwnLock($dir));
