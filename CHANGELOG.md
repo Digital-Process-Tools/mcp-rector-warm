@@ -6,6 +6,46 @@ This project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-10-01
+
+### Added
+
+- Added `friendsofphp/php-cs-fixer` (@PER-CS2.0) as a dev dependency, with a repo config, a one-time reformat, a `cs.yml` CI gate and a supertool `formatters.php-cs-fixer` entry so every PHP edit through the agent tooling is reformatted automatically. #230
+
+- A `phpunit` warm validator (`dpt/mcp-phpunit-warm`) now runs the one test file matching an edited `src/**/*.php` file on every edit, resolved by `.claude/scripts/validators/resolve_test.sh`, and the new `advice.newTest` rule reminds with a non-blocking `[advice] new class without test` when a brand-new `src/*.php` file is created with no matching test yet (#231).
+
+### Changed
+
+- CI's `coverage` job now counts code that only runs in a `pcntl_fork()`
+  child (`SessionHooks.php`, `TrackingParser.php`) or a `proc_open()`
+  subprocess (every `bin/*` script) -- previously invisible to pcov even
+  though the integration and E2E suites exercise it (#218). Each such
+  process writes its own coverage via a test-only `auto_prepend_file`, and
+  `phpcov merge` folds them into the report Codecov receives; the job
+  summary shows the percentage before and after the merge. The `coverage`
+  job also gained a macOS leg, and a separate, simpler `coverage-windows`
+  job enables pcov there too, so platform-only branches (`ProcessTree`,
+  `TempCopySweeper`'s junction handling) are reported instead of silently
+  uncovered. No behaviour change outside CI: the mechanism is a no-op
+  unless the coverage job's own env var is set.
+
+- The README and `docs/mcp.md` now lead with "With Claude Code (recommended)": install [claude-supertool](https://github.com/Digital-Process-Tools/claude-supertool), add a minimal `.supertool.json`, and its `rector-mcp` validator runs this server after every edit automatically, instead of relying on the agent to remember to call `rector_process` itself. The other MCP clients' setup moved under "Any other MCP client" (#222).
+
+### Fixed
+
+- Fixed: an unsaved LSP buffer that adds a method and calls it from another edited method in the same buffer (`a()` changed to `return $this->b();`, with `b(): int` also new in the buffer) was typed from the saved file on disk, not the buffer -- diagnostics and `fixAll` could diverge from a cold `rector process --dry-run` on the buffer's actual content. Reproduced with the warm session off and pcntl disabled too, so the fix applies on every path, not only the warm one (#190).
+
+- A Rector rule, or an autoloaded project file, that wrote straight to
+  `STDOUT`/`STDERR`/`php://stdout` during analysis (`fwrite(STDOUT, ...)`,
+  `echo`, `print`, a displayed warning) used to corrupt the MCP/LSP protocol
+  stream: the forked analysing child inherits the daemon's real stdio, and a
+  direct write bypasses the output buffering that already catches PHP's own
+  notices/warnings. The daemon's protocol stdout is now isolated at the
+  process level (a one-time re-exec with the real stream handed to the
+  isolated child as fd 3, fd 1 pointed at the null device) before it ever
+  forks an analysing child, so a stray direct write lands on the null device
+  instead of the client's stream, for both MCP and LSP (#194).
+
 ## [0.9.0] - 2026-10-01
 
 ### Added
@@ -584,7 +624,8 @@ MCP `output` field now contains `file_diffs[].applied_rectors` + `diff` so consu
 - PHPUnit unit + integration tests covering boot, tool listing, warm reuse (`warm_boot: true` on second call).
 - Standalone CLI: `--working-dir`, `--config` flags pinned at server start.
 
-[Unreleased]: https://github.com/Digital-Process-Tools/mcp-rector-warm/compare/v0.9.0...HEAD
+[Unreleased]: https://github.com/Digital-Process-Tools/mcp-rector-warm/compare/v0.10.0...HEAD
+[0.10.0]: https://github.com/Digital-Process-Tools/mcp-rector-warm/releases/tag/v0.10.0
 [0.9.0]: https://github.com/Digital-Process-Tools/mcp-rector-warm/releases/tag/v0.9.0
 [0.8.0]: https://github.com/Digital-Process-Tools/mcp-rector-warm/releases/tag/v0.8.0
 [0.7.2]: https://github.com/Digital-Process-Tools/mcp-rector-warm/releases/tag/v0.7.2
