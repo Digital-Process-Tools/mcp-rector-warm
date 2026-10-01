@@ -56,6 +56,16 @@
       "env": {
         "MCP_PHPSTAN_CONFIG": "phpstan.neon"
       }
+    },
+    "phpunit-warm": {
+      "cmd": [
+        "vendor/bin/mcp-phpunit-warm",
+        "--config=phpunit.xml"
+      ],
+      "match": "*.php",
+      "timeout": 120,
+      "idle_timeout": 1800,
+      "stopOnNewFile": true
     }
   },
   "validators": {
@@ -87,6 +97,17 @@
       "engine_glitches": ["System error:", "toMutatingScope() on null"],
       "fingerprint_paths": ["rector.php"]
     },
+    "phpunit": {
+      "cmd": "MCP_PHPUNIT_BIN=vendor/bin/mcp-phpunit-warm {python} {supertool_dir}/validators/phpunit-mcp/phpunit-mcp.py {file}",
+      "match": "*.php",
+      "exclude": "tests/Fixtures/*",
+      "hooks_into": ["edit", "replace", "replace_lines", "paste", "vim"],
+      "tier": "slow",
+      "resolve": "bash .claude/scripts/validators/resolve_test.sh {file}",
+      "cache": false,
+      "mcp_autospawn": true,
+      "timeout": 90
+    },
     "py-compile": {
       "cmd": "{python} {supertool_dir}/validators/py-compile/py-compile.py {file}",
       "match": "*.py",
@@ -114,6 +135,15 @@
       "hooks_into": ["edit", "replace", "replace_lines", "paste", "vim"],
       "rollback_on_fail": true,
       "timeout": 10
+    }
+  },
+  "advice": {
+    "newTest": {
+      "hooks_into": ["paste"],
+      "match": "src/*.php",
+      "when": "new-file",
+      "resolveFromValidator": "phpunit",
+      "message": "new class without test"
     }
   }
 }
