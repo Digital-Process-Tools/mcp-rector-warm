@@ -271,7 +271,7 @@ final class SessionHooks implements SymbolResolver
     public function fileExtensions(): array
     {
         $extensions = [...$this->arrayParameter('fileExtensions'), ...self::rectorArrayParameter(Option::FILE_EXTENSIONS)];
-        $extensions = \array_map(static fn (mixed $extension): string => \strtolower(\ltrim((string) $extension, '.')), $extensions);
+        $extensions = \array_map(static fn(mixed $extension): string => \strtolower(\ltrim((string) $extension, '.')), $extensions);
 
         return \array_values(\array_unique(['php', ...$extensions]));
     }

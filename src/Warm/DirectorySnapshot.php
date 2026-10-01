@@ -86,7 +86,7 @@ final class DirectorySnapshot
         $this->roots = self::normalise($roots);
         $this->excluded = self::normalise($excluded);
         $this->suffixes = \array_values(\array_unique(\array_map(
-            static fn (string $extension): string => '.' . \strtolower(\ltrim($extension, '.')),
+            static fn(string $extension): string => '.' . \strtolower(\ltrim($extension, '.')),
             $extensions,
         )));
     }

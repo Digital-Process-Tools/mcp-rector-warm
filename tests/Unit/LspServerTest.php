@@ -29,9 +29,7 @@ final class LspServerTest extends TestCase
     private static function fakeSource(array $fixes): DiagnosticsSource
     {
         return new class ($fixes) implements DiagnosticsSource {
-            public function __construct(private readonly array $fixes)
-            {
-            }
+            public function __construct(private readonly array $fixes) {}
 
             public function diagnose(string $absolutePath): array
             {
@@ -60,9 +58,7 @@ final class LspServerTest extends TestCase
     private static function fakeWorkspaceSource(array $files, array $errors = []): DiagnosticsSource
     {
         return new class ($files, $errors) implements DiagnosticsSource, WorkspaceDiagnosticsSource {
-            public function __construct(private readonly array $files, private readonly array $errors)
-            {
-            }
+            public function __construct(private readonly array $files, private readonly array $errors) {}
 
             public function diagnose(string $absolutePath): array
             {
@@ -89,9 +85,7 @@ final class LspServerTest extends TestCase
     private static function fakeWorkspaceAndBufferSource(array $files): DiagnosticsSource
     {
         return new class ($files) implements DiagnosticsSource, WorkspaceDiagnosticsSource, BufferDiagnosticsSource {
-            public function __construct(private readonly array $files)
-            {
-            }
+            public function __construct(private readonly array $files) {}
 
             public function diagnose(string $absolutePath): array
             {
@@ -621,7 +615,7 @@ final class LspServerTest extends TestCase
         ]);
 
         self::assertCount(2, $responses);
-        $uris = array_map(static fn (array $r): string => $r['params']['uri'], $responses);
+        $uris = array_map(static fn(array $r): string => $r['params']['uri'], $responses);
         sort($uris);
         self::assertSame(['file:///tmp/A.php', 'file:///tmp/B.php'], $uris);
         foreach ($responses as $notification) {
@@ -874,7 +868,7 @@ final class LspServerTest extends TestCase
 
         self::assertSame(['/tmp/C.php', '/tmp/B.php', '/tmp/A.php'], $source->order);
         self::assertCount(3, $responses);
-        $uris = array_map(static fn (array $r): string => $r['params']['uri'], $responses);
+        $uris = array_map(static fn(array $r): string => $r['params']['uri'], $responses);
         self::assertSame(['file:///tmp/C.php', 'file:///tmp/B.php', 'file:///tmp/A.php'], $uris);
     }
 
@@ -1087,9 +1081,7 @@ final class LspServerTest extends TestCase
         $stale = [self::fix(3, 12, "stale\n", 'SimplifyIfReturnBoolRector')];
         $fresh = [self::fix(3, 12, "fresh\n", 'SimplifyIfReturnBoolRector')];
         $source = new class ($stale, $fresh) implements DiagnosticsSource, EditDiagnosticsSource {
-            public function __construct(private readonly array $stale, private readonly array $fresh)
-            {
-            }
+            public function __construct(private readonly array $stale, private readonly array $fresh) {}
 
             public function diagnose(string $absolutePath): array
             {
@@ -1268,9 +1260,7 @@ final class LspServerTest extends TestCase
         $racy = new class ($holder) implements DiagnosticsSource {
             private bool $raced = false;
 
-            public function __construct(private readonly object $holder)
-            {
-            }
+            public function __construct(private readonly object $holder) {}
 
             public function diagnose(string $absolutePath): array
             {
@@ -1318,7 +1308,7 @@ final class LspServerTest extends TestCase
             'params' => ['textDocument' => ['uri' => 'file:///tmp/Sample.php', 'version' => 1]],
         ]);
 
-        $methods = array_map(static fn (array $frame): ?string => $frame['method'] ?? null, $responses);
+        $methods = array_map(static fn(array $frame): ?string => $frame['method'] ?? null, $responses);
 
         self::assertSame(
             ['window/workDoneProgress/create', '$/progress', '$/progress', 'textDocument/publishDiagnostics'],
@@ -1505,15 +1495,13 @@ final class LspServerTest extends TestCase
      */
     public function testProgressCreateAndBeginAreWrittenToTheTransportBeforeDiagnoseRuns(): void
     {
-        $log = new class () {
+        $log = new class {
             /** @var list<string> */
             public array $entries = [];
         };
 
         $diagnostics = new class ($log) implements DiagnosticsSource {
-            public function __construct(private readonly object $log)
-            {
-            }
+            public function __construct(private readonly object $log) {}
 
             public function diagnose(string $absolutePath): array
             {
@@ -1561,7 +1549,7 @@ final class LspServerTest extends TestCase
         $server = new LspServer(
             '1.0.0',
             self::fakeSource([]),
-            tryReadAhead: static fn (): array => [
+            tryReadAhead: static fn(): array => [
                 'jsonrpc' => '2.0',
                 'id' => 'rector-warm-lsp/progress-create',
                 'error' => ['code' => -32800, 'message' => 'client declined this progress token'],
@@ -1581,7 +1569,7 @@ final class LspServerTest extends TestCase
             'params' => ['textDocument' => ['uri' => 'file:///tmp/Sample.php', 'version' => 1]],
         ]);
 
-        $methods = array_map(static fn (array $frame): ?string => $frame['method'] ?? null, $responses);
+        $methods = array_map(static fn(array $frame): ?string => $frame['method'] ?? null, $responses);
 
         self::assertSame(
             ['window/workDoneProgress/create', 'textDocument/publishDiagnostics'],
@@ -1613,7 +1601,7 @@ final class LspServerTest extends TestCase
             'params' => ['textDocument' => ['uri' => 'file:///tmp/Sample.php', 'version' => 1]],
         ]);
 
-        $methods = array_map(static fn (array $frame): ?string => $frame['method'] ?? null, $responses);
+        $methods = array_map(static fn(array $frame): ?string => $frame['method'] ?? null, $responses);
 
         self::assertSame(
             ['window/workDoneProgress/create', '$/progress', '$/progress', 'textDocument/publishDiagnostics'],
@@ -1636,7 +1624,7 @@ final class LspServerTest extends TestCase
         $server = new LspServer(
             '1.0.0',
             self::fakeSource([]),
-            tryReadAhead: static fn (float $timeoutSeconds): ?array => null,
+            tryReadAhead: static fn(float $timeoutSeconds): ?array => null,
         );
 
         $server->handle([
@@ -1652,7 +1640,7 @@ final class LspServerTest extends TestCase
             'params' => ['textDocument' => ['uri' => 'file:///tmp/Sample.php', 'version' => 1]],
         ]);
 
-        $methods = array_map(static fn (array $frame): ?string => $frame['method'] ?? null, $responses);
+        $methods = array_map(static fn(array $frame): ?string => $frame['method'] ?? null, $responses);
 
         self::assertSame(
             ['window/workDoneProgress/create', 'textDocument/publishDiagnostics'],
@@ -1680,7 +1668,7 @@ final class LspServerTest extends TestCase
     {
         $pushedBack = [];
         $unrelated = ['jsonrpc' => '2.0', 'method' => 'textDocument/didSave', 'params' => ['textDocument' => ['uri' => 'file:///tmp/Other.php']]];
-        $calls = new class () {
+        $calls = new class {
             public int $count = 0;
         };
 
@@ -1710,7 +1698,7 @@ final class LspServerTest extends TestCase
             'params' => ['textDocument' => ['uri' => 'file:///tmp/Sample.php', 'version' => 1]],
         ]);
 
-        $methods = array_map(static fn (array $frame): ?string => $frame['method'] ?? null, $responses);
+        $methods = array_map(static fn(array $frame): ?string => $frame['method'] ?? null, $responses);
 
         self::assertSame(
             ['window/workDoneProgress/create', 'textDocument/publishDiagnostics'],
@@ -1735,7 +1723,7 @@ final class LspServerTest extends TestCase
         $pushedBack = [];
         $unrelated = ['jsonrpc' => '2.0', 'method' => 'textDocument/didSave', 'params' => ['textDocument' => ['uri' => 'file:///tmp/Other.php']]];
         $realReply = ['jsonrpc' => '2.0', 'id' => 'rector-warm-lsp/progress-create', 'result' => null];
-        $calls = new class () {
+        $calls = new class {
             public int $count = 0;
         };
 
@@ -1765,7 +1753,7 @@ final class LspServerTest extends TestCase
             'params' => ['textDocument' => ['uri' => 'file:///tmp/Sample.php', 'version' => 1]],
         ]);
 
-        $methods = array_map(static fn (array $frame): ?string => $frame['method'] ?? null, $responses);
+        $methods = array_map(static fn(array $frame): ?string => $frame['method'] ?? null, $responses);
 
         self::assertSame(
             ['window/workDoneProgress/create', '$/progress', '$/progress', 'textDocument/publishDiagnostics'],
@@ -1834,7 +1822,7 @@ final class LspServerTest extends TestCase
             'params' => ['textDocument' => ['uri' => 'file:///tmp/Sample.php', 'version' => 1]],
         ]);
 
-        $methods = array_map(static fn (array $frame): ?string => $frame['method'] ?? null, $responses);
+        $methods = array_map(static fn(array $frame): ?string => $frame['method'] ?? null, $responses);
 
         self::assertSame(
             ['window/workDoneProgress/create', 'textDocument/publishDiagnostics'],
@@ -1883,7 +1871,7 @@ final class LspServerTest extends TestCase
             'params' => ['textDocument' => ['uri' => 'file:///tmp/Sample.php', 'version' => 1]],
         ]);
 
-        $methods = array_map(static fn (array $frame): ?string => $frame['method'] ?? null, $responses);
+        $methods = array_map(static fn(array $frame): ?string => $frame['method'] ?? null, $responses);
 
         self::assertSame(
             ['window/workDoneProgress/create', '$/progress', '$/progress', 'textDocument/publishDiagnostics'],
@@ -2060,7 +2048,7 @@ final class LspServerTest extends TestCase
             'params' => ['command' => 'rector-warm.fixWorkspace'],
         ]);
 
-        $methods = array_map(static fn (array $frame): ?string => $frame['method'] ?? null, $responses);
+        $methods = array_map(static fn(array $frame): ?string => $frame['method'] ?? null, $responses);
         self::assertNotContains('workspace/applyEdit', $methods);
         self::assertSame(9, $responses[array_key_last($responses)]['id']);
         self::assertArrayNotHasKey('error', $responses[array_key_last($responses)]);
@@ -2168,7 +2156,7 @@ final class LspServerTest extends TestCase
             'params' => ['command' => 'rector-warm.fixWorkspace'],
         ]);
 
-        $methods = array_map(static fn (array $frame): ?string => $frame['method'] ?? null, $responses);
+        $methods = array_map(static fn(array $frame): ?string => $frame['method'] ?? null, $responses);
         self::assertNotContains('window/showMessage', $methods);
     }
 
@@ -2227,7 +2215,7 @@ final class LspServerTest extends TestCase
             'params' => ['command' => 'rector-warm.fixWorkspace'],
         ]);
 
-        $methods = array_map(static fn (array $frame): ?string => $frame['method'] ?? null, $responses);
+        $methods = array_map(static fn(array $frame): ?string => $frame['method'] ?? null, $responses);
         self::assertNotContains('$/progress', $methods);
         self::assertNotContains('window/workDoneProgress/create', $methods);
     }

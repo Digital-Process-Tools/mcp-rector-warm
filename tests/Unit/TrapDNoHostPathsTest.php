@@ -52,7 +52,7 @@ final class TrapDNoHostPathsTest extends TestCase
             [],
             $offenders,
             "trap.d/ fragments must not embed an absolute host home-directory path -- "
-                . "found: " . implode(', ', $offenders)
+                . "found: " . implode(', ', $offenders),
         );
     }
 

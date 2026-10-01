@@ -24,13 +24,13 @@ final class RectorRunnerSkipAsTest extends TestCase
             self::markTestSkipped('needs pcntl_fork, as the forked grandchild does');
         }
 
-        $runner = $this->runnerWith($this->skipper(pathSkipped: true), new class () {
+        $runner = $this->runnerWith($this->skipper(pathSkipped: true), new class {
             // the renamed-by-a-future-Rector shape: no `skippedPaths`
             public function resolve(): array
             {
                 return [];
             }
-        }, new class () {
+        }, new class {
             public function resolve(): array
             {
                 return [];
@@ -60,7 +60,7 @@ final class RectorRunnerSkipAsTest extends TestCase
         // Skipper::matchSkip() only exists from Rector 2.5.2; composer.json
         // allows ^2.4, whose Skipper has shouldSkipElementAndFilePath() only.
         $classes = $this->classResolver(['App\\SomeRule' => ['/p/src/Foo.php'], 'App\\Other' => ['/p/src/Bar.php']]);
-        $skipper = new class () {
+        $skipper = new class {
             public function shouldSkipFilePath(string $path): bool
             {
                 return false;
@@ -85,7 +85,7 @@ final class RectorRunnerSkipAsTest extends TestCase
         // Rector 2.5.2+ (the locked version): matchSkip() is used, since
         // shouldSkipElementAndFilePath() there also marks the skip as used.
         $classes = $this->classResolver(['App\\SomeRule' => ['/p/src/Foo.php']]);
-        $skipper = new class () {
+        $skipper = new class {
             public bool $marked = false;
 
             public function shouldSkipFilePath(string $path): bool
@@ -115,9 +115,7 @@ final class RectorRunnerSkipAsTest extends TestCase
     private function skipper(bool $pathSkipped): object
     {
         return new class ($pathSkipped) {
-            public function __construct(private readonly bool $pathSkipped)
-            {
-            }
+            public function __construct(private readonly bool $pathSkipped) {}
 
             public function shouldSkipFilePath(string $path): bool
             {
@@ -128,7 +126,7 @@ final class RectorRunnerSkipAsTest extends TestCase
 
     private function pathsResolver(): object
     {
-        return new class () {
+        return new class {
             private array $skippedPaths = [];
 
             public function resolve(): array
@@ -149,9 +147,7 @@ final class RectorRunnerSkipAsTest extends TestCase
             // readonly property here would make PHP throw on that write and
             // this stub would stop matching production shape (caught by
             // ReadOnlyPropertyRector wrongly proposing readonly here).
-            public function __construct(private ?array $skippedClassesToFiles)
-            {
-            }
+            public function __construct(private ?array $skippedClassesToFiles) {}
 
             public function resolve(): array
             {
@@ -168,9 +164,7 @@ final class RectorRunnerSkipAsTest extends TestCase
             \Rector\Skipper\SkipCriteriaResolver\SkippedClassResolver::class => $classResolver,
         ];
         $container = new class ($services) {
-            public function __construct(private array $services)
-            {
-            }
+            public function __construct(private array $services) {}
 
             public function get(string $id): object
             {

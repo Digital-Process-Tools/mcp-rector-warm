@@ -66,6 +66,33 @@ if ($coverageDir === false || $coverageDir === '' || !extension_loaded('pcov')) 
     return;
 }
 
+// #230 regression, root cause: Rector's own parallel-mode worker subprocess
+// (ParallelFileProcessor/WorkerCommandLineFactory, invoked as
+// "<rector bin> worker --port=N ...") runs entirely inside Rector's own
+// bundled, PhpScoper-prefixed vendor tree -- none of mcp-rector-warm's own
+// src/ or bin/ code ever executes there, so this file has nothing to
+// instrument in a worker and never did. Requiring OUR OWN (real, unprefixed,
+// post-#230 react/* among them) vendor/autoload.php below, via
+// auto_prepend_file, BEFORE the worker's own entrypoint gets to require
+// Rector's bundled autoloader, raced with Rector's prefixed
+// react/promise "files"-autoload entry under coverage/pcov's added overhead:
+// reproduced locally (10/10 direct invocations) as the worker fataling with
+// "Call to undefined function RectorPrefix...\React\Promise\resolve()",
+// caught by Rector's own error handling and reported as a clean exit code 1
+// with no output -- never a thrown PHP exception, so RectorRunner::runCold()
+// saw a normal (if wrong) result and never hit its deadline-kill path at
+// all. The kill tests (RectorRunnerProcessTreeKillTest,
+// RectorRunnerTest::testColdCallIsKilledAtItsDeadlineWithoutPcntl) rely on
+// the rule's sleep() actually running to exercise the kill; a worker that
+// never gets that far makes the call finish instead of wedge. Skipping
+// entirely for a worker invocation removes the race at its source instead
+// of only reducing pcov's instrumentation footprint (#230's prior,
+// insufficient attempt: scoping pcov.exclude to vendor/ left this require
+// -- not pcov's instrumentation -- as the actual trigger).
+if (\in_array('worker', $_SERVER['argv'] ?? [], true)) {
+    return;
+}
+
 if (defined('MCP_RECTOR_WARM_COVERAGE_PREPEND_LOADED')) {
     // auto_prepend_file runs once per process; this guards only against this
     // file being require()'d a second time by hand in the same process.

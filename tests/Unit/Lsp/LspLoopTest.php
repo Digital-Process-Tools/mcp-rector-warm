@@ -126,9 +126,7 @@ final class LspLoopTest extends TestCase
              * @param resource $client
              * @param resource $serverEnd
              */
-            public function __construct(private $client, private $serverEnd)
-            {
-            }
+            public function __construct(private $client, private $serverEnd) {}
 
             public function diagnose(string $absolutePath): array
             {
@@ -170,7 +168,7 @@ final class LspLoopTest extends TestCase
         self::assertSame(["<?php\nfixable\n", "<?php\nclean\n"], $source->diagnosed);
         $published = array_values(array_filter(
             self::framesIn($out),
-            static fn (array $f): bool => ($f['method'] ?? null) === 'textDocument/publishDiagnostics',
+            static fn(array $f): bool => ($f['method'] ?? null) === 'textDocument/publishDiagnostics',
         ));
         self::assertCount(1, $published);
         self::assertSame(2, $published[0]['params']['version']);
@@ -185,9 +183,7 @@ final class LspLoopTest extends TestCase
         $out = fopen('php://memory', 'w+');
         $source = new class ($client) implements BufferDiagnosticsSource {
             /** @param resource $client */
-            public function __construct(private $client)
-            {
-            }
+            public function __construct(private $client) {}
 
             public function diagnose(string $absolutePath): array
             {

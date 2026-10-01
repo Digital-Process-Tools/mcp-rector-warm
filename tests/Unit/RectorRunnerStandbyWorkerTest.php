@@ -287,7 +287,7 @@ final class RectorRunnerStandbyWorkerTest extends TestCase
      */
     public function testATimedOutCallStillReportsItWasServedWarm(): void
     {
-        $runner = new class(1) extends RectorRunner {
+        $runner = new class (1) extends RectorRunner {
             protected function canFork(): bool
             {
                 return false;
@@ -1078,7 +1078,7 @@ final class RectorRunnerStandbyWorkerTest extends TestCase
 
     private static function noPcntlRunner(): RectorRunner
     {
-        return new class(120) extends RectorRunner {
+        return new class (120) extends RectorRunner {
             protected function canFork(): bool
             {
                 return false;

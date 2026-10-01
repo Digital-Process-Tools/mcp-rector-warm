@@ -54,9 +54,7 @@ final class RectorToolArgvTest extends TestCase
                 return false;
             }
 
-            public function reboot(): void
-            {
-            }
+            public function reboot(): void {}
 
             public function getCallTimeoutSeconds(): int
             {

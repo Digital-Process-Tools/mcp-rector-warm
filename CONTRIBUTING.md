@@ -22,6 +22,7 @@ Open a GitHub issue with:
    tests/E2E/run.sh
    vendor/bin/phpstan analyse --no-progress --memory-limit=512M
    vendor/bin/rector process --dry-run
+   vendor/bin/php-cs-fixer fix --config=.php-cs-fixer.dist.php --dry-run --diff
    ```
 4. Open the PR with a one-paragraph summary of the change.
 
@@ -108,6 +109,13 @@ which runs through `{python}`. This is an opt-in, Claude-Code-agent-only
 path (no CI job exercises supertool's edit hooks on any OS), so it does not
 block a contribution on a machine without `bash`, but the validator and the
 advice reminder simply will not fire there.
+
+`.supertool.json` also wires `php-cs-fixer` up as a *formatter* (#230), not a
+validator: every PHP edit is reformatted to `@PER-CS2.0` in place
+(`.php-cs-fixer.dist.php`) before the validators above see the result, so the
+diff you review reflects real changes, not style noise. CI's `cs.yml` job
+runs the same config with `--dry-run --diff` and is the merge gate; the
+live formatter is a convenience, not a substitute for it.
 
 ## What we'll merge
 

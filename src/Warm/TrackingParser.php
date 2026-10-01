@@ -28,8 +28,7 @@ final readonly class TrackingParser implements Parser
     public function __construct(
         private Parser $inner,
         private \Closure $onParseFile,
-    ) {
-    }
+    ) {}
 
     public function parseFile(string $file): array
     {

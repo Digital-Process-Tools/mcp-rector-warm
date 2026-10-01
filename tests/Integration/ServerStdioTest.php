@@ -211,7 +211,7 @@ final class ServerStdioTest extends TestCase
             self::assertSame(
                 0,
                 $this->changedFiles($first),
-                'clean fixture should yield 0 changed files, got: ' . json_encode($first['result']['structuredContent'] ?? []) . $this->stderrTail($proc['stderr'])
+                'clean fixture should yield 0 changed files, got: ' . json_encode($first['result']['structuredContent'] ?? []) . $this->stderrTail($proc['stderr']),
             );
 
             // Introduce a refactorable pattern on disk; bump mtime past 1s granularity.
@@ -227,13 +227,13 @@ final class ServerStdioTest extends TestCase
             self::assertSame(
                 self::expectsWarmth(),
                 $second['result']['structuredContent']['warm_boot'],
-                'second call warm_boot mismatch' . $this->stderrTail($proc['stderr'])
+                'second call warm_boot mismatch' . $this->stderrTail($proc['stderr']),
             );
             self::assertNotSame(-1, $this->changedFiles($second), 'rector output was unparseable' . $this->stderrTail($proc['stderr']));
             self::assertSame(
                 1,
                 $this->changedFiles($second),
-                'edited source becomes refactorable — warm container must re-read and report it (stale AST would still report 0)' . $this->stderrTail($proc['stderr'])
+                'edited source becomes refactorable — warm container must re-read and report it (stale AST would still report 0)' . $this->stderrTail($proc['stderr']),
             );
         } finally {
             fclose($proc['stdin']);
@@ -421,7 +421,7 @@ final class ServerStdioTest extends TestCase
         file_put_contents(
             $dir . '/src/Caller.php',
             "<?php\n\ndeclare(strict_types=1);\n\nnamespace Probe;\n\n"
-            . "final class Caller\n{\n    public function bar(Dependency \$dependency)\n    {\n        return \$dependency->foo();\n    }\n}\n"
+            . "final class Caller\n{\n    public function bar(Dependency \$dependency)\n    {\n        return \$dependency->foo();\n    }\n}\n",
         );
         file_put_contents(
             $dir . '/rector.php',
@@ -429,7 +429,7 @@ final class ServerStdioTest extends TestCase
             . "use Rector\\Config\\RectorConfig;\n"
             . "use Rector\\TypeDeclaration\\Rector\\ClassMethod\\ReturnTypeFromStrictTypedCallRector;\n\n"
             . "return RectorConfig::configure()->withPaths([__DIR__ . '/src'])->withAutoloadPaths([__DIR__ . '/src'])"
-            . "->withRules([ReturnTypeFromStrictTypedCallRector::class]);\n"
+            . "->withRules([ReturnTypeFromStrictTypedCallRector::class]);\n",
         );
 
         return $dir;
@@ -550,7 +550,7 @@ final class ServerStdioTest extends TestCase
             "<?php\n\ndeclare(strict_types=1);\n\n"
             . "use Rector\\Config\\RectorConfig;\n"
             . "use Rector\\Php82\\Rector\\Class_\\ReadOnlyClassRector;\n\n"
-            . "return RectorConfig::configure()->withPaths([__DIR__ . '/src'])->withRules([ReadOnlyClassRector::class]);\n"
+            . "return RectorConfig::configure()->withPaths([__DIR__ . '/src'])->withRules([ReadOnlyClassRector::class]);\n",
         );
 
         return $dir;

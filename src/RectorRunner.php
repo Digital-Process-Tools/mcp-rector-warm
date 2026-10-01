@@ -1015,7 +1015,7 @@ class RectorRunner implements RunnerInterface
      */
     private static function silenceChildOutput(int $chunkSize = 0): void
     {
-        \ob_start(static fn (): string => '', $chunkSize);
+        \ob_start(static fn(): string => '', $chunkSize);
         \ini_set('log_errors', '0');
         if (\strtolower((string) \ini_get('display_errors')) === 'stderr') {
             \ini_set('display_errors', '0');
@@ -2193,7 +2193,7 @@ class RectorRunner implements RunnerInterface
         if ($this->procWorker['ready']) {
             return;
         }
-        $timedOut = fn (): bool => $deadlineNs !== null && \hrtime(true) >= $deadlineNs;
+        $timedOut = fn(): bool => $deadlineNs !== null && \hrtime(true) >= $deadlineNs;
 
         while ($this->procWorker['socket'] === null) {
             // Checked on EVERY pass, not only when nobody connected: a local process
@@ -2840,7 +2840,7 @@ class RectorRunner implements RunnerInterface
                 throw new \RuntimeException(
                     'The rector.php config loaded, but registers no rules or sets. '
                     . 'Refusing to run Rector with nothing to do: add ->withRules() '
-                    . 'or ->withSets() (or a preset) to the config.'
+                    . 'or ->withSets() (or a preset) to the config.',
                 );
             }
         }
@@ -3077,7 +3077,7 @@ class RectorRunner implements RunnerInterface
                     'No rector.php (or rector.dist.php) config found in the working '
                     . 'directory, and no --config was given when the server started. '
                     . 'Refusing to run Rector without a config: pass --config=PATH to '
-                    . 'mcp-rector-warm, or add a rector.php to the project.'
+                    . 'mcp-rector-warm, or add a rector.php to the project.',
                 );
             }
 
@@ -3097,9 +3097,9 @@ class RectorRunner implements RunnerInterface
 
         $this->bootstrapFileHashes = $this->resolveBootstrapFileHashes($bootStartedAt);
 
-        $this->appClass = $this->resolvePrefixed('Symfony\\Component\\Console\\Application');
-        $this->inputClass = $this->resolvePrefixed('Symfony\\Component\\Console\\Input\\ArgvInput');
-        $this->outputClass = $this->resolvePrefixed('Symfony\\Component\\Console\\Output\\BufferedOutput');
+        $this->appClass = $this->resolvePrefixed(\Symfony\Component\Console\Application::class);
+        $this->inputClass = $this->resolvePrefixed(\Symfony\Component\Console\Input\ArgvInput::class);
+        $this->outputClass = $this->resolvePrefixed(\Symfony\Component\Console\Output\BufferedOutput::class);
 
         $app = $container->get($this->appClass);
         \assert(method_exists($app, 'setAutoExit'));

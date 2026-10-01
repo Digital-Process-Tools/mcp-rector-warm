@@ -6,6 +6,7 @@
 .vscode/
 __pycache__/
 /.phpstan-cache/
+/.php-cs-fixer.cache
 # #218: per-process coverage files the `coverage` CI job writes under this
 # before merging them with `phpcov merge`; never meant to be committed.
 /.coverage-run/

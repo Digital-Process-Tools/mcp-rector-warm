@@ -25,8 +25,7 @@ final readonly class LspLoop
     public function __construct(
         private StdioLspTransport $transport,
         private LspServer $server,
-    ) {
-    }
+    ) {}
 
     /**
      * @return int the process exit code: 0 after shutdown+exit, 1 otherwise

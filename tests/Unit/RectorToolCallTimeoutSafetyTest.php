@@ -55,9 +55,7 @@ final class RectorToolCallTimeoutSafetyTest extends TestCase
             /** @var list<bool> */
             public array $lastDryRunSeen = [];
 
-            public function __construct(private readonly int $callTimeoutSeconds)
-            {
-            }
+            public function __construct(private readonly int $callTimeoutSeconds) {}
 
             public function run(array $argv, bool $dryRun = true, bool $noSession = false): array
             {
@@ -72,9 +70,7 @@ final class RectorToolCallTimeoutSafetyTest extends TestCase
                 return false;
             }
 
-            public function reboot(): void
-            {
-            }
+            public function reboot(): void {}
 
             public function getCallTimeoutSeconds(): int
             {

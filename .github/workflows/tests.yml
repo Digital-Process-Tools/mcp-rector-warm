@@ -442,6 +442,20 @@ jobs:
             # proc_open() subprocess -d flags never propagate there, so only
             # an ini directive reaches it the same way auto_prepend_file does.
             printf 'pcov.directory = %s\n' "$PWD"
+            # Correction to this line's own earlier history (#230): widening
+            # pcov.directory to the repo root also instruments vendor/ for
+            # every subprocess pcov sees. An earlier commit here blamed the
+            # #230 coverage-leg kill-test failures on this -- theorizing that
+            # php-cs-fixer's larger vendor/ ate into the kill tests'
+            # DEADLINE_SECONDS margin -- but that theory was refuted: the
+            # tests failed not from a slow timeout but from run() returning
+            # EARLY with no timeout at all (see tests/coverage/prepend.php's
+            # own comment for the real mechanism and fix). This exclude does
+            # NOT fix that regression and never did. It is kept anyway on its
+            # own, unrelated merit: vendor/ was never in #218's coverage
+            # scope, and pcov instrumenting it anyway only adds per-statement
+            # overhead with nothing to show for it.
+            printf 'pcov.exclude = "~%s/vendor~"\n' "$PWD"
           } > .coverage-run/ini-scandir/zz-mcp-rector-warm-coverage.ini
           if [ -n "$default_scan_dir" ]; then
             echo "PHP_INI_SCAN_DIR=${default_scan_dir}:$PWD/.coverage-run/ini-scandir" >> "$GITHUB_ENV"

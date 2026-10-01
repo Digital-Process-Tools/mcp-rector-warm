@@ -113,9 +113,7 @@ final class NoSessionSpyRunner implements RunnerInterface
         return false;
     }
 
-    public function reboot(): void
-    {
-    }
+    public function reboot(): void {}
 
     public function getCallTimeoutSeconds(): int
     {
