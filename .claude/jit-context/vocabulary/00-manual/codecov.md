@@ -5,12 +5,13 @@ keywords: codecov, codecov token, coverage badge, coverage upload
 mode: once
 ---
 
-| Piece | State (set up 2026-10-01, #209 / PR #214) |
+| Piece | State (set up 2026-10-01, #209 / PR #214; extended #218) |
 | --- | --- |
 | Codecov GitHub App | installed on the **Digital-Process-Tools** org, **selected repositories only** (not "All": that grants read on every private repo) |
 | Token | **repository** upload token for mcp-rector-warm, stored as repo secret `CODECOV_TOKEN` (not the org-wide global token) |
-| CI | `coverage` job in `.github/workflows/tests.yml` (ubuntu, PHP 8.3, pcov): `codecov/codecov-action@v5` with `token: ${{ secrets.CODECOV_TOKEN }}`, `fail_ci_if_error: false` |
-| Always available, with or without Codecov | the job summary: coverage % plus the 10 slowest tests (`tools/slowest-tests.py` from `junit.xml`); `junit-log` artifact |
+| CI | `coverage` job in `.github/workflows/tests.yml` (ubuntu + macOS matrix, PHP 8.3, pcov) plus a simpler `coverage-windows` job: each uploads via `codecov/codecov-action@v5` with `token: ${{ secrets.CODECOV_TOKEN }}`, `fail_ci_if_error: false`, and its own `flags:` (`linux`/`macos`/`windows`, declared in `codecov.yml`) so Codecov merges the three instead of the last upload winning |
+| Always available, with or without Codecov | the job summary: coverage % before and after merging forked/subprocess children (#218), plus the 10 slowest tests (`tools/slowest-tests.py` from `junit.xml`); `junit-log-<os>` artifact |
+| Child/subprocess coverage (#218) | pcov only instruments the one process phpunit runs in. `tests/coverage/prepend.php`, loaded via `PHP_INI_SCAN_DIR`-injected `auto_prepend_file` only when `MCP_RECTOR_WARM_COVERAGE_DIR` is set, has every `pcntl_fork()` child and every `proc_open()` subprocess (`bin/*`) write its own `.cov` file; `vendor/bin/phpcov merge` folds them into the clover Codecov receives. No-op (zero added branches) when that env var is unset -- true of every non-coverage CI leg and of a plain local run. Not wired on Windows: `RectorRunner::canFork()` is always false there (#31), so there is no forked-child gap to close on that platform. |
 
 - **Keep the token even though tokenless may work now.** Before the Codecov app was installed on the org, the first run logged `Upload queued for processing failed: {"message":"Token required - not valid tokenless upload"}`. Afterwards Codecov's dashboard said "Your org no longer requires upload tokens", which is an org setting an admin can flip back. With the token, the upload works either way. The first upload with the token (run on 7b98295) logged `Token length: 36` and `Upload queued for processing complete`.
 - **A green coverage job does not mean the upload worked**, because `fail_ci_if_error: false` keeps the job green on a refused upload. Grep the job log: `supertool 'gh-job:<id>:grep:Upload queued'`.

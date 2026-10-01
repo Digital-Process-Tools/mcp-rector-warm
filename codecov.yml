@@ -10,3 +10,14 @@ coverage:
     patch:
       default:
         informational: true
+
+# #218: one upload per OS leg (`coverage` job's ubuntu/macOS matrix, plus the
+# separate `coverage-windows` job), each tagged with its own flag so Codecov
+# merges them into one report instead of the last upload winning.
+flags:
+  linux:
+    paths: []
+  macos:
+    paths: []
+  windows:
+    paths: []

@@ -358,13 +358,44 @@ jobs:
           E2E_DISABLE_PCNTL: '1'
         run: tests/E2E/run.sh
 
-  # #209: coverage and per-test duration, one leg only -- pcov's instrumentation
-  # overhead would change how long every other leg takes, and the other legs
-  # exist to measure PHP-version/OS compatibility, not coverage. ubuntu/8.3
-  # matches the `tests` job's own middle-of-the-matrix leg. No coverage
-  # threshold enforced here (out of scope for #209: measure first, gate later).
+  # #209/#218: coverage and per-test duration. ubuntu/8.3 matches the `tests`
+  # job's own middle-of-the-matrix leg; macOS joined for #218 so a
+  # platform-only branch there is reported rather than silently uncovered.
+  # pcov only instruments the one process phpunit itself runs in -- a
+  # `pcntl_fork()` child (SessionHooks.php, TrackingParser.php, most of
+  # RectorRunner.php's own child-side logic) or a `proc_open()` subprocess
+  # (every bin/* script) is invisible to that report even though the
+  # integration/E2E suites genuinely run it. "Prepare child-process
+  # coverage" below points `PHP_INI_SCAN_DIR` at a generated ini that sets
+  # `auto_prepend_file = tests/coverage/prepend.php` for every `php`
+  # invocation this job's shell session launches from that point on
+  # (`proc_open()` inherits the parent's environment unless told otherwise,
+  # and none of this repo's call sites override that -- so the subprocess
+  # case needs nothing beyond the env var; a `pcntl_fork()` child needs
+  # even less, since forking duplicates tests/coverage/prepend.php's
+  # already-registered shutdown function along with the rest of the
+  # process). "Merge forked/subprocess coverage" folds every one of those
+  # processes' own `.cov` file into the one the top-level phpunit run
+  # already produced. No coverage threshold enforced here (out of scope:
+  # measure first, gate later).
+  #
+  # Windows is NOT in this matrix: RectorRunner::canFork() is always false
+  # there (#31), so there is no forked-child gap on that platform to begin
+  # with, and this job's ini-scandir plumbing is only exercised here on
+  # Linux/macOS. Its own Windows-only branches (ProcessTree,
+  # TempCopySweeper's junction handling) are covered by the separate,
+  # deliberately simpler `coverage-windows` job below instead.
   coverage:
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            flag: linux
+          - os: macos-latest
+            flag: macos
+      fail-fast: false
+
     steps:
       - uses: actions/checkout@v7
 
@@ -385,7 +416,129 @@ jobs:
         uses: actions/cache@v6
         with:
           path: ${{ steps.composer-cache.outputs.dir }}
-          key: composer-coverage-${{ hashFiles('composer.json') }}
+          key: composer-coverage-${{ matrix.os }}-${{ hashFiles('composer.json') }}
+
+      - name: Install dependencies
+        run: composer install --no-progress --prefer-dist
+
+      - name: Prepare child-process coverage (#218)
+        shell: bash
+        run: |
+          mkdir -p .coverage-run/ini-scandir .coverage-run/cov
+          # Preserve whatever scan dir setup-php already wired up (that's
+          # where pcov's own extension-enabling ini lives) -- PHP_INI_SCAN_DIR
+          # replaces the compiled-in scan dir rather than adding to it, so
+          # overwriting it outright would silently unload every extension
+          # setup-php just enabled.
+          default_scan_dir="$(php --ini | sed -n 's/^Scan for additional \.ini files in *//p')"
+          {
+            printf 'auto_prepend_file = %s/tests/coverage/prepend.php\n' "$PWD"
+            # pcov's own default (no ini override) is '<cwd>/src', not the
+            # repo root, which would silently exclude bin/* from every
+            # proc_open() subprocess -d flags never propagate there, so only
+            # an ini directive reaches it the same way auto_prepend_file does.
+            printf 'pcov.directory = %s\n' "$PWD"
+          } > .coverage-run/ini-scandir/zz-mcp-rector-warm-coverage.ini
+          if [ -n "$default_scan_dir" ]; then
+            echo "PHP_INI_SCAN_DIR=${default_scan_dir}:$PWD/.coverage-run/ini-scandir" >> "$GITHUB_ENV"
+          else
+            echo "PHP_INI_SCAN_DIR=$PWD/.coverage-run/ini-scandir" >> "$GITHUB_ENV"
+          fi
+          echo "MCP_RECTOR_WARM_COVERAGE_DIR=$PWD/.coverage-run/cov" >> "$GITHUB_ENV"
+
+      - name: Run tests with coverage
+        shell: bash
+        run: |
+          ./vendor/bin/phpunit --colors=never --no-progress --display-warnings \
+            --coverage-php=.coverage-run/cov/00-main.cov \
+            --coverage-clover=coverage-before.xml \
+            --coverage-text=coverage-before.txt --only-summary-for-coverage-text \
+            --log-junit=junit.xml
+
+      - name: Merge forked/subprocess coverage (#218)
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: |
+          vendor/bin/phpcov merge .coverage-run/cov \
+            --clover=coverage.xml \
+            --text=coverage-after.txt
+
+      - name: Coverage summary
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: |
+          {
+            echo "### ${{ matrix.os }}: before merging forked/subprocess children (#218)"
+            echo '```text'
+            cat coverage-before.txt
+            echo '```'
+            echo "### ${{ matrix.os }}: after merging forked/subprocess children (#218)"
+            echo '```text'
+            cat coverage-after.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Slowest tests summary
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: python3 tools/slowest-tests.py junit.xml --limit 10 >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload JUnit log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: junit-log-${{ matrix.os }}
+          path: junit.xml
+
+      - name: Upload coverage to Codecov
+        # Codecov refuses tokenless uploads for this repo ("Token required"),
+        # so this needs the CODECOV_TOKEN repository secret. Without it the
+        # upload fails quietly (fail_ci_if_error: false); the coverage % is
+        # still in the job summary either way. `files` is the merged
+        # (post-#218) report -- coverage-before.xml is informational only,
+        # in the job summary, never uploaded.
+        uses: codecov/codecov-action@v5
+        with:
+          files: coverage.xml
+          flags: ${{ matrix.flag }}
+          token: ${{ secrets.CODECOV_TOKEN }}
+          fail_ci_if_error: false
+
+  # #218 scope item 4: pcov on a Windows leg too, so its own platform-only
+  # branches (ProcessTree, TempCopySweeper's junction handling) are reported
+  # rather than silently uncovered, same reasoning as #97/#98 gave the
+  # `tests` job its Windows leg. Deliberately NOT the same
+  # auto_prepend_file/PHP_INI_SCAN_DIR mechanism as the `coverage` job
+  # above: that plumbing is only verified here on Linux/macOS, and
+  # RectorRunner::canFork() is always false on Windows (#31) -- there is no
+  # forked-child gap on this platform to close, only the main process's own
+  # coverage of whatever Windows-only branch a test calls directly.
+  coverage-windows:
+    runs-on: windows-latest
+    steps:
+      - name: Configure git line endings
+        run: git config --global core.autocrlf input
+
+      - uses: actions/checkout@v7
+
+      - name: Setup PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.3'
+          coverage: pcov
+          tools: composer:v2
+          extensions: fileinfo, intl, mbstring
+
+      - name: Get composer cache directory
+        id: composer-cache
+        shell: bash
+        run: echo "dir=$(composer config cache-files-dir)" >> "$GITHUB_OUTPUT"
+
+      - name: Cache composer
+        uses: actions/cache@v6
+        with:
+          path: ${{ steps.composer-cache.outputs.dir }}
+          key: composer-coverage-windows-latest-${{ hashFiles('composer.json') }}
 
       - name: Install dependencies
         run: composer install --no-progress --prefer-dist
@@ -403,30 +556,23 @@ jobs:
         shell: bash
         run: |
           {
+            echo '### windows-latest (#218 -- main process only, see job comment)'
             echo '```text'
             cat coverage.txt
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Slowest tests summary
-        if: ${{ !cancelled() }}
-        shell: bash
-        run: python3 tools/slowest-tests.py junit.xml --limit 10 >> "$GITHUB_STEP_SUMMARY"
-
       - name: Upload JUnit log
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: junit-log
+          name: junit-log-windows-latest
           path: junit.xml
 
       - name: Upload coverage to Codecov
-        # Codecov refuses tokenless uploads for this repo ("Token required"),
-        # so this needs the CODECOV_TOKEN repository secret. Without it the
-        # upload fails quietly (fail_ci_if_error: false); the coverage % is
-        # still in the job summary either way.
         uses: codecov/codecov-action@v5
         with:
           files: coverage.xml
+          flags: windows
           token: ${{ secrets.CODECOV_TOKEN }}
           fail_ci_if_error: false
