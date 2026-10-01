@@ -17,6 +17,7 @@ Two ways in, one warm engine:
 [![codecov](https://codecov.io/gh/Digital-Process-Tools/mcp-rector-warm/branch/main/graph/badge.svg)](https://codecov.io/gh/Digital-Process-Tools/mcp-rector-warm)
 [![PHPStan](https://img.shields.io/badge/dynamic/yaml?url=https%3A%2F%2Fraw.githubusercontent.com%2FDigital-Process-Tools%2Fmcp-rector-warm%2Fmain%2Fphpstan.neon&query=%24.parameters.level&label=PHPStan&prefix=level%20&color=brightgreen)](https://github.com/Digital-Process-Tools/mcp-rector-warm/actions/workflows/phpstan.yml)
 [![Rector](https://github.com/Digital-Process-Tools/mcp-rector-warm/actions/workflows/rector.yml/badge.svg)](https://github.com/Digital-Process-Tools/mcp-rector-warm/actions/workflows/rector.yml)
+[![Code style](https://github.com/Digital-Process-Tools/mcp-rector-warm/actions/workflows/cs.yml/badge.svg)](https://github.com/Digital-Process-Tools/mcp-rector-warm/actions/workflows/cs.yml)
 [![Packagist](https://img.shields.io/packagist/v/dpt/mcp-rector-warm.svg)](https://packagist.org/packages/dpt/mcp-rector-warm)
 [![Downloads](https://img.shields.io/packagist/dt/dpt/mcp-rector-warm.svg)](https://packagist.org/packages/dpt/mcp-rector-warm/stats)
 [![PHP](https://img.shields.io/badge/php-8.2%2B-blue)](https://www.php.net/)
