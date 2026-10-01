@@ -1,0 +1,40 @@
+name: PHPStan
+
+# #201: this repo's own tools, checked against themselves. Its own workflow
+# (not a job in tests.yml) so the README badge reports this check alone.
+# One OS/PHP combo is enough: findings do not vary by platform.
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  phpstan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Setup PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.3'
+          coverage: none
+          tools: composer:v2
+          extensions: fileinfo, intl, mbstring
+
+      - name: Get composer cache directory
+        id: composer-cache
+        shell: bash
+        run: echo "dir=$(composer config cache-files-dir)" >> "$GITHUB_OUTPUT"
+
+      - name: Cache composer
+        uses: actions/cache@v6
+        with:
+          path: ${{ steps.composer-cache.outputs.dir }}
+          key: composer-static-analysis-${{ hashFiles('composer.json') }}
+
+      - name: Install dependencies
+        run: composer install --no-progress --prefer-dist
+
+      - name: PHPStan
+        run: vendor/bin/phpstan analyse --no-progress --memory-limit=512M

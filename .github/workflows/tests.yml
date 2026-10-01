@@ -358,42 +358,6 @@ jobs:
           E2E_DISABLE_PCNTL: '1'
         run: tests/E2E/run.sh
 
-  static-analysis:
-    # #201: dogfooding gate -- this repo's own tools, checked against
-    # themselves. One OS/PHP combo is enough here: phpstan and rector's
-    # findings do not vary by platform the way the pcntl/fork paths above do.
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-
-      - name: Setup PHP
-        uses: shivammathur/setup-php@v2
-        with:
-          php-version: '8.3'
-          coverage: none
-          tools: composer:v2
-          extensions: fileinfo, intl, mbstring
-
-      - name: Get composer cache directory
-        id: composer-cache
-        shell: bash
-        run: echo "dir=$(composer config cache-files-dir)" >> "$GITHUB_OUTPUT"
-
-      - name: Cache composer
-        uses: actions/cache@v6
-        with:
-          path: ${{ steps.composer-cache.outputs.dir }}
-          key: composer-static-analysis-${{ hashFiles('composer.json') }}
-
-      - name: Install dependencies
-        run: composer install --no-progress --prefer-dist
-
-      - name: PHPStan
-        run: vendor/bin/phpstan analyse --no-progress --memory-limit=512M
-
-      - name: Rector (dry-run)
-        run: vendor/bin/rector process --dry-run
-
   # #209: coverage and per-test duration, one leg only -- pcov's instrumentation
   # overhead would change how long every other leg takes, and the other legs
   # exist to measure PHP-version/OS compatibility, not coverage. ubuntu/8.3

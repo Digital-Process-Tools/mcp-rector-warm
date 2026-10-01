@@ -6,7 +6,8 @@ parameters:
         - tests
     excludePaths:
         - tests/Fixtures/*
-    tmpDir: %currentWorkingDirectory%/.phpstan-cache
+    # Quoted so the file also parses as YAML: the README badge reads `level` from it.
+    tmpDir: '%currentWorkingDirectory%/.phpstan-cache'
     ignoreErrors:
         # #185: SessionHooks deliberately reaches into PHPStan's (and
         # BetterReflection's) internal, non-BC-covered API to reuse the exact
