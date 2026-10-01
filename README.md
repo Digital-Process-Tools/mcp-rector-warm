@@ -14,7 +14,6 @@ Two ways in, one warm engine:
 - a **[language server](#rector-in-your-editor)** that puts Rector's fixes in your editor.
 
 [![Tests](https://github.com/Digital-Process-Tools/mcp-rector-warm/actions/workflows/tests.yml/badge.svg)](https://github.com/Digital-Process-Tools/mcp-rector-warm/actions/workflows/tests.yml)
-[![codecov](https://codecov.io/gh/Digital-Process-Tools/mcp-rector-warm/branch/main/graph/badge.svg)](https://codecov.io/gh/Digital-Process-Tools/mcp-rector-warm)
 [![Packagist](https://img.shields.io/packagist/v/dpt/mcp-rector-warm.svg)](https://packagist.org/packages/dpt/mcp-rector-warm)
 [![PHP](https://img.shields.io/badge/php-8.2%2B-blue)](https://www.php.net/)
 [![License](https://img.shields.io/badge/license-Community-brightgreen)](LICENSE)
