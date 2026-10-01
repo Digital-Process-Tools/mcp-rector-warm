@@ -3033,41 +3033,49 @@ class RectorRunner implements RunnerInterface
      */
     private static function remapCopyClassesInAutoloader(string $copyPath): void
     {
-        $content = @\file_get_contents($copyPath);
-        if ($content === false) {
-            return;
-        }
-
         try {
+            $content = @\file_get_contents($copyPath);
+            if ($content === false) {
+                if (\defined('STDERR') && \is_resource(\STDERR)) {
+                    @\fwrite(\STDERR, \sprintf(
+                        "mcp-rector-warm: could not read %s to find the classes it declares\n",
+                        $copyPath,
+                    ));
+                }
+
+                return;
+            }
+
             $classes = self::declaredClassLikeNames($content);
+            if ($classes === []) {
+                return;
+            }
+
+            if (\class_exists(\Composer\Autoload\ClassLoader::class, false)) {
+                $map = \array_fill_keys($classes, $copyPath);
+                foreach (\Composer\Autoload\ClassLoader::getRegisteredLoaders() as $loader) {
+                    $loader->addClassMap($map);
+                }
+            }
+
+            $lookup = \array_fill_keys($classes, true);
+            \spl_autoload_register(static function (string $class) use ($lookup, $copyPath): void {
+                if (isset($lookup[$class])) {
+                    require $copyPath;
+                }
+            }, true, true);
         } catch (\Throwable $e) {
+            // Fail open, exactly like applySkipsOfOriginalPath(): the copy is
+            // then diagnosed without the remap -- a stale-type result, not a
+            // crashed call -- and the reason is on stderr rather than silent.
             if (\defined('STDERR') && \is_resource(\STDERR)) {
                 @\fwrite(\STDERR, \sprintf(
-                    "mcp-rector-warm: could not read the classes declared in %s: %s\n",
+                    "mcp-rector-warm: could not remap the classes %s declares to it: %s\n",
                     $copyPath,
                     $e->getMessage(),
                 ));
             }
-
-            return;
         }
-        if ($classes === []) {
-            return;
-        }
-
-        if (\class_exists(\Composer\Autoload\ClassLoader::class, false)) {
-            $map = \array_fill_keys($classes, $copyPath);
-            foreach (\Composer\Autoload\ClassLoader::getRegisteredLoaders() as $loader) {
-                $loader->addClassMap($map);
-            }
-        }
-
-        $lookup = \array_fill_keys($classes, true);
-        \spl_autoload_register(static function (string $class) use ($lookup, $copyPath): void {
-            if (isset($lookup[$class])) {
-                require $copyPath;
-            }
-        }, true, true);
     }
 
     /**
