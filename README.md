@@ -57,7 +57,7 @@ That's the install. PHP 8.2+, Rector ^2.4 comes along as a normal Composer depen
 
 **For:** anyone who lets Claude, Copilot agent mode, Cursor, Cline or another agent refactor PHP.
 
-- **Your agent runs Rector after every edit**, without waiting for Rector to boot each time.
+- **Your agent can run Rector after every edit**, without waiting for Rector to boot each time -- automatically with Claude Code via supertool (below), on request with any other client.
 - **Preview first.** The agent sees the diff; files change only when it asks to write.
 - **Stays inside your project.** Paths outside the working directory are refused.
 - **Any MCP client.** Claude Desktop, VS Code, Cursor, Cline, Continue, Zed.
@@ -75,7 +75,7 @@ Install the plugin, once per machine:
 
 Restart your Claude Code session afterward -- the plugin's hook only registers at session start.
 
-Then, in your project:
+Then, as a project dependency -- not the global install above, since `.supertool.json` below points at `vendor/bin/`:
 
 ```bash
 composer require --dev dpt/mcp-rector-warm
@@ -113,7 +113,7 @@ rector-mcp  : 1 err       (5.6s)
      rector.refactor  Would apply ReadOnlyPropertyRector
 ```
 
-**The honest caveat:** this only fires on an edit made through one of supertool's own mutating ops (`edit`, `paste`, `replace`, `vim`) -- not through Claude Code's built-in `Edit`/`Write` tools, which write to disk with no validator and no rollback. To make supertool the only edit route, deny the native tools in the project's `.claude/settings.json`:
+**The honest caveat:** this only fires on an edit made through one of supertool's own mutating ops (`edit`, `paste`, `replace`, `replace_lines`, `vim`) -- not through Claude Code's built-in `Edit`/`Write` tools, which write to disk with no validator and no rollback. To make supertool the only edit route, deny the native tools in the project's `.claude/settings.json`:
 
 ```json
 {

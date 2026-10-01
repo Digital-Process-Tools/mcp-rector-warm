@@ -21,7 +21,7 @@ Install the plugin, once per machine:
 
 Restart your Claude Code session afterward -- the plugin's hook only registers at session start.
 
-Then, in your project:
+Then, as a project dependency -- not the global install above, since `.supertool.json` below points at `vendor/bin/`:
 
 ```bash
 composer require --dev dpt/mcp-rector-warm
@@ -53,7 +53,7 @@ and a minimal `.supertool.json`:
 
 `{python}` and `{supertool_dir}` are supertool placeholders, filled in automatically; nothing to edit there. `mcp_autospawn: true` opts this validator into starting the warm daemon itself on first use -- without it, a validator only ever *uses* an already-running daemon and skips rather than waits (see claude-supertool's [mcp-warm-process-servers.md](https://github.com/Digital-Process-Tools/claude-supertool/blob/main/docs/mcp-warm-process-servers.md)), so for a server you are not separately running yourself this key is what makes the warm daemon start at all.
 
-Add the optional `phpstan-warm` validator the same way, alongside `rector`, if the project also uses [`dpt/mcp-phpstan-warm`](https://github.com/Digital-Process-Tools/mcp-phpstan-warm); it hooks into the same edit ops and runs independently.
+Add the optional `phpstan` validator the same way, alongside `rector` (backed by the `mcp-phpstan-warm` daemon, [`dpt/mcp-phpstan-warm`](https://github.com/Digital-Process-Tools/mcp-phpstan-warm)), if the project also uses it; it hooks into the same edit ops and runs independently.
 
 After an edit to a PHP file, supertool's own output carries a `[validators]` block right where the edit happened -- either a clean result:
 
@@ -74,9 +74,9 @@ rector-mcp  : 1 err       (5.6s)
 
 **`engine_glitches`** (an optional key on the validator, not shown above) names Rector-internal error substrings -- e.g. `"System error:"`, `"toMutatingScope() on null"` -- that the validator should report as a glitch rather than a genuine finding, so a transient Rector crash does not read as "your code has a problem".
 
-**The warm session** (`MCP_RECTOR_WARM_SESSION`, on by default since [#220](https://github.com/Digital-Process-Tools/mcp-rector-warm/issues/220)) is this server's own setting, not supertool's -- it keeps a long-lived session child warm across calls for faster analysis, and every write still forks fresh from a pristine worker regardless of the setting. See [how it works](how-it-works.md#1b-one-session-child-keeps-the-analysis-warm-between-calls-185) for what it watches and its one documented limit.
+**The warm session** (`MCP_RECTOR_WARM_SESSION`, on by default since [#216](https://github.com/Digital-Process-Tools/mcp-rector-warm/issues/216)) is this server's own setting, not supertool's -- it keeps a long-lived session child warm across calls for faster analysis, and every write still forks fresh from a pristine worker regardless of the setting. See [how it works](how-it-works.md#1b-one-session-child-keeps-the-analysis-warm-between-calls-185) for what it watches and its one documented limit.
 
-**The honest caveat:** this only fires on an edit made through one of supertool's own mutating ops (`edit`, `paste`, `replace`, `vim`) -- not through Claude Code's built-in `Edit`/`Write` tools, which write to disk with no validator and no rollback. To make supertool the only edit route, deny the native tools in the project's `.claude/settings.json`:
+**The honest caveat:** this only fires on an edit made through one of supertool's own mutating ops (`edit`, `paste`, `replace`, `replace_lines`, `vim`) -- not through Claude Code's built-in `Edit`/`Write` tools, which write to disk with no validator and no rollback. To make supertool the only edit route, deny the native tools in the project's `.claude/settings.json`:
 
 ```json
 {
