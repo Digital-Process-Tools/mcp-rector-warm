@@ -186,10 +186,11 @@ for the command).
 The [Benchmark](benchmark.md) page has the
 maintained, reproducible baseline (`tools/warm-vs-cold.py`, 30 files each of
 laravel/framework and symfony/symfony, first call excluded): with
-`MCP_RECTOR_WARM_SESSION=1`, **740 ms cold vs 76 ms warm per file on Laravel,
-696 ms vs 100 ms on Symfony, at the median**; 224 ms and 159 ms warm in the
-default mode. Every warm answer was byte-identical to cold. Reproduce it on any
-project:
+the warm session (on by default since #216): **740 ms cold vs 76 ms warm per
+file on Laravel, 696 ms vs 100 ms on Symfony, at the median**; 224 ms and
+159 ms warm with `MCP_RECTOR_WARM_SESSION=0`. Every warm answer was
+byte-identical to cold -- including every write, which never goes through the
+session regardless of its state. Reproduce it on any project:
 
 ```bash
 python3 tools/warm-vs-cold.py --project /path/to/project --files 'src/**/*.php' --limit 30 --jobs 1 --out /tmp/wvc

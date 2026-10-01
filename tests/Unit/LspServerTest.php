@@ -6,6 +6,7 @@ namespace Dpt\McpRectorWarm\Tests\Unit;
 
 use Dpt\McpRectorWarm\Lsp\BufferDiagnosticsSource;
 use Dpt\McpRectorWarm\Lsp\DiagnosticsSource;
+use Dpt\McpRectorWarm\Lsp\EditDiagnosticsSource;
 use Dpt\McpRectorWarm\Lsp\LspServer;
 use Dpt\McpRectorWarm\Lsp\WorkspaceDiagnosticsSource;
 use PHPUnit\Framework\TestCase;
@@ -1071,6 +1072,62 @@ final class LspServerTest extends TestCase
         self::assertSame($fixes[0]['range'], $edit['range']);
         self::assertSame('fixed' . "\n", $edit['newText']);
         self::assertSame('Apply all Rector fixes', $actions[1]['title']);
+    }
+
+    /**
+     * #216: codeAction's cached $fixesByUri (from diagnose(), potentially
+     * session-served) only decides WHETHER to offer an action, never what
+     * the edit itself says -- a source that implements EditDiagnosticsSource
+     * has its edit text recomputed via diagnoseForEdit() instead. The two
+     * fix sets below deliberately differ so a leftover use of the stale
+     * cached text is caught here rather than passing by coincidence.
+     */
+    public function testCodeActionRecomputesTheEditWithTheSessionForcedOffWhenTheSourceSupportsIt(): void
+    {
+        $stale = [self::fix(3, 12, "stale\n", 'SimplifyIfReturnBoolRector')];
+        $fresh = [self::fix(3, 12, "fresh\n", 'SimplifyIfReturnBoolRector')];
+        $source = new class ($stale, $fresh) implements DiagnosticsSource, EditDiagnosticsSource {
+            public function __construct(private readonly array $stale, private readonly array $fresh)
+            {
+            }
+
+            public function diagnose(string $absolutePath): array
+            {
+                return ['fixes' => $this->stale];
+            }
+
+            public function diagnoseForEdit(string $absolutePath): array
+            {
+                return ['fixes' => $this->fresh];
+            }
+
+            public function diagnoseBufferForEdit(string $absolutePath, string $content): array
+            {
+                return ['fixes' => []];
+            }
+        };
+        $server = new LspServer('1.0.0', $source);
+        $server->handle([
+            'jsonrpc' => '2.0',
+            'method' => 'textDocument/didOpen',
+            'params' => ['textDocument' => ['uri' => 'file:///tmp/Sample.php', 'version' => 1]],
+        ]);
+
+        $responses = $server->handle([
+            'jsonrpc' => '2.0',
+            'id' => 5,
+            'method' => 'textDocument/codeAction',
+            'params' => [
+                'textDocument' => ['uri' => 'file:///tmp/Sample.php'],
+                'range' => ['start' => ['line' => 3, 'character' => 0], 'end' => ['line' => 12, 'character' => 0]],
+                'context' => ['diagnostics' => []],
+            ],
+        ]);
+
+        $actions = $responses[0]['result'];
+        self::assertCount(2, $actions);
+        $edit = $actions[0]['edit']['changes']['file:///tmp/Sample.php'][0];
+        self::assertSame('fresh' . "\n", $edit['newText'], 'the stale cached fix text must never reach the edit');
     }
 
     public function testCodeActionWithAZeroWidthCursorOnTheFixsFirstLineStillOffersIt(): void

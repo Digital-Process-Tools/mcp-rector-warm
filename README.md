@@ -40,7 +40,7 @@ Both ship in one package. Run one, or both side by side.
 - **One-time boot.** The first call boots Rector, once per server. An idle server costs nothing.
 - **Edit `rector.php` freely.** Config changes apply on the next call. No restart.
 
-The fastest mode is opt-in: start the server with `MCP_RECTOR_WARM_SESSION=1` ([numbers](docs/benchmark.md), [what it watches](docs/how-it-works.md#1b-one-session-child-keeps-the-analysis-warm-between-calls-185)).
+The fastest mode is on by default: a long-lived session child keeps Rector's analysis warm between calls ([numbers](docs/benchmark.md), [what it watches](docs/how-it-works.md#1b-one-session-child-keeps-the-analysis-warm-between-calls-185)). Set `MCP_RECTOR_WARM_SESSION=0` to turn it off. Every write -- `rector_process` with `dryRun: false`, an LSP code action, `rector-warm.fixWorkspace` -- always forks fresh from a pristine worker, never the session, whatever it's set to.
 
 ## Get started
 
@@ -121,7 +121,7 @@ means for a pull request.
 
 ## The numbers
 
-**Up to 10× faster per file** on Laravel and Symfony with `MCP_RECTOR_WARM_SESSION=1`, **3.3–4.1×** without it. Every warm answer was byte-identical to cold.
+**Up to 10× faster per file** on Laravel and Symfony with the warm session (on by default), **3.3–4.1×** with `MCP_RECTOR_WARM_SESSION=0`. Every warm answer was byte-identical to cold -- including every write, which never goes through the session either way.
 
 **[Machine, method, full table, reproduce it on your project →](docs/benchmark.md)**
 

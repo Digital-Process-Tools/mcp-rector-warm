@@ -108,7 +108,7 @@ final class RectorDiagnosticsSourceBufferTest extends TestCase
             {
             }
 
-            public function run(array $argv, bool $dryRun = true): array
+            public function run(array $argv, bool $dryRun = true, bool $noSession = false): array
             {
                 return ['exit_code' => 0, 'output' => ($this->behaviour)(end($argv), $argv), 'warm_boot' => false];
             }

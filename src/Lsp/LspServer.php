@@ -1064,6 +1064,27 @@ final class LspServer
             return $this->result($id, []);
         }
 
+        // #216: $fixes above only decides WHETHER to offer an action, and at
+        // which document version -- it may have come from the warm session,
+        // which can be stale on an input a custom rule reads itself
+        // (docs/how-it-works.md §1b). The actual WorkspaceEdit text below
+        // must never be built from that possibly-stale answer, so it is
+        // recomputed here with the session forced off, over the exact same
+        // content (the open buffer if there is one, otherwise disk) the
+        // version check above just confirmed is current. A source with no
+        // EditDiagnosticsSource (every test double; a future session-less
+        // source) keeps using the cached $fixes unchanged.
+        if ($this->diagnostics instanceof EditDiagnosticsSource) {
+            $path = self::uriToPath($uri);
+            $fresh = isset($this->buffers[$uri])
+                ? $this->diagnostics->diagnoseBufferForEdit($path, $this->buffers[$uri])
+                : $this->diagnostics->diagnoseForEdit($path);
+            $fixes = $fresh['fixes'] ?? [];
+            if ($fixes === []) {
+                return $this->result($id, []);
+            }
+        }
+
         $actions = [];
         foreach ($fixes as $fix) {
             if ($range !== null && !self::rangesOverlap($range, $fix['range'])) {

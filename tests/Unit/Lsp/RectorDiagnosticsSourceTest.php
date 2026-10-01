@@ -43,7 +43,7 @@ final class RectorDiagnosticsSourceTest extends TestCase
             {
             }
 
-            public function run(array $argv, bool $dryRun = true): array
+            public function run(array $argv, bool $dryRun = true, bool $noSession = false): array
             {
                 return ['exit_code' => 0, 'output' => $this->output, 'warm_boot' => false];
             }

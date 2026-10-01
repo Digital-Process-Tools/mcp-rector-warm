@@ -22,9 +22,13 @@ interface RunnerInterface
      *   dryRun:false call must never be killed by --call-timeout at all, so
      *   the deadline is not enforced for it (it can hang indefinitely if
      *   genuinely wedged -- the pre-#58 status quo for a write call).
+     * @param bool $noSession #216: forces a fresh fork from the pristine
+     *   worker even for a dry run that would otherwise be eligible for a warm
+     *   session -- see RectorRunner::sessionCandidate(). A test double has no
+     *   session to bypass and may ignore this parameter.
      * @return array{exit_code: int, output: string, warm_boot: bool}
      */
-    public function run(array $argv, bool $dryRun = true): array;
+    public function run(array $argv, bool $dryRun = true, bool $noSession = false): array;
 
     public function isWarm(): bool;
 

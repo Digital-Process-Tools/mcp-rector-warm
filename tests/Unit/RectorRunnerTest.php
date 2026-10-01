@@ -180,7 +180,7 @@ final class RectorRunnerTest extends TestCase
              * @param list<string> $argv
              * @return array{exit_code: int, output: string, warm_boot: bool}
              */
-            protected function runForked(array $argv, bool $warmBoot, bool $dryRun = true): array
+            protected function runForked(array $argv, bool $warmBoot, bool $dryRun = true, bool $noSession = false): array
             {
                 return $this->execute($argv, $warmBoot);
             }

@@ -12,7 +12,7 @@ use Mcp\Schema\Result\CallToolResult;
  * MCP tool uses (dry-run), on the single file the LSP asks about, and turns
  * its `file_diffs` entry into fixes via RectorDiffParser.
  */
-final readonly class RectorDiagnosticsSource implements BufferDiagnosticsSource, WorkspaceDiagnosticsSource
+final readonly class RectorDiagnosticsSource implements BufferDiagnosticsSource, WorkspaceDiagnosticsSource, EditDiagnosticsSource
 {
     /**
      * @param \Closure(resource $handle): bool|null $lockAcquirer #188 test
@@ -37,16 +37,28 @@ final readonly class RectorDiagnosticsSource implements BufferDiagnosticsSource,
     }
 
     /**
-     * #102: `rector-warm.fixWorkspace` -- the same dry run as diagnose(),
-     * over $rootPath (the server's working dir) instead of one file, with
-     * every `file_diffs` entry turned into fixes rather than just the
-     * first.
+     * #216: same as diagnose(), with the session forced off -- for a call
+     * whose result an LSP code action is about to turn into a WorkspaceEdit.
+     * See EditDiagnosticsSource's own docblock for why.
+     */
+    public function diagnoseForEdit(string $absolutePath): array
+    {
+        return $this->interpret($this->tool->processForEdit($absolutePath), $absolutePath);
+    }
+
+    /**
+     * #102: the same dry run as diagnose(), over $rootPath (the server's
+     * working dir) instead of one file, with every `file_diffs` entry turned
+     * into fixes rather than just the first. #216: `rector-warm.fixWorkspace`
+     * turns this straight into a `workspace/applyEdit`, never merely
+     * displays it as a diagnostic -- it always forces the session off, the
+     * same as diagnoseForEdit(), never diagnose()'s plain process() call.
      *
      * @return array{files: array<string, list<array<string, mixed>>>, errors: list<array{message: string, line: int, file?: string}>}
      */
     public function diagnoseWorkspace(string $rootPath): array
     {
-        return $this->interpretWorkspace($this->tool->process($rootPath, true), $rootPath);
+        return $this->interpretWorkspace($this->tool->processForEdit($rootPath), $rootPath);
     }
 
     /**
@@ -214,6 +226,22 @@ final readonly class RectorDiagnosticsSource implements BufferDiagnosticsSource,
      * startup sweep (#179 drops it).
      */
     public function diagnoseBuffer(string $absolutePath, string $content): array
+    {
+        return $this->diagnoseBufferImpl($absolutePath, $content, false);
+    }
+
+    /**
+     * #216: same as diagnoseBuffer(), with the session forced off -- for a
+     * call whose result an LSP code action is about to turn into a
+     * WorkspaceEdit over an unsaved buffer. See EditDiagnosticsSource's own
+     * docblock for why.
+     */
+    public function diagnoseBufferForEdit(string $absolutePath, string $content): array
+    {
+        return $this->diagnoseBufferImpl($absolutePath, $content, true);
+    }
+
+    private function diagnoseBufferImpl(string $absolutePath, string $content, bool $noSession): array
     {
         $directory = dirname($absolutePath);
         $realDirectory = realpath($directory);
@@ -433,7 +461,7 @@ final readonly class RectorDiagnosticsSource implements BufferDiagnosticsSource,
             // ORIGINAL path's skips to the copy (RectorRunner::
             // applySkipsOfOriginalPath()), so exact-path, relative, glob and
             // rule-scoped skips behave as on the saved file.
-            $result = $this->interpret($this->tool->processBufferCopy($tempPath, $absolutePath), $tempPath);
+            $result = $this->interpret($this->tool->processBufferCopy($tempPath, $absolutePath, $noSession), $tempPath);
         } catch (\Throwable $e) {
             $result = self::failure($e->getMessage());
         } finally {

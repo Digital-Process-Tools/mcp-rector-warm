@@ -11,6 +11,13 @@ a fresh session.
 The first test pins the limit (must fire: stale without the declaration, which
 is also the positive control that this harness can see staleness at all); the
 second shows the declaration keeps every answer equal to cold.
+
+#216: a third test takes the same staleness-inducing edit and shows that the
+WRITE Rector performs after it -- unlike the dry run above -- always equals
+cold, because a dryRun:false call never reaches the session (RectorRunner::
+sessionCandidate()'s `!$dryRun` guard, unconditional, predating #216). Reading
+a stale dry run in CI is an accepted limit (a cold CI run is the backstop);
+writing stale bytes into the user's file never is.
 """
 
 from __future__ import annotations
@@ -166,3 +173,44 @@ def test_a_declared_input_starts_a_fresh_session_and_stays_equal_to_cold(tmp_pat
         names = [e for e, _ in events[1]]
         assert "respawn" in names and names[-1] == "serve", events[1]
         assert any("map.json" in detail for e, detail in events[1] if e == "respawn"), events[1]
+
+
+def test_a_write_after_the_undeclared_edit_still_equals_cold(tmp_path: Path) -> None:
+    """#216: the dry run above (test_an_undeclared_input_read_by_a_custom_rule_
+    goes_stale_in_the_session) can be stale after the map.json edit -- the write
+    never is, because `dryRun:false` never reaches the session at all
+    (RectorRunner::sessionCandidate()'s unconditional `!$dryRun` guard)."""
+    root = tmp_path / "project"
+    build(root)
+    root = root.resolve()
+    record = tmp_path / "record"
+    env = {**SESSION_LOG_ENV, "MCP_RECTOR_WARM_SESSION": "1"}
+
+    async def run() -> None:
+        async with open_server(root, record, root / "rector.php", extra_env=env) as server:
+            # Seed the session exactly like run_steps()'s own step 0.
+            await server.process(root / "src" / "Greeter.php")
+            # The same staleness-inducing edit the other two tests make.
+            target = root / "config" / "map.json"
+            target.write_text('{"hello": "there"}', encoding="utf-8")
+            later = time.time() + 10
+            os.utime(target, (later, later))
+            # The write: dryRun:false, so it can never be session-served,
+            # whatever state the session is in after the edit above.
+            result = await server.process(root / "src" / "Greeter.php", dry_run=False)
+            assert structured(result).get("exit_code") == 0, structured(result)
+
+    anyio.run(run)
+    warm_written = (root / "src" / "Greeter.php").read_text(encoding="utf-8")
+
+    cold_copy = tmp_path / "cold-write"
+    build(cold_copy)
+    # The identical edit, made before the only (cold) call touches this copy
+    # at all -- there is no prior call and no session here to go stale.
+    (cold_copy / "config" / "map.json").write_text('{"hello": "there"}', encoding="utf-8")
+    cold_result = run_cold(cold_copy.resolve(), "src/Greeter.php", False)
+    assert cold_result["exit_code"] == 0, cold_result
+    cold_written = (cold_copy / "src" / "Greeter.php").read_text(encoding="utf-8")
+
+    assert warm_written == cold_written
+    assert "'there'" in warm_written, warm_written
