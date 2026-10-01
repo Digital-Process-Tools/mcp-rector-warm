@@ -6,6 +6,7 @@ namespace Dpt\McpRectorWarm\Tests\Unit;
 
 use Dpt\McpRectorWarm\RectorCallTimeoutException;
 use Dpt\McpRectorWarm\RectorRunner;
+use Dpt\McpRectorWarm\Tests\Support\TempPath;
 use PHPUnit\Framework\TestCase;
 
 final class RectorRunnerTest extends TestCase
@@ -125,7 +126,7 @@ final class RectorRunnerTest extends TestCase
         } finally {
             chdir($previousCwd);
             $_SERVER['argv'] = $previousArgv;
-            rmdir($tmp);
+            TempPath::rmdir($tmp);
         }
     }
 
@@ -296,8 +297,8 @@ final class RectorRunnerTest extends TestCase
             $runner?->reboot();
             chdir($previousCwd);
             $_SERVER['argv'] = $previousArgv;
-            unlink($tmp . '/rector.php');
-            rmdir($tmp);
+            TempPath::unlink($tmp . '/rector.php');
+            TempPath::rmdir($tmp);
         }
     }
 
@@ -387,8 +388,8 @@ final class RectorRunnerTest extends TestCase
         } finally {
             chdir($previousCwd);
             $_SERVER['argv'] = $previousArgv;
-            unlink($tmp . '/rector.php');
-            rmdir($tmp);
+            TempPath::unlink($tmp . '/rector.php');
+            TempPath::rmdir($tmp);
         }
     }
 
@@ -638,8 +639,8 @@ final class RectorRunnerTest extends TestCase
         } finally {
             chdir($previousCwd);
             $_SERVER['argv'] = $previousArgv;
-            unlink($tmp . '/rector.php');
-            rmdir($tmp);
+            TempPath::unlink($tmp . '/rector.php');
+            TempPath::rmdir($tmp);
         }
     }
 
@@ -823,8 +824,8 @@ final class RectorRunnerTest extends TestCase
             }
             chdir($previousCwd);
             $_SERVER['argv'] = $previousArgv;
-            unlink($tmp . '/rector.php');
-            rmdir($tmp);
+            TempPath::unlink($tmp . '/rector.php');
+            TempPath::rmdir($tmp);
         }
     }
 
@@ -974,8 +975,8 @@ final class RectorRunnerTest extends TestCase
         } finally {
             chdir($previousCwd);
             $_SERVER['argv'] = $previousArgv;
-            unlink($tmp . '/rector.php');
-            rmdir($tmp);
+            TempPath::unlink($tmp . '/rector.php');
+            TempPath::rmdir($tmp);
         }
     }
 
@@ -1107,8 +1108,8 @@ final class RectorRunnerTest extends TestCase
         } finally {
             chdir($previousCwd);
             $_SERVER['argv'] = $previousArgv;
-            unlink($tmp . '/rector.php');
-            rmdir($tmp);
+            TempPath::unlink($tmp . '/rector.php');
+            TempPath::rmdir($tmp);
         }
     }
 
@@ -1191,8 +1192,8 @@ final class RectorRunnerTest extends TestCase
         } finally {
             chdir($previousCwd);
             $_SERVER['argv'] = $previousArgv;
-            unlink($tmp . '/rector.php');
-            rmdir($tmp);
+            TempPath::unlink($tmp . '/rector.php');
+            TempPath::rmdir($tmp);
         }
     }
 
@@ -1283,10 +1284,10 @@ final class RectorRunnerTest extends TestCase
         } finally {
             chdir($previousCwd);
             $_SERVER['argv'] = $previousArgv;
-            unlink($tmp . '/rector.php');
-            unlink($tmp . '/src/Foo.php');
-            rmdir($tmp . '/src');
-            rmdir($tmp);
+            TempPath::unlink($tmp . '/rector.php');
+            TempPath::unlink($tmp . '/src/Foo.php');
+            TempPath::rmdir($tmp . '/src');
+            TempPath::rmdir($tmp);
         }
     }
 
@@ -1382,10 +1383,10 @@ final class RectorRunnerTest extends TestCase
         } finally {
             chdir($previousCwd);
             $_SERVER['argv'] = $previousArgv;
-            unlink($tmp . '/rector.php');
-            unlink($tmp . '/src/Foo.php');
-            rmdir($tmp . '/src');
-            rmdir($tmp);
+            TempPath::unlink($tmp . '/rector.php');
+            TempPath::unlink($tmp . '/src/Foo.php');
+            TempPath::rmdir($tmp . '/src');
+            TempPath::rmdir($tmp);
         }
     }
 
@@ -1872,9 +1873,9 @@ final class RectorRunnerTest extends TestCase
             fclose($pipes[2]);
             @proc_terminate($proc, 9);
             proc_close($proc);
-            unlink($driverScript);
-            unlink($tmp . '/rector.php');
-            rmdir($tmp);
+            TempPath::unlink($driverScript);
+            TempPath::unlink($tmp . '/rector.php');
+            TempPath::rmdir($tmp);
         }
     }
 
@@ -2003,8 +2004,8 @@ final class RectorRunnerTest extends TestCase
             chdir($previousCwd);
             $_SERVER['argv'] = $previousArgv;
             @unlink($markerFile);
-            unlink($tmp . '/rector.php');
-            rmdir($tmp);
+            TempPath::unlink($tmp . '/rector.php');
+            TempPath::rmdir($tmp);
         }
     }
 

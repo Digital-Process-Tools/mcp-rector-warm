@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Dpt\McpRectorWarm\Tests\Unit;
 
 use Dpt\McpRectorWarm\RectorRunner;
+use Dpt\McpRectorWarm\Tests\Support\TempPath;
 use PHPUnit\Framework\TestCase;
 
 /**
@@ -313,14 +314,14 @@ final class RectorRunnerProcessTreeKillTest extends TestCase
     {
         foreach (['/rector.php', '/pids.txt', '/src/Foo.php'] as $file) {
             if (is_file($tmp . $file)) {
-                unlink($tmp . $file);
+                TempPath::unlink($tmp . $file);
             }
         }
         if (is_dir($tmp . '/src')) {
-            rmdir($tmp . '/src');
+            TempPath::rmdir($tmp . '/src');
         }
         if (is_dir($tmp)) {
-            rmdir($tmp);
+            TempPath::rmdir($tmp);
         }
     }
 }
