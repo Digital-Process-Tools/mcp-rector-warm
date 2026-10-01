@@ -219,10 +219,14 @@ final class TempCopySweeper
      * this process itself can take the lock right now.
      *
      * Refuses (returns false, changing nothing) for: a symlinked or
-     * junctioned $path; anything other than exactly one `.lock` file
-     * inside it; and a `.lock` another process still holds -- the
-     * must-not-fire case a live server's own in-progress run must never
-     * be swept out from under it.
+     * junctioned $path; anything other than exactly one `.lock` ENTRY
+     * inside it; a `.lock` entry that is itself a symlink or junction
+     * rather than a regular file (#225 -- fopen($lockPath, 'c') follows a
+     * symlink and creates its target if missing, so an unguarded `.lock`
+     * entry could be used to create and then silently clean up a file
+     * anywhere the process can write); and a `.lock` another process
+     * still holds -- the must-not-fire case a live server's own
+     * in-progress run must never be swept out from under it.
      */
     public static function reclaimStaleOwnLock(string $path): bool
     {
@@ -239,6 +243,10 @@ final class TempCopySweeper
         }
 
         $lockPath = $path . DIRECTORY_SEPARATOR . self::LOCK_FILE_NAME;
+        if (self::isLinkOrJunction($lockPath) || !is_file($lockPath)) {
+            return false;
+        }
+
         $handle = @fopen($lockPath, 'c');
         if ($handle === false) {
             return false;
@@ -258,8 +266,9 @@ final class TempCopySweeper
         // defensive shape removeIfStale()/the LSP's own `finally` block
         // use elsewhere in this feature: the lock was free a moment ago,
         // but nothing prevents a symlink swap between that check and this
-        // unlink() if $path is ever reachable by another writer.
-        if (self::isLinkOrJunction($path)) {
+        // unlink() if $path (or #225: $lockPath itself) is ever reachable
+        // by another writer.
+        if (self::isLinkOrJunction($path) || self::isLinkOrJunction($lockPath) || !is_file($lockPath)) {
             return false;
         }
 
