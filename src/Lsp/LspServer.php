@@ -1580,7 +1580,7 @@ final class LspServer
     }
 
     /**
-     * @param array<string, mixed>|null $result
+     * @param array<string, mixed>|list<array<string, mixed>>|null $result
      * @return array<string, mixed>
      */
     private function result(mixed $id, ?array $result): array

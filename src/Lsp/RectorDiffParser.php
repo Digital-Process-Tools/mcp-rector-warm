@@ -59,6 +59,7 @@ final class RectorDiffParser
         $rawNew = [];
 
         $finalize = static function () use (&$current, &$rawNew): ?array {
+            // @phpstan-ignore identical.alwaysTrue (by-ref closure capture: PHPStan does not track the later reassignment of $current)
             if ($current === null) {
                 return null;
             }
@@ -74,6 +75,7 @@ final class RectorDiffParser
             // strictly between the first and last change (interior context --
             // e.g. two edits three lines apart, kept in the same hunk) rather
             // than being pure leading/trailing padding.
+            // @phpstan-ignore deadCode.unreachable (reachable at runtime; see the identical.alwaysTrue note above)
             $changeFrom = $current['changeFrom'];
             $changeToExclusive = $current['changeToExclusive'];
             $core = [];
@@ -97,12 +99,14 @@ final class RectorDiffParser
         foreach (explode("\n", $diff) as $line) {
             if (preg_match('/^@@ -(\d+)(?:,(\d+))? \+\d+(?:,\d+)? @@/', $line, $m) === 1) {
                 $finalized = $finalize();
+                // @phpstan-ignore notIdentical.alwaysFalse (same by-ref closure limitation: $finalize()'s return type is mistracked as always-null)
                 if ($finalized !== null) {
                     $hunks[] = $finalized;
                 }
                 $oldStart = (int) $m[1];
                 $current = [
                     'oldStart' => $oldStart,
+                    // @phpstan-ignore notIdentical.alwaysTrue (defensive: isset() still guards the genuinely-unmatched optional group)
                     'oldCount' => isset($m[2]) && $m[2] !== '' ? (int) $m[2] : 1,
                     'newLines' => [],
                     'hasChange' => false,
@@ -140,6 +144,7 @@ final class RectorDiffParser
         }
 
         $finalized = $finalize();
+        // @phpstan-ignore notIdentical.alwaysFalse (same by-ref closure limitation as the earlier note)
         if ($finalized !== null) {
             $hunks[] = $finalized;
         }
@@ -148,7 +153,9 @@ final class RectorDiffParser
     }
 
     /**
-     * @param list<array{rector: string, line?: int}> $changes
+     * @param list<array{rector?: string, line?: int}> $changes -- `rector` is
+     *   decoded from Rector's own JSON report, an external process output we
+     *   do not fully trust; the entry may legitimately omit it.
      * @param list<string> $appliedRectors
      * @return list<array{range: array{start: array{line:int,character:int}, end: array{line:int,character:int}}, newText: string, rectors: list<string>}>
      */
@@ -202,6 +209,7 @@ final class RectorDiffParser
                 }
             }
 
+            // @phpstan-ignore notIdentical.alwaysTrue (defensive: correctness does not depend on the $activeHunks non-empty guarantee)
             if ($bestIndex !== null) {
                 $rectorsByHunk[$bestIndex][] = $rector;
             }

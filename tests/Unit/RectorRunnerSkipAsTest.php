@@ -129,11 +129,11 @@ final class RectorRunnerSkipAsTest extends TestCase
     private function pathsResolver(): object
     {
         return new class () {
-            private ?array $skippedPaths = [];
+            private array $skippedPaths = [];
 
             public function resolve(): array
             {
-                return $this->skippedPaths ?? [];
+                return $this->skippedPaths;
             }
         };
     }

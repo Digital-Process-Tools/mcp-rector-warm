@@ -643,6 +643,7 @@ class RectorRunner implements RunnerInterface
                 ]));
                 $exitCode = 1;
 
+                // @phpstan-ignore finally.exitPoint (deliberate: the finally block's exit($exitCode) below is this worker's real exit point; this return only leaves the try block early)
                 return;
             }
             $this->writeFrame($socket, $this->encodeHandshakeFrame([
@@ -680,6 +681,7 @@ class RectorRunner implements RunnerInterface
             // #185: the session child dies with its worker, never outlives it.
             $this->stopSession();
             @\fclose($socket);
+            // @phpstan-ignore finally.exitPoint (deliberate: this worker process must never return into its caller; see the class docblock)
             exit($exitCode);
         }
     }
@@ -756,9 +758,11 @@ class RectorRunner implements RunnerInterface
         }
         $decoded = $raw === null ? null : \json_decode($raw, true);
         if (!\is_array($decoded) || isset($decoded['error'])) {
+            // @phpstan-ignore function.impossibleType, isset.offset (defensive: $decoded is the warm worker's own untrusted JSON output; PHPStan narrows it from the preceding condition, but a malformed frame is exactly what this guards against)
             $message = \is_array($decoded) && isset($decoded['error'])
                 ? (string) $decoded['error']
                 : 'the warm worker closed its connection unexpectedly';
+            // @phpstan-ignore function.impossibleType (defensive: same untrusted-JSON guard as above)
             if (!\is_array($decoded)) {
                 // A clean EOF with no frame at all also means the worker is gone
                 // (its own end of the socket closed) -- same self-heal as above.
@@ -899,6 +903,7 @@ class RectorRunner implements RunnerInterface
             $chunk = \fread($parentSocket, 65536);
             if ($chunk === false || $chunk === '') {
                 $meta = \stream_get_meta_data($parentSocket);
+                // @phpstan-ignore nullCoalesce.offset (defensive: stream_get_meta_data()'s shape is not fully specified by any stub PHPStan uses here)
                 if ($meta['timed_out'] ?? false) {
                     if ($deadline !== null && \hrtime(true) >= $deadline) {
                         // The grandchild is genuinely wedged, not merely slow
@@ -947,6 +952,7 @@ class RectorRunner implements RunnerInterface
 
         $decoded = $raw === '' ? null : \json_decode($raw, true);
         if (!\is_array($decoded) || isset($decoded['error'])) {
+            // @phpstan-ignore function.impossibleType, isset.offset (defensive: $decoded is the forked grandchild's own untrusted JSON output; PHPStan narrows it from the preceding condition, but a malformed frame is exactly what this guards against)
             $message = \is_array($decoded) && isset($decoded['error'])
                 ? (string) $decoded['error']
                 : "forked rector call produced no output (child exit status {$status})";
@@ -1373,6 +1379,7 @@ class RectorRunner implements RunnerInterface
                 $this->writeFrame($socket, $this->encodeHandshakeFrame(['ok' => false, 'error' => $e->getMessage()]));
                 $exitCode = 1;
 
+                // @phpstan-ignore finally.exitPoint (deliberate: the finally block's exit($exitCode) below is this worker's real exit point; this return only leaves the try block early)
                 return;
             }
             $this->writeFrame($socket, $this->encodeHandshakeFrame([
@@ -1464,6 +1471,7 @@ class RectorRunner implements RunnerInterface
             $exitCode = 1;
         } finally {
             @\fclose($socket);
+            // @phpstan-ignore finally.exitPoint (deliberate: this session child process must never return into its caller; see the class docblock)
             exit($exitCode);
         }
     }
@@ -1651,6 +1659,7 @@ class RectorRunner implements RunnerInterface
                 $exitCode = null;
                 while (true) {
                     $procStatus = \proc_get_status($process);
+                    // @phpstan-ignore identical.alwaysFalse (defensive: proc_get_status()'s documented false-on-failure return is not reflected in the stub's array shape PHPStan infers here)
                     if ($procStatus === false || !$procStatus['running']) {
                         // #73: proc_get_status()'s exitcode field is only valid the
                         // FIRST time it is read after the child has exited -- exactly
@@ -1663,6 +1672,7 @@ class RectorRunner implements RunnerInterface
                         // a fallback for the $procStatus === false case, where no
                         // exit code was ever observed at all.
                         $closeExitCode = \proc_close($process);
+                        // @phpstan-ignore notIdentical.alwaysTrue (defensive: same proc_get_status()-can-return-false guard as above)
                         $exitCode = $procStatus !== false ? $procStatus['exitcode'] : $closeExitCode;
                         break;
                     }
@@ -1711,6 +1721,7 @@ class RectorRunner implements RunnerInterface
                 $stderr = (string) \file_get_contents($stderrFile);
                 $consoleOutput = (string) \file_get_contents($stdoutFile);
                 $diagnostic = \trim($stderr . ($consoleOutput !== '' ? \PHP_EOL . $consoleOutput : ''));
+                // @phpstan-ignore function.impossibleType, isset.offset (defensive: $decoded is the cold subprocess's own untrusted JSON output; PHPStan narrows it from the preceding condition, but a malformed frame is exactly what this guards against)
                 $message = \is_array($decoded) && isset($decoded['error'])
                     ? (string) $decoded['error']
                     : "cold rector subprocess produced no output (exit {$exitCode}): " . $diagnostic;
@@ -1721,6 +1732,7 @@ class RectorRunner implements RunnerInterface
             return $decoded;
         } finally {
             foreach ([$resultFile, $stdoutFile, $stderrFile] as $tempFile) {
+                // @phpstan-ignore function.alreadyNarrowedType (defensive: the array literal is all-string today, but this re-check protects against a future edit widening it)
                 if (\is_string($tempFile) && \is_file($tempFile)) {
                     @\unlink($tempFile);
                 }
@@ -1891,6 +1903,7 @@ class RectorRunner implements RunnerInterface
         $decoded = \is_string($out) ? \json_decode($out, true) : null;
 
         /** @var array<string, array{global_value: string|null, local_value: string|null}> $decoded */
+        // @phpstan-ignore function.alreadyNarrowedType (defensive: the @var tag above documents the expected shape of this untrusted subprocess's JSON output; the is_array() re-check is the real guard if that output is ever malformed)
         return self::$pristineIniBaseline = \is_array($decoded) ? $decoded : [];
     }
 
@@ -1964,6 +1977,7 @@ class RectorRunner implements RunnerInterface
         $baseline = self::loadPristineIniBaseline();
         $args = [];
         foreach ($iniAll as $name => $info) {
+            // @phpstan-ignore function.alreadyNarrowedType (defensive: ini_get_all()'s per-entry shape is not fully specified by any stub PHPStan uses here)
             if (!\is_array($info)) {
                 continue;
             }
@@ -2550,6 +2564,7 @@ class RectorRunner implements RunnerInterface
             return;
         }
         $status = @\proc_get_status($watchdog);
+        // @phpstan-ignore function.alreadyNarrowedType (defensive: proc_get_status()'s documented false-on-failure return is not reflected in the stub's array shape PHPStan infers here)
         if (\is_array($status) && $status['running']) {
             \proc_terminate($watchdog, 9);
         }
@@ -2685,6 +2700,7 @@ class RectorRunner implements RunnerInterface
                 // default_socket_timeout must not be mistaken for the peer closing
                 // the connection here either.
                 $meta = \stream_get_meta_data($socket);
+                // @phpstan-ignore nullCoalesce.offset (defensive: stream_get_meta_data()'s shape is not fully specified by any stub PHPStan uses here)
                 if ($meta['timed_out'] ?? false) {
                     if ($deadlineNs !== null && \hrtime(true) >= $deadlineNs) {
                         // No specific "Ns" figure here, deliberately: this method
@@ -3015,6 +3031,7 @@ class RectorRunner implements RunnerInterface
         $this->outputClass = $this->resolvePrefixed('Symfony\\Component\\Console\\Output\\BufferedOutput');
 
         $app = $container->get($this->appClass);
+        // @phpstan-ignore function.alreadyNarrowedType, function.alreadyNarrowedType (defensive: $container is a plain PSR container whose get() return type PHPStan already narrows via this class's own prior calls; both assert() and is_object() here are the real safety net if that ever stops holding)
         \assert(is_object($app));
         \assert(method_exists($app, 'setAutoExit'));
         \assert(method_exists($app, 'setCatchExceptions'));

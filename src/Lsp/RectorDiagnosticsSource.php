@@ -479,6 +479,7 @@ final readonly class RectorDiagnosticsSource implements BufferDiagnosticsSource,
             }
         }
 
+        // @phpstan-ignore nullCoalesce.offset (defensive: both producers of $result set 'errors' today, but this guards a future one that does not)
         foreach ($result['errors'] ?? [] as $i => $error) {
             $result['errors'][$i]['message'] = self::withoutTempDirectory($error['message']);
         }

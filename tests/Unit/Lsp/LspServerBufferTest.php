@@ -9,6 +9,48 @@ use Dpt\McpRectorWarm\Lsp\LspServer;
 use PHPUnit\Framework\TestCase;
 
 /**
+ * #206: a named (not anonymous) test double for LspServerBufferTest::source()
+ * so that $calls -- not part of the BufferDiagnosticsSource interface -- has
+ * a real, statically-known type instead of relying on PHPStan widening an
+ * anonymous class back to the interface it implements.
+ *
+ * A buffer-capable fake: content containing "fixable" yields one fix, content
+ * containing "broken" yields one error, anything else is clean. Records
+ * every call so a test can assert on what ran.
+ */
+final class LspServerBufferTestFakeSource implements BufferDiagnosticsSource
+{
+    /** @var list<array{kind: string, path: string, content: ?string}> */
+    public array $calls = [];
+
+    public function diagnose(string $absolutePath): array
+    {
+        $this->calls[] = ['kind' => 'disk', 'path' => $absolutePath, 'content' => null];
+
+        return ['fixes' => []];
+    }
+
+    public function diagnoseBuffer(string $absolutePath, string $content): array
+    {
+        $this->calls[] = ['kind' => 'buffer', 'path' => $absolutePath, 'content' => $content];
+
+        if (str_contains($content, 'broken')) {
+            return ['fixes' => [], 'errors' => [['message' => 'Syntax error, unexpected EOF', 'line' => 3]]];
+        }
+
+        if (str_contains($content, 'fixable')) {
+            return ['fixes' => [[
+                'range' => ['start' => ['line' => 1, 'character' => 0], 'end' => ['line' => 2, 'character' => 0]],
+                'newText' => "fixed\n",
+                'rectors' => ['SimplifyIfReturnBoolRector'],
+            ]]];
+        }
+
+        return ['fixes' => []];
+    }
+}
+
+/**
  * #106: diagnostics on unsaved buffers. didChange (full sync) stores the
  * buffer and schedules a debounced run; runDueDiagnostics() computes it once
  * the debounce has elapsed; takeReadyDiagnostics() publishes it only if the
@@ -21,43 +63,9 @@ final class LspServerBufferTest extends TestCase
     /** Far enough in the future that every debounce deadline has passed. */
     private const LATER = 1.0e12;
 
-    /**
-     * A buffer-capable fake: content containing "fixable" yields one fix,
-     * content containing "broken" yields one error, anything else is clean.
-     * Records every call so a test can assert on what ran.
-     */
-    private static function source(): BufferDiagnosticsSource
+    private static function source(): LspServerBufferTestFakeSource
     {
-        return new class implements BufferDiagnosticsSource {
-            /** @var list<array{kind: string, path: string, content: ?string}> */
-            public array $calls = [];
-
-            public function diagnose(string $absolutePath): array
-            {
-                $this->calls[] = ['kind' => 'disk', 'path' => $absolutePath, 'content' => null];
-
-                return ['fixes' => []];
-            }
-
-            public function diagnoseBuffer(string $absolutePath, string $content): array
-            {
-                $this->calls[] = ['kind' => 'buffer', 'path' => $absolutePath, 'content' => $content];
-
-                if (str_contains($content, 'broken')) {
-                    return ['fixes' => [], 'errors' => [['message' => 'Syntax error, unexpected EOF', 'line' => 3]]];
-                }
-
-                if (str_contains($content, 'fixable')) {
-                    return ['fixes' => [[
-                        'range' => ['start' => ['line' => 1, 'character' => 0], 'end' => ['line' => 2, 'character' => 0]],
-                        'newText' => "fixed\n",
-                        'rectors' => ['SimplifyIfReturnBoolRector'],
-                    ]]];
-                }
-
-                return ['fixes' => []];
-            }
-        };
+        return new LspServerBufferTestFakeSource();
     }
 
     /**

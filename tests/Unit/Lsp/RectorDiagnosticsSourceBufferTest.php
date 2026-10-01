@@ -92,8 +92,11 @@ final class RectorDiagnosticsSourceBufferTest extends TestCase
     }
 
     /**
-     * @param \Closure(string $path): string $behaviour gets the path Rector
-     *   was asked to process and returns Rector's raw output (or throws)
+     * @param \Closure(string, list<string>): string $behaviour gets the path
+     *   Rector was asked to process and the argv it was invoked with, and
+     *   returns Rector's raw output (or throws); callers that do not need
+     *   argv simply declare a one-parameter closure, which still satisfies
+     *   this wider signature
      * @param \Closure(resource $handle): bool|null $lockAcquirer #188:
      *   forwarded to RectorDiagnosticsSource's own test seam so a test can
      *   force the lock-failure branch without a second real process.
