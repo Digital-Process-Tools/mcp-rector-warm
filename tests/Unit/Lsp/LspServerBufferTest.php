@@ -65,6 +65,12 @@ final class LspServerBufferTestFakeEditSource implements BufferDiagnosticsSource
         return ['fixes' => []];
     }
 
+    /**
+     * @return array{
+     *   fixes: list<array{range: array{start: array{line:int,character:int}, end: array{line:int,character:int}}, newText: string, rectors: list<string>}>,
+     *   errors?: list<array{message: string, line: int}>,
+     * }
+     */
     public function diagnoseForEdit(string $absolutePath): array
     {
         return ['fixes' => []];
@@ -79,6 +85,12 @@ final class LspServerBufferTestFakeEditSource implements BufferDiagnosticsSource
         ]]];
     }
 
+    /**
+     * @return array{
+     *   fixes: list<array{range: array{start: array{line:int,character:int}, end: array{line:int,character:int}}, newText: string, rectors: list<string>}>,
+     *   errors?: list<array{message: string, line: int}>,
+     * }
+     */
     public function diagnoseBufferForEdit(string $absolutePath, string $content): array
     {
         return ['fixes' => [[

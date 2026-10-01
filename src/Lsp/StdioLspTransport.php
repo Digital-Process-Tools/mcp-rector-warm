@@ -41,6 +41,7 @@ final class StdioLspTransport
      * and then breaks (missing/short header, truncated body) is not EOF: it
      * throws, so a dropped byte is never silently read back as "nothing sent".
      */
+    /** @return array<string, mixed>|null */
     public function read(): ?array
     {
         if ($this->pending !== []) {
@@ -194,6 +195,7 @@ final class StdioLspTransport
         }
     }
 
+    /** @param array<string, mixed> $message */
     public function write(array $message): void
     {
         $body = json_encode($message, JSON_UNESCAPED_SLASHES);
@@ -245,6 +247,7 @@ final class StdioLspTransport
      * what lets LspServer::isProgressCreateRefused() genuinely wait for it
      * instead.
      */
+    /** @return array<string, mixed>|null */
     public function tryRead(float $timeoutSeconds = 0.0): ?array
     {
         return $this->waitForInput($timeoutSeconds) ? $this->read() : null;
@@ -256,6 +259,7 @@ final class StdioLspTransport
      * dispatch on the very next read()/waitForInput() call rather than
      * dropped. See $pending's own docblock.
      */
+    /** @param array<string, mixed> $message */
     public function pushBack(array $message): void
     {
         array_unshift($this->pending, $message);

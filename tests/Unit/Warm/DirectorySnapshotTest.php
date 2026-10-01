@@ -51,7 +51,10 @@ final class DirectorySnapshotTest extends TestCase
         @\rmdir($path);
     }
 
-    /** @param list<string> $excluded */
+    /**
+     * @param list<string> $excluded
+     * @param list<string> $fullRoots
+     */
     private function snapshot(array $excluded = [], array $fullRoots = []): DirectorySnapshot
     {
         $snapshot = new DirectorySnapshot([$this->root], $fullRoots, $excluded, ['php']);

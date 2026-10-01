@@ -112,6 +112,7 @@ final class ProtocolStdoutIsolator
      * unisolated -- see the class docblock on why that is the required
      * fallback, never a thrown error.
      */
+    /** @param list<string> $argv */
     public static function reexecIsolated(string $scriptPath, array $argv): bool
     {
         if (!\is_resource(\STDOUT) || !\is_resource(\STDIN) || !\is_resource(\STDERR)) {
@@ -212,6 +213,7 @@ final class ProtocolStdoutIsolator
      * The stream this process should write protocol bytes to: fd 3 if this IS
      * the re-exec'd isolated child, otherwise the real STDOUT unchanged.
      */
+    /** @return resource */
     public static function protocolStream()
     {
         if (self::isAlreadyIsolatedChild()) {

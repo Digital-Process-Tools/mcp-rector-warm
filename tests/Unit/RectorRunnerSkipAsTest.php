@@ -26,11 +26,13 @@ final class RectorRunnerSkipAsTest extends TestCase
 
         $runner = $this->runnerWith($this->skipper(pathSkipped: true), new class {
             // the renamed-by-a-future-Rector shape: no `skippedPaths`
+            /** @return list<string> */
             public function resolve(): array
             {
                 return [];
             }
         }, new class {
+            /** @return array<string, list<string>|null> */
             public function resolve(): array
             {
                 return [];
@@ -127,8 +129,10 @@ final class RectorRunnerSkipAsTest extends TestCase
     private function pathsResolver(): object
     {
         return new class {
+            /** @var list<string> */
             private array $skippedPaths = [];
 
+            /** @return list<string> */
             public function resolve(): array
             {
                 return $this->skippedPaths;
@@ -147,8 +151,10 @@ final class RectorRunnerSkipAsTest extends TestCase
             // readonly property here would make PHP throw on that write and
             // this stub would stop matching production shape (caught by
             // ReadOnlyPropertyRector wrongly proposing readonly here).
+            /** @param array<string, list<string>|null>|null $skippedClassesToFiles */
             public function __construct(private ?array $skippedClassesToFiles) {}
 
+            /** @return array<string, list<string>|null> */
             public function resolve(): array
             {
                 return $this->skippedClassesToFiles ?? [];
@@ -164,6 +170,7 @@ final class RectorRunnerSkipAsTest extends TestCase
             \Rector\Skipper\SkipCriteriaResolver\SkippedClassResolver::class => $classResolver,
         ];
         $container = new class ($services) {
+            /** @param array<class-string, object> $services */
             public function __construct(private array $services) {}
 
             public function get(string $id): object

@@ -103,6 +103,7 @@ class RectorRunner implements RunnerInterface
 
     private ?object $application = null;
     private ?object $container = null;
+    /** @var class-string|null */
     private ?string $appClass = null;
     private ?string $inputClass = null;
     private ?string $outputClass = null;
@@ -386,7 +387,7 @@ class RectorRunner implements RunnerInterface
      * the branch: forcing the real builtin to return false is not achievable
      * from a test, matching the issue's own stated limit.
      */
-    protected function currentPid()
+    protected function currentPid(): int|false
     {
         return \getmypid();
     }
@@ -2699,6 +2700,7 @@ class RectorRunner implements RunnerInterface
      * encodeForkResult() covers the (now much narrower) case where encoding
      * still fails outright.
      */
+    /** @param array<string, mixed> $payload */
     private function encodeHandshakeFrame(array $payload): string
     {
         $encoded = \json_encode($payload, \JSON_INVALID_UTF8_SUBSTITUTE);
@@ -3180,6 +3182,7 @@ class RectorRunner implements RunnerInterface
         return $skipper->shouldSkipElementAndFilePath($class, $path);
     }
 
+    /** @param list<string>|array<string, list<string>|null> $value */
     private static function overwriteResolved(object $resolver, string $property, array $value): void
     {
         $reflection = new \ReflectionProperty($resolver, $property);
@@ -3661,6 +3664,7 @@ class RectorRunner implements RunnerInterface
     /**
      * Combine detected prefix with an un-prefixed FQN, then force-autoload.
      */
+    /** @return class-string */
     private function resolvePrefixed(string $unprefixedFqn): string
     {
         \assert($this->prefix !== null);
