@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Dpt\McpRectorWarm\Tests\Unit\Lsp;
 
 use Dpt\McpRectorWarm\Lsp\BufferDiagnosticsSource;
+use Dpt\McpRectorWarm\Lsp\EditDiagnosticsSource;
 use Dpt\McpRectorWarm\Lsp\LspServer;
 use PHPUnit\Framework\TestCase;
 
@@ -47,6 +48,44 @@ final class LspServerBufferTestFakeSource implements BufferDiagnosticsSource
         }
 
         return ['fixes' => []];
+    }
+}
+
+/**
+ * #216: same as LspServerBufferTestFakeSource, but also implements
+ * EditDiagnosticsSource so codeAction()'s recompute-before-edit guard has a
+ * buffer-path positive control: diagnoseBuffer() (the cached/stale path) and
+ * diagnoseBufferForEdit() (the forced-no-session/fresh path) deliberately
+ * return different text, the same shape LspServerTest's disk-path test uses.
+ */
+final class LspServerBufferTestFakeEditSource implements BufferDiagnosticsSource, EditDiagnosticsSource
+{
+    public function diagnose(string $absolutePath): array
+    {
+        return ['fixes' => []];
+    }
+
+    public function diagnoseForEdit(string $absolutePath): array
+    {
+        return ['fixes' => []];
+    }
+
+    public function diagnoseBuffer(string $absolutePath, string $content): array
+    {
+        return ['fixes' => [[
+            'range' => ['start' => ['line' => 1, 'character' => 0], 'end' => ['line' => 2, 'character' => 0]],
+            'newText' => "stale\n",
+            'rectors' => ['SimplifyIfReturnBoolRector'],
+        ]]];
+    }
+
+    public function diagnoseBufferForEdit(string $absolutePath, string $content): array
+    {
+        return ['fixes' => [[
+            'range' => ['start' => ['line' => 1, 'character' => 0], 'end' => ['line' => 2, 'character' => 0]],
+            'newText' => "fresh\n",
+            'rectors' => ['SimplifyIfReturnBoolRector'],
+        ]]];
     }
 }
 
@@ -238,6 +277,28 @@ final class LspServerBufferTest extends TestCase
         // for version 1 would land on the wrong text.
         self::change($server, 2, "<?php\n\nfixable\n");
         self::assertSame([], self::codeAction($server));
+    }
+
+    /**
+     * #216, auditor self-review finding (buffer branch had no positive
+     * control): codeAction()'s recompute-before-edit guard has two branches
+     * -- diagnoseBufferForEdit() for an open buffer, diagnoseForEdit() for
+     * disk (already covered in LspServerTest). This pins the buffer one:
+     * diagnoseBuffer() and diagnoseBufferForEdit() deliberately return
+     * different text, so a regression back to the cached (stale) buffer fix
+     * would fail this test.
+     */
+    public function testCodeActionOnAnOpenBufferRecomputesTheEditWithTheSessionForcedOff(): void
+    {
+        $server = new LspServer('1.0.0', new LspServerBufferTestFakeEditSource());
+
+        self::change($server, 1, "<?php\nfixable\n");
+        $server->runDueDiagnostics(self::LATER);
+        $server->takeReadyDiagnostics();
+
+        $actions = self::codeAction($server);
+        self::assertNotSame([], $actions);
+        self::assertSame('fresh' . "\n", $actions[0]['edit']['changes'][self::URI][0]['newText']);
     }
 
     public function testCodeActionsCarryTheVersionWhenTheClientSupportsDocumentChanges(): void

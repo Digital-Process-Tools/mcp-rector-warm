@@ -28,8 +28,10 @@ import time
 from pathlib import Path
 
 import anyio
+import pytest
 
 from mcp_harness import (
+    NO_PCNTL_PLATFORM,
     SESSION_LOG_ENV,
     SESSION_OPT_OUT,
     normalise,
@@ -176,15 +178,24 @@ def test_a_declared_input_starts_a_fresh_session_and_stays_equal_to_cold(tmp_pat
 
 
 def test_a_write_after_the_undeclared_edit_still_equals_cold(tmp_path: Path) -> None:
-    """#216: the dry run above (test_an_undeclared_input_read_by_a_custom_rule_
-    goes_stale_in_the_session) can be stale after the map.json edit -- the write
-    never is, because `dryRun:false` never reaches the session at all
-    (RectorRunner::sessionCandidate()'s unconditional `!$dryRun` guard)."""
+    """#216: with NO env var set at all -- the new default, what every real
+    user hits without opting into anything -- the session is on, so the dry
+    run above (test_an_undeclared_input_read_by_a_custom_rule_goes_stale_in_
+    the_session) can be stale after the map.json edit. The write never is,
+    because `dryRun:false` never reaches the session at all (RectorRunner::
+    sessionCandidate()'s unconditional `!$dryRun` guard, #72, unchanged by
+    #216). Before #216 this scenario only existed for someone who explicitly
+    opted in; #216 makes it the ambient default, which is exactly what this
+    test must now cover -- setting MCP_RECTOR_WARM_SESSION=1 explicitly here
+    would also pass on the pre-#216 code and prove nothing about the flip
+    itself."""
+    if NO_PCNTL_PLATFORM:
+        pytest.skip("no session without pcntl -- nothing #216-specific to pin here")
     root = tmp_path / "project"
     build(root)
     root = root.resolve()
     record = tmp_path / "record"
-    env = {**SESSION_LOG_ENV, "MCP_RECTOR_WARM_SESSION": "1"}
+    env = {**SESSION_LOG_ENV}
 
     async def run() -> None:
         async with open_server(root, record, root / "rector.php", extra_env=env) as server:

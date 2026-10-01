@@ -27,7 +27,11 @@ final class RectorRunnerSessionTest extends TestCase
         $this->file = \sys_get_temp_dir() . '/runner-session-' . \bin2hex(\random_bytes(6)) . '.php';
         \file_put_contents($this->file, '<?php class RunnerSessionFixture {}');
         $this->previousEnv = \getenv(RectorRunner::SESSION_ENV);
-        // Switched on (it is opt-in), so each routing test below is about the call, not the switch.
+        // #216: explicit =1 pins it on regardless of this test process's
+        // ambient environment, so each routing test below is about the call,
+        // not the switch -- unset would already mean on since #216, but
+        // leaving that implicit here would make these tests silently depend
+        // on nothing having set MCP_RECTOR_WARM_SESSION=0 in the shell.
         \putenv(RectorRunner::SESSION_ENV . '=1');
     }
 
