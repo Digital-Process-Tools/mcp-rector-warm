@@ -7,8 +7,20 @@ would be stale by next week.
 ## What this repo is for
 
 Two things: a language server (`bin/rector-warm-lsp`) and an MCP server that **work** for a
-real user -- warm output equal to cold `rector process`, no crash, no hang, no lost edit, no
-junk left in the user's project. Everything else is noise.
+real user. Everything else is noise.
+
+What "work" means, in order of strictness (agreed with the maintainer on 2026-10-01):
+
+1. **Never, on any path:** a crash, a hang, a lost edit, or junk left in the user's project.
+2. **Writes equal cold.** Anything warm writes to a user's files -- the LSP's code actions and
+   `fixWorkspace`, the MCP tool with `dryRun: false` -- must be byte-identical to what cold
+   `rector process` would write. CI cannot catch a wrong write: cold `--dry-run` only reports
+   what is *left* to change, so extra changes warm applied pass it silently.
+3. **Read-only results aim to equal cold, and CI is the backstop.** Diagnostics, hints and dry-run
+   previews are editor feedback. A divergence there costs the user one CI round trip, because
+   users keep running cold `vendor/bin/rector process --dry-run` in CI (the README says so). It
+   is an ordinary bug, ranked by how often real users hit it; a rare one is closed as not
+   planned rather than carried.
 
 Before dispatching or merging anything, ask: does this make the LSP or the MCP server work
 better for someone using it? If not, do not do it. That rules out doc-citation drift,
@@ -49,11 +61,16 @@ request need more than a green CI run:
   user-visible behaviour: a new LSP method or command, a new CLI flag or MCP tool, or a
   new config option. Once CI is green and review has passed, ask the maintainer and wait.
   Do not merge on green.
-- **Every LSP pull request gets an independent end-to-end check before merge.** The
-  lane's own E2E tests are not enough. A second agent writes its own harness, drives
-  the real `bin/rector-warm-lsp` over stdio, and asserts that warm output equals cold
-  `vendor/bin/rector process` output byte for byte. The pull request has to carry that
-  check's result.
+- **A pull request that can change what warm writes gets an independent end-to-end check
+  before merge.** That is any diff touching the code that computes or applies a result:
+  `src/RectorRunner.php`, `src/RectorTool.php`, `src/Warm/`, `bin/rector-warm-worker.php`,
+  `bin/rector-cold-call.php`, `src/Lsp/RectorDiffParser.php`, or the LSP's code-action and
+  `fixWorkspace` handling. The lane's own E2E tests are not enough. A second agent writes its
+  own harness, drives the real server over stdio, applies warm's edits, and asserts the files
+  equal what cold `vendor/bin/rector process` writes, byte for byte. The pull request has to
+  carry that check's result. LSP changes that cannot affect a write (transport, lifecycle,
+  progress, how diagnostics are published) merge on green like any bug fix; their lane tests
+  still have to cover rule 1 (no crash, hang or junk).
 
 These gates live here because a maintainer tick reads this file. A rule kept anywhere
 else (a session's memory, a chat message) does not reach the agent doing the merge.

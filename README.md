@@ -35,7 +35,8 @@ Both ship in one package. Run one, or both side by side.
 ## Same answers. Just faster.
 
 - **Up to 10× faster per file** on Laravel and Symfony, at the median.
-- **Identical output.** Every warm answer in the benchmark was byte-identical to a cold `rector process`, and CI checks warm output against a fresh cold Rector run. Nothing to re-check.
+- **Identical output.** Every warm answer in the benchmark was byte-identical to a cold `rector process`, and CI checks warm output against a fresh cold Rector run.
+- **Keep cold Rector in your CI.** Warm is editor feedback: fast, and built to match cold. Keep `vendor/bin/rector process --dry-run` in CI as the gate, the same as without this tool.
 - **One-time boot.** The first call boots Rector, once per server. An idle server costs nothing.
 - **Edit `rector.php` freely.** Config changes apply on the next call. No restart.
 
