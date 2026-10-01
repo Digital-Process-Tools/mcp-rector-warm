@@ -85,6 +85,7 @@ and a minimal `.supertool.json`:
 
 ```json
 {
+  "presets": ["mcp"],
   "mcp": {
     "rector-warm": {
       "cmd": ["vendor/bin/mcp-rector-warm", "--config=rector.php"],
@@ -125,7 +126,7 @@ rector-mcp  : 1 err       (5.6s)
 
 That is a project decision, not something this server or supertool does for you -- see claude-supertool's README, ["Hard-block native tools"](https://github.com/Digital-Process-Tools/claude-supertool#hard-block-native-tools-optional), for the full list (it also covers the raw shell commands supertool replaces) and the headless-session equivalent.
 
-**[Full supertool setup →](docs/mcp.md)**, including the optional `phpstan-warm` validator alongside this one.
+**[Full supertool setup →](docs/mcp.md)**, including the optional `phpstan` validator (backed by `mcp-phpstan-warm`) alongside this one.
 
 ### Any other MCP client
 

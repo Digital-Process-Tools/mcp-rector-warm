@@ -31,6 +31,7 @@ and a minimal `.supertool.json`:
 
 ```json
 {
+  "presets": ["mcp"],
   "mcp": {
     "rector-warm": {
       "cmd": ["vendor/bin/mcp-rector-warm", "--config=rector.php"],
