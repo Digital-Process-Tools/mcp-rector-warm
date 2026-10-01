@@ -57,10 +57,78 @@ That's the install. PHP 8.2+, Rector ^2.4 comes along as a normal Composer depen
 
 **For:** anyone who lets Claude, Copilot agent mode, Cursor, Cline or another agent refactor PHP.
 
-- **Your agent runs Rector after every edit**, without waiting for Rector to boot each time.
+- **Your agent can run Rector after every edit**, without waiting for Rector to boot each time -- automatically with Claude Code via supertool (below), on request with any other client.
 - **Preview first.** The agent sees the diff; files change only when it asks to write.
 - **Stays inside your project.** Paths outside the working directory are refused.
 - **Any MCP client.** Claude Desktop, VS Code, Cursor, Cline, Continue, Zed.
+
+### With Claude Code (recommended)
+
+Plain MCP has a gap: the agent has to remember to call `rector_process`, and in practice it forgets, or calls it only at the end. [claude-supertool](https://github.com/Digital-Process-Tools/claude-supertool) closes that gap -- its `rector-mcp` validator runs this server after every edit made through a supertool op, and puts the result in the edit's own output, so "runs Rector after every edit" is a fact about the tool instead of a hope about the agent.
+
+Install the plugin, once per machine:
+
+```
+/plugin marketplace add Digital-Process-Tools/claude-marketplace
+/plugin install supertool@dpt-plugins
+```
+
+Restart your Claude Code session afterward -- the plugin's hook only registers at session start.
+
+Then, as a project dependency -- not the global install above, since `.supertool.json` below points at `vendor/bin/`:
+
+```bash
+composer require --dev dpt/mcp-rector-warm
+```
+
+and a minimal `.supertool.json`:
+
+```json
+{
+  "presets": ["mcp"],
+  "mcp": {
+    "rector-warm": {
+      "cmd": ["vendor/bin/mcp-rector-warm", "--config=rector.php"],
+      "match": "*.php",
+      "timeout": 120,
+      "idle_timeout": 1800
+    }
+  },
+  "validators": {
+    "rector": {
+      "cmd": "MCP_RECTOR_CONFIG=rector.php MCP_RECTOR_BIN=vendor/bin/mcp-rector-warm {python} {supertool_dir}/validators/rector-mcp/rector-mcp.py {file}",
+      "match": "*.php",
+      "hooks_into": ["edit", "replace", "replace_lines", "paste", "vim"],
+      "mcp_autospawn": true,
+      "timeout": 120
+    }
+  }
+}
+```
+
+`mcp_autospawn: true` lets the validator start the warm daemon itself on first use, so there is nothing to register as a separate MCP server. After an edit to a PHP file, supertool's own output carries a `[validators]` block with either `rector-mcp : ok` or the Rector finding, right where the edit happened:
+
+```
+[validators]
+rector-mcp  : 1 err       (5.6s)
+     rector.refactor  Would apply ReadOnlyPropertyRector
+```
+
+**The honest caveat:** this only fires on an edit made through one of supertool's own mutating ops (`edit`, `paste`, `replace`, `replace_lines`, `vim`) -- not through Claude Code's built-in `Edit`/`Write` tools, which write to disk with no validator and no rollback. To make supertool the only edit route, deny the native tools in the project's `.claude/settings.json`:
+
+```json
+{
+  "permissions": {
+    "deny": ["Edit", "Write", "MultiEdit", "NotebookEdit"]
+  }
+}
+```
+
+That is a project decision, not something this server or supertool does for you -- see claude-supertool's README, ["Hard-block native tools"](https://github.com/Digital-Process-Tools/claude-supertool#hard-block-native-tools-optional), for the full list (it also covers the raw shell commands supertool replaces) and the headless-session equivalent.
+
+**[Full supertool setup →](docs/mcp.md)**, including the optional `phpstan` validator (backed by `mcp-phpstan-warm`) alongside this one.
+
+### Any other MCP client
 
 Add it to Claude Desktop (`~/Library/Application Support/Claude/claude_desktop_config.json` on macOS, `%APPDATA%\Claude\claude_desktop_config.json` on Windows):
 
