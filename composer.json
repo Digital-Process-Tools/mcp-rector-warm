@@ -23,6 +23,7 @@
     "require-dev": {
         "dpt/mcp-phpstan-warm": "^0.7.1",
         "dpt/mcp-phpunit-warm": "^0.4.1",
+        "friendsofphp/php-cs-fixer": "^3.95",
         "phpstan/phpstan": "^2.2",
         "phpunit/phpcov": "^9.0",
         "phpunit/phpunit": "^10"

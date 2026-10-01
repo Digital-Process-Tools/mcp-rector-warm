@@ -145,5 +145,18 @@
       "resolveFromValidator": "phpunit",
       "message": "new class without test"
     }
+  },
+  "formatters": {
+    "php-cs-fixer": {
+      "cmd": "{python} {supertool_dir}/formatters/php-cs-fixer/php-cs-fixer.py {file}",
+      "match": "*.php",
+      "hooks_into": ["edit", "replace", "replace_lines", "paste", "vim"],
+      "rollback_on_fail": false,
+      "timeout": 30,
+      "env": {
+        "PHPCSFIXER_BIN": "vendor/bin/php-cs-fixer",
+        "PHPCSFIXER_CONFIG": ".php-cs-fixer.dist.php"
+      }
+    }
   }
 }

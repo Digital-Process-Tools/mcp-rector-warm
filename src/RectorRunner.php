@@ -3097,9 +3097,9 @@ class RectorRunner implements RunnerInterface
 
         $this->bootstrapFileHashes = $this->resolveBootstrapFileHashes($bootStartedAt);
 
-        $this->appClass = $this->resolvePrefixed('Symfony\\Component\\Console\\Application');
-        $this->inputClass = $this->resolvePrefixed('Symfony\\Component\\Console\\Input\\ArgvInput');
-        $this->outputClass = $this->resolvePrefixed('Symfony\\Component\\Console\\Output\\BufferedOutput');
+        $this->appClass = $this->resolvePrefixed(\Symfony\Component\Console\Application::class);
+        $this->inputClass = $this->resolvePrefixed(\Symfony\Component\Console\Input\ArgvInput::class);
+        $this->outputClass = $this->resolvePrefixed(\Symfony\Component\Console\Output\BufferedOutput::class);
 
         $app = $container->get($this->appClass);
         \assert(method_exists($app, 'setAutoExit'));
