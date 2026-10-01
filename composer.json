@@ -16,6 +16,11 @@
             "Dpt\\McpRectorWarm\\": "src/"
         }
     },
+    "autoload-dev": {
+        "psr-4": {
+            "Dpt\\McpRectorWarm\\Tests\\Support\\": "tests/Support/"
+        }
+    },
     "bin": ["bin/mcp-rector-warm", "bin/rector-warm-lsp"],
     "config": {
         "sort-packages": true
