@@ -204,6 +204,104 @@ def terminal_events(log: Path, count: int, timeout: float = 5.0) -> list[tuple[s
             return events
 
 
+# #190: the unsaved buffer adds b(): int and changes a() to `return
+# $this->b();`, under a rule that infers a()'s return type from a strictly
+# typed call -- the acceptance scenario named in #190's own issue body.
+RETURN_TYPE_CONFIG = """<?php
+
+declare(strict_types=1);
+
+use Rector\\Config\\RectorConfig;
+use Rector\\TypeDeclaration\\Rector\\ClassMethod\\ReturnTypeFromStrictTypedCallRector;
+use Rector\\ValueObject\\PhpVersion;
+
+return RectorConfig::configure()
+    ->withPaths([__DIR__ . '/src'])
+    ->withPhpVersion(PhpVersion::PHP_83)
+    ->withRules([ReturnTypeFromStrictTypedCallRector::class]);
+"""
+
+FOO_SAVED = """<?php
+
+declare(strict_types=1);
+
+namespace App;
+
+class Foo
+{
+    public function a()
+    {
+        return 1;
+    }
+}
+"""
+
+# a() now returns $this->b(), and b() is brand new -- both only in the buffer.
+FOO_BUFFER = """<?php
+
+declare(strict_types=1);
+
+namespace App;
+
+class Foo
+{
+    public function a()
+    {
+        return $this->b();
+    }
+
+    public function b(): int
+    {
+        return 1;
+    }
+}
+"""
+
+
+def build_return_type_project(root: Path) -> None:
+    for relative, content in {
+        "rector.php": RETURN_TYPE_CONFIG,
+        "vendor/autoload.php": AUTOLOAD,
+        "src/Foo.php": FOO_SAVED,
+    }.items():
+        target = root / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(content, encoding="utf-8")
+
+
+@pytest.mark.parametrize("session_on", [True, False], ids=["session-on", "session-off"])
+def test_190_a_self_call_to_a_brand_new_unsaved_method_is_typed_from_the_buffer_not_the_saved_file(
+    tmp_path: Path, session_on: bool
+) -> None:
+    """Not skipped under NO_PCNTL_PLATFORM on purpose -- #190 reproduces with
+    the session off and pcntl disabled too (the issue's own words), so CI's
+    no-pcntl job must exercise this the same as every other job."""
+    project = tmp_path / "project"
+    build_return_type_project(project)
+    log = tmp_path / "server.stderr"
+    with open(log, "w", encoding="utf-8") as errlog:
+        proc = subprocess.Popen(
+            [php_binary(), str(BIN), f"--working-dir={project}"],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=errlog,
+            env={**os.environ, "MCP_RECTOR_WARM_SESSION": "1" if session_on else "0"},
+        )
+        try:
+            send(proc, {"jsonrpc": "2.0", "id": 1, "method": "initialize",
+                        "params": {"processId": None, "rootUri": None, "capabilities": {}}})
+            read_frame(proc.stdout)
+            foo = (project / "src" / "Foo.php").as_uri()
+
+            # Must fire: b()'s real (buffer) return type makes a()'s own
+            # return type inferable -- for a cold run, and for the LSP buffer.
+            flagged = change_doc(proc, foo, 2, FOO_BUFFER)
+            assert cold_changed(project, "src/Foo.php", FOO_BUFFER) == 1
+            assert len(flagged) == 1 and "ReturnTypeFromStrictTypedCallRector" in flagged[0]["message"], flagged
+        finally:
+            if proc.poll() is None:
+                proc.kill()
+            proc.wait(timeout=10)
+
+
 @pytest.mark.skipif(NO_PCNTL_PLATFORM, reason="no session without pcntl (#108 standby worker per call)")
 def test_a_buffer_copy_is_served_from_the_session_and_leaves_nothing_behind_in_it(tmp_path: Path) -> None:
     project = tmp_path / "project"

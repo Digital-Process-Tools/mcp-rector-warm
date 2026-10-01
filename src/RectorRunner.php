@@ -2863,7 +2863,9 @@ class RectorRunner implements RunnerInterface
 
         [$argv, $skipAs] = self::extractSkipAs($argv);
         if ($skipAs !== null) {
-            $this->applySkipsOfOriginalPath($skipAs, (string) end($argv));
+            $copyPath = (string) end($argv);
+            $this->applySkipsOfOriginalPath($skipAs, $copyPath);
+            self::remapCopyClassesInAutoloader($copyPath);
         }
 
         // ArgvInput expects $_SERVER['argv'] semantics: [scriptName, ...args]
@@ -3010,6 +3012,157 @@ class RectorRunner implements RunnerInterface
                 ));
             }
         }
+    }
+
+    /**
+     * #190: a class the buffer copy declares is also declared, unedited, at
+     * $originalPath -- still on disk, still registered with whatever
+     * autoloader the project uses. PHPStan's standard reflection chain
+     * resolves a class by NAME, not by "which file did Rector just hand me",
+     * so `$this->b()`'s return type (or any other self-reference) is read
+     * from the stale original rather than the copy just given to Rector --
+     * reproducing with the warm session off and pcntl disabled too, since
+     * nothing here is session-specific.
+     *
+     * Two locator families need covering, because which one a given project
+     * hits depends on how it autoloads:
+     *
+     * - a real Composer project: BetterReflection's ComposerSourceLocator
+     *   asks the registered ClassLoader for a file path without loading it.
+     *   Composer\Autoload\ClassLoader::findFile() checks its classMap
+     *   array before falling back to PSR-4, and addClassMap() is public,
+     *   stable API for overriding exactly that -- no vendored-internals
+     *   reflection needed.
+     * - a project with no Composer ClassLoader at all (a hand-rolled
+     *   `vendor/autoload.php` registered via spl_autoload_register(), as
+     *   tests/E2E/test_lsp_session.php's own fixture uses): PHPStan's
+     *   generic autoload-based locator resolves a class by triggering
+     *   class_exists(), which runs every registered autoloader. Prepending
+     *   our own autoloader (spl_autoload_register(..., prepend: true)) puts
+     *   it first in that queue, so it satisfies the lookup -- from the
+     *   copy -- before the project's own (stale) autoloader ever runs.
+     *
+     * Runs only in a process that dies after this one call (the forked
+     * grandchild, or the no-pcntl cold subprocess): nothing here is
+     * restored. Fails open on a parse error in the copy -- the copy is then
+     * diagnosed without the remap, same as applySkipsOfOriginalPath().
+     */
+    private static function remapCopyClassesInAutoloader(string $copyPath): void
+    {
+        try {
+            $content = @\file_get_contents($copyPath);
+            if ($content === false) {
+                if (\defined('STDERR') && \is_resource(\STDERR)) {
+                    @\fwrite(\STDERR, \sprintf(
+                        "mcp-rector-warm: could not read %s to find the classes it declares\n",
+                        $copyPath,
+                    ));
+                }
+
+                return;
+            }
+
+            $classes = self::declaredClassLikeNames($content);
+            if ($classes === []) {
+                return;
+            }
+
+            if (\class_exists(\Composer\Autoload\ClassLoader::class, false)) {
+                $map = \array_fill_keys($classes, $copyPath);
+                foreach (\Composer\Autoload\ClassLoader::getRegisteredLoaders() as $loader) {
+                    $loader->addClassMap($map);
+                }
+            }
+
+            $lookup = \array_fill_keys($classes, true);
+            \spl_autoload_register(static function (string $class) use ($lookup, $copyPath): void {
+                if (isset($lookup[$class])) {
+                    require $copyPath;
+                }
+            }, true, true);
+        } catch (\Throwable $e) {
+            // Fail open, exactly like applySkipsOfOriginalPath(): the copy is
+            // then diagnosed without the remap -- a stale-type result, not a
+            // crashed call -- and the reason is on stderr rather than silent.
+            // Deliberately stage-agnostic wording: this one catch covers a
+            // throw from declaredClassLikeNames() (whose declared classes are
+            // not known yet) as well as one from addClassMap()/
+            // spl_autoload_register() (where they are) -- "the classes it
+            // declares" would misdescribe the former.
+            if (\defined('STDERR') && \is_resource(\STDERR)) {
+                @\fwrite(\STDERR, \sprintf(
+                    "mcp-rector-warm: could not remap %s to win class resolution over its stale original: %s\n",
+                    $copyPath,
+                    $e->getMessage(),
+                ));
+            }
+        }
+    }
+
+    /**
+     * Fully-qualified class/interface/trait/enum names a PHP source
+     * declares, by PHP's own tokenizer -- not Rector's/PHPStan's, because
+     * this must also run on the cold (no session, no pcntl) path before any
+     * Rector container exists. Deliberately shallow: a top-level
+     * `namespace X;`/`namespace X { ... }` declaration, no nested
+     * namespace blocks, `new class` (anonymous) excluded.
+     *
+     * @return list<string>
+     */
+    private static function declaredClassLikeNames(string $content): array
+    {
+        $tokens = \token_get_all($content);
+        $count = \count($tokens);
+        $namespace = '';
+        $names = [];
+
+        for ($i = 0; $i < $count; $i++) {
+            $token = $tokens[$i];
+            if (!\is_array($token)) {
+                continue;
+            }
+
+            if ($token[0] === \T_NAMESPACE) {
+                $namespace = '';
+                for ($j = $i + 1; $j < $count; $j++) {
+                    $next = $tokens[$j];
+                    if ($next === ';' || $next === '{') {
+                        break;
+                    }
+                    if (\is_array($next) && \in_array($next[0], [\T_STRING, \T_NS_SEPARATOR, \T_NAME_QUALIFIED], true)) {
+                        $namespace .= $next[1];
+                    }
+                }
+                continue;
+            }
+
+            if (!\in_array($token[0], [\T_CLASS, \T_INTERFACE, \T_TRAIT, \T_ENUM], true)) {
+                continue;
+            }
+
+            $prev = null;
+            for ($k = $i - 1; $k >= 0; $k--) {
+                $candidate = $tokens[$k];
+                if (\is_array($candidate) && \in_array($candidate[0], [\T_WHITESPACE, \T_COMMENT, \T_DOC_COMMENT], true)) {
+                    continue;
+                }
+                $prev = $candidate;
+                break;
+            }
+            if (\is_array($prev) && $prev[0] === \T_NEW) {
+                continue; // anonymous class expression, not a declaration
+            }
+
+            $j = $i + 1;
+            while ($j < $count && \is_array($tokens[$j]) && $tokens[$j][0] === \T_WHITESPACE) {
+                $j++;
+            }
+            if ($j < $count && \is_array($tokens[$j]) && $tokens[$j][0] === \T_STRING) {
+                $names[] = $namespace === '' ? $tokens[$j][1] : $namespace . '\\' . $tokens[$j][1];
+            }
+        }
+
+        return \array_values(\array_unique($names));
     }
 
     /**
