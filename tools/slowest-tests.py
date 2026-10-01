@@ -30,10 +30,16 @@ def collect_testcases(root: ET.Element) -> list[tuple[str, str, float]]:
     for testcase in root.iter("testcase"):
         name = testcase.get("name", "<unnamed>")
         classname = testcase.get("class") or testcase.get("classname") or ""
-        time_raw = testcase.get("time", "0")
+        time_raw = testcase.get("time")
         try:
-            time_seconds = float(time_raw)
+            time_seconds = float(time_raw) if time_raw is not None else 0.0
         except ValueError:
+            label = f"{classname}::{name}" if classname else name
+            print(
+                f"slowest-tests: {label} has a non-numeric time attribute "
+                f"({time_raw!r}); treating it as 0.0, not a measured fast test",
+                file=sys.stderr,
+            )
             time_seconds = 0.0
         cases.append((classname, name, time_seconds))
     return cases
