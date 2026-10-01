@@ -8,6 +8,86 @@ Install: `composer global require dpt/mcp-rector-warm` (see the [README](../READ
 
 ## Client setup
 
+### With Claude Code (recommended)
+
+[claude-supertool](https://github.com/Digital-Process-Tools/claude-supertool) runs this server as a validator on every edit made through its own ops, so the agent never has to remember to call `rector_process` itself.
+
+Install the plugin, once per machine:
+
+```
+/plugin marketplace add Digital-Process-Tools/claude-marketplace
+/plugin install supertool@dpt-plugins
+```
+
+Restart your Claude Code session afterward -- the plugin's hook only registers at session start.
+
+Then, in your project:
+
+```bash
+composer require --dev dpt/mcp-rector-warm
+```
+
+and a minimal `.supertool.json`:
+
+```json
+{
+  "mcp": {
+    "rector-warm": {
+      "cmd": ["vendor/bin/mcp-rector-warm", "--config=rector.php"],
+      "match": "*.php",
+      "timeout": 120,
+      "idle_timeout": 1800
+    }
+  },
+  "validators": {
+    "rector": {
+      "cmd": "MCP_RECTOR_CONFIG=rector.php MCP_RECTOR_BIN=vendor/bin/mcp-rector-warm {python} {supertool_dir}/validators/rector-mcp/rector-mcp.py {file}",
+      "match": "*.php",
+      "hooks_into": ["edit", "replace", "replace_lines", "paste", "vim"],
+      "mcp_autospawn": true,
+      "timeout": 120
+    }
+  }
+}
+```
+
+`{python}` and `{supertool_dir}` are supertool placeholders, filled in automatically; nothing to edit there. `mcp_autospawn: true` opts this validator into starting the warm daemon itself on first use -- without it, a validator only ever *uses* an already-running daemon and skips rather than waits (see claude-supertool's [mcp-warm-process-servers.md](https://github.com/Digital-Process-Tools/claude-supertool/blob/main/docs/mcp-warm-process-servers.md)), so for a server you are not separately running yourself this key is what makes the warm daemon start at all.
+
+Add the optional `phpstan-warm` validator the same way, alongside `rector`, if the project also uses [`dpt/mcp-phpstan-warm`](https://github.com/Digital-Process-Tools/mcp-phpstan-warm); it hooks into the same edit ops and runs independently.
+
+After an edit to a PHP file, supertool's own output carries a `[validators]` block right where the edit happened -- either a clean result:
+
+```
+[validators]
+rector-mcp  : ok          (0.9s)
+```
+
+or the Rector finding, with the rule that would apply it:
+
+```
+[validators]
+rector-mcp  : 1 err       (5.6s)
+     rector.refactor  Would apply ReadOnlyPropertyRector
+```
+
+**`timeout` here is the validator's own budget**, separate from this server's `--call-timeout` ([below](#call-timeout)): a validator that outruns it is treated the same as a non-zero exit, so a large file or a cold daemon boot on the very first call needs headroom (120s above covers a cold `mcp-rector-warm` boot plus analysis on a typical file; raise it for a slower machine or a much larger one).
+
+**`engine_glitches`** (an optional key on the validator, not shown above) names Rector-internal error substrings -- e.g. `"System error:"`, `"toMutatingScope() on null"` -- that the validator should report as a glitch rather than a genuine finding, so a transient Rector crash does not read as "your code has a problem".
+
+**The warm session** (`MCP_RECTOR_WARM_SESSION`, on by default since [#220](https://github.com/Digital-Process-Tools/mcp-rector-warm/issues/220)) is this server's own setting, not supertool's -- it keeps a long-lived session child warm across calls for faster analysis, and every write still forks fresh from a pristine worker regardless of the setting. See [how it works](how-it-works.md#1b-one-session-child-keeps-the-analysis-warm-between-calls-185) for what it watches and its one documented limit.
+
+**The honest caveat:** this only fires on an edit made through one of supertool's own mutating ops (`edit`, `paste`, `replace`, `vim`) -- not through Claude Code's built-in `Edit`/`Write` tools, which write to disk with no validator and no rollback. To make supertool the only edit route, deny the native tools in the project's `.claude/settings.json`:
+
+```json
+{
+  "permissions": {
+    "deny": ["Edit", "Write", "MultiEdit", "NotebookEdit"]
+  }
+}
+```
+
+That is a project decision, not something this server or supertool does for you -- see claude-supertool's README, ["Hard-block native tools"](https://github.com/Digital-Process-Tools/claude-supertool#hard-block-native-tools-optional), for the full list (it also covers the raw shell commands supertool replaces) and the headless-session (`claude -p`) equivalent.
+
 ### Claude Desktop
 
 Edit `~/Library/Application Support/Claude/claude_desktop_config.json` (macOS) or `%APPDATA%\Claude\claude_desktop_config.json` (Windows):
