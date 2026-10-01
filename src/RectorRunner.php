@@ -3068,9 +3068,14 @@ class RectorRunner implements RunnerInterface
             // Fail open, exactly like applySkipsOfOriginalPath(): the copy is
             // then diagnosed without the remap -- a stale-type result, not a
             // crashed call -- and the reason is on stderr rather than silent.
+            // Deliberately stage-agnostic wording: this one catch covers a
+            // throw from declaredClassLikeNames() (whose declared classes are
+            // not known yet) as well as one from addClassMap()/
+            // spl_autoload_register() (where they are) -- "the classes it
+            // declares" would misdescribe the former.
             if (\defined('STDERR') && \is_resource(\STDERR)) {
                 @\fwrite(\STDERR, \sprintf(
-                    "mcp-rector-warm: could not remap the classes %s declares to it: %s\n",
+                    "mcp-rector-warm: could not remap %s to win class resolution over its stale original: %s\n",
                     $copyPath,
                     $e->getMessage(),
                 ));
