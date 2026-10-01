@@ -124,3 +124,69 @@ fragment whose claim is about the code).
   path; the catch block itself already guards the `fwrite()` correctly and the inline comment beside
   it already documents the forked-grandchild case accurately. One-off doc-accuracy finding, not an
   agent-facing lesson -- filed as #170.
+- **`trap.d/168.processtree-isalive-no-null.md`** (still true, checked against HEAD by curate
+  2026-10-01) -- `ProcessTree::isAlive()` (`src/Support/ProcessTree.php:165`) still returns a
+  bool-only `@\posix_kill($pid, 0) || \posix_get_last_error() === 1`, which can never produce the
+  null its own three-way docblock contract promises. One-off finding about the code, not an
+  agent-facing lesson -- filed as #235.
+- **`trap.d/179.docs-lsp-startup-sweep-stale.md`** (already fixed, checked against HEAD by curate
+  2026-10-01) -- `docs/lsp.md:66-78` now correctly describes the lock-based ownership model (no
+  startup walk; a 0.7.1-or-earlier leftover is not swept automatically), and the stale "startup
+  sweep" comments in `src/Lsp/RectorDiagnosticsSource.php` (around lines 226 and 277) now
+  correctly describe the per-directory check and name #179 as the commit that dropped the
+  startup walk. Fixed by #188 / PR #202 (commit `a0fb20dcc99d`), which explicitly named this
+  fragment in its own fix list. No rule needed.
+- **`trap.d/179.lock-failure-leaves-orphaned-tempdir.md`** (already fixed, checked against HEAD
+  by curate 2026-10-01) -- `src/Lsp/RectorDiagnosticsSource.php`'s lock-failure branch (around
+  lines 353-372) now unlinks `.lock` before `rmdir()`, exactly the fix this fragment named as
+  missing, and `TempCopySweeper::reclaimStaleOwnLock()` (referenced at the `is_dir($tempDirectory)`
+  guard) now reclaims a directory left holding only an empty, unlockable `.lock`. Fixed by #188 /
+  PR #202 (commit `a0fb20dcc99d`). No rule needed.
+- **`trap.d/185.phpstan-ships-as-phar.md`** (confirmed accurate against HEAD, checked by curate
+  2026-10-01) -- not a defect report: it describes how `Warm\SessionHooks::installParserHook()`
+  and `Warm\TrackingParser` hook PHPStan's live `pathRoutingParser` service rather than patching
+  the phar-bundled `CachedParser`. That exact design is already documented in full in
+  `SessionHooks.php`'s own class docblock and `TrackingParser.php`'s own docblock. No rule
+  needed -- the lesson already lives next to the code it describes.
+- **`trap.d/185.tracker-null-signature-collapse.md`** (still true, checked against HEAD by curate
+  2026-10-01) -- `DependencyFileTracker::sig()` (`src/Warm/DependencyFileTracker.php`) still
+  returns null both for a genuine stat() failure and for a path that was already unstat-able at
+  `record()` time, and `checkStale()`'s plain `!==` comparison still cannot tell the two apart.
+  One-off finding about the code -- filed as #236.
+- **`trap.d/189.directorysnapshot-silent-unreadable-dir.md`** (still true, checked against HEAD
+  by curate 2026-10-01) -- `DirectorySnapshot::walk()`/`scan()`
+  (`src/Warm/DirectorySnapshot.php:154-157`, `:186-189`) still return silently, recording
+  nothing, when a directory cannot be stat()'d or listed. One-off finding about the code, not an
+  agent-facing lesson -- filed as #237.
+- **`trap.d/189.session-handshake-timeout-no-fallback.md`** (still true, checked against HEAD by
+  curate 2026-10-01) -- `RectorRunner::spawnSession()`'s handshake read (around lines 1298-1307)
+  still throws the generic "the analysis was killed" message and never calls `disableSession()`
+  when the deadline elapses during session-child startup, so the fork fallback #189 documents
+  elsewhere does not run on this path. One-off finding about the code -- filed as #238.
+- **`trap.d/189.tracker-record-never-passes-toctou-hash.md`** (still true, checked against HEAD
+  by curate 2026-10-01) -- `WarmSession::recordRead()` (`src/Warm/WarmSession.php:101-106`) is
+  still the only production caller of `DependencyFileTracker::record()`, and it still always
+  passes `null` for `$readSha`, leaving the TOCTOU guard permanently dark for
+  `afterInSessionCall()`'s post-call recording. One-off finding about the code -- filed as #239.
+- **`trap.d/195.no-e2e-fixture-for-project-owns-rector.md`** (still true, checked against HEAD by
+  curate 2026-10-01) -- no fixture under `tests/Fixtures` ships a real `vendor/rector/rector`
+  directory, so the #195 `projectShipsOwnRector()`/`ensureProjectAutoloaded()` guard is still
+  exercised only via `ReflectionMethod` unit tests, never through the real
+  `RectorTool -> RectorRunner::run()` call path. One-off finding about test coverage -- filed as
+  #240.
+- **`trap.d/216.codeaction-recompute-error-shape.md`** (still true, checked against HEAD by
+  curate 2026-10-01) -- `LspServer::codeAction()`'s #216 recompute (around lines 1077-1086)
+  still reads only `$fresh['fixes']` and drops `$fresh['errors']` on the floor, so a genuine
+  Rector failure on the forced recompute still reports identically to "nothing to fix here".
+  One-off finding about the code -- filed as #241.
+- **`trap.d/225.scratch-probe-needs-paste-not-heredoc.md`** (confirmed accurate against HEAD,
+  checked by curate 2026-10-01) -- both halves are already covered by existing rules rather than
+  needing a new one. The `cat >`/`python3 - <<EOF` refusal
+  (`.claude/jit-context/tools/01-oss/python-heredoc-writes-are-unvalidated.md`, owned layer, not
+  editable here) matches on the command shape alone, with no exception for a path outside the
+  project tree, so it already fires on a `/tmp` scratch probe exactly as this fragment found by
+  trying it -- the fragment's complaint is about the rule's own framing reading as project-only,
+  which this pass cannot fix (owned layer). The TOML triple-quoted-literal backslash gotcha is
+  already stated in
+  `.claude/jit-context/tools/00-manual/supertool-write-op-payload-pitfalls.md`. No new rule
+  needed.
