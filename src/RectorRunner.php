@@ -2007,9 +2007,16 @@ class RectorRunner implements RunnerInterface
      * the daemon original command line (no /proc on Windows, the platform this
      * whole no-pcntl path exists for).
      *
+     * Public: #194's ProtocolStdoutIsolator reuses this exact mechanism for its
+     * own re-exec (rather than a naive global_value-vs-local_value diff, which
+     * this method's own history (#125) already found to silently drop any
+     * override actually passed via -d -- the CLI SAPI folds a real -d flag
+     * into BOTH local_value and global_value, making the naive comparison see
+     * no difference at all).
+     *
      * @return list<string>
      */
-    private static function collectIniOverrideArgs(): array
+    public static function collectIniOverrideArgs(): array
     {
         return self::collectIniOverrideArgsFrom(\ini_get_all(null, true));
     }

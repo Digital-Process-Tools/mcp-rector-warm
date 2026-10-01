@@ -12,13 +12,6 @@ declare(strict_types=1);
 // something downstream still expects \STDOUT to be a valid, open resource).
 ini_set('display_errors', 'stderr');
 
-// Duplicate the real stdout descriptor up front, before anything else runs:
-// handed explicitly to StdioTransport below, so the MCP transport keeps
-// writing to the real pipe even if something later closes/reopens the
-// STDOUT constant for its own reasons (the forked analysis child already
-// does exactly that to its own copy of fd 1/2 -- see RectorRunner::runForked()).
-$mcpStdout = @fopen('php://fd/1', 'wb') ?: STDOUT;
-
 @ini_set('memory_limit', '-1');
 // Dual-mode autoload: local clone vs. composer-global install.
 foreach ([
@@ -31,9 +24,26 @@ foreach ([
     }
 }
 
+use Dpt\McpRectorWarm\Support\ProtocolStdoutIsolator;
 use Dpt\McpRectorWarm\Support\ServerVersion;
 use Mcp\Server;
 use Mcp\Server\Transport\StdioTransport;
+
+// #194: isolate the real protocol stdout at the process level BEFORE the
+// daemon ever forks an analysing child, so a rule/project file writing
+// straight to STDOUT/php://stdout cannot corrupt the MCP stream. See
+// ProtocolStdoutIsolator's own class docblock for the full mechanism and why
+// every failure here falls through to the previous (unisolated) behaviour
+// rather than refusing to start.
+if (ProtocolStdoutIsolator::shouldIsolateHere()) {
+    ProtocolStdoutIsolator::reexecIsolated(__FILE__, $argv);
+}
+
+// The real protocol stream: fd 3 if #194's isolation above ran and THIS
+// process is its re-exec'd child, otherwise the ordinary STDOUT (isolation
+// unsupported/disabled/already failed through) -- see
+// ProtocolStdoutIsolator::protocolStream() for the fallback reasoning.
+$mcpStdout = ProtocolStdoutIsolator::protocolStream();
 
 // Parse our own --working-dir and --call-timeout flags BEFORE loading rector —
 // keeps Server lean. --config is deliberately NOT parsed out here:

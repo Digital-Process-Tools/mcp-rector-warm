@@ -99,6 +99,7 @@ import yaml
 
 from mcp_harness import (
     EXPECT_COLD_EVERY_CALL,
+    NO_PCNTL_PLATFORM,
     REPO,
     SESSION_LOG_ENV,
     SESSION_OPT_OUT,
@@ -398,7 +399,19 @@ async def call_step(
         # persistent worker for its whole life (RectorRunner's own class
         # docblock), so more than one live descendant here is itself a finding,
         # not only a zombie one. #185: plus the worker's one session child.
-        assert_no_zombie_descendants(server.record_dir, max_live=2 if session_on else 1)
+        # #194: on a platform where isolation engages (pcntl available, same
+        # gate ProtocolStdoutIsolator::shouldIsolateHere() uses), daemon_pid()
+        # now names the thin re-exec WRAPPER (stdio_tap.py spawns it directly,
+        # same as before) rather than the process actually doing the work --
+        # that work now runs one layer down, in the wrapper's own re-exec'd
+        # child, which is itself a PERMANENT live descendant for the whole
+        # daemon lifetime (not a leak: see ProtocolStdoutIsolator's own class
+        # docblock for why this layer exists and why it is kept alive rather
+        # than collapsed back into the original pid, which PHP's lack of
+        # dup2() makes impossible).
+        isolation_active = not NO_PCNTL_PLATFORM
+        max_live = (2 if session_on else 1) + (1 if isolation_active else 0)
+        assert_no_zombie_descendants(server.record_dir, max_live=max_live)
 
 
 @pytest.mark.parametrize(("scenario_file", "data"), collect())

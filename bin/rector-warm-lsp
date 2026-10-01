@@ -25,7 +25,16 @@ use Dpt\McpRectorWarm\Lsp\LspServer;
 use Dpt\McpRectorWarm\Lsp\RectorDiagnosticsSource;
 use Dpt\McpRectorWarm\Lsp\StdioLspTransport;
 use Dpt\McpRectorWarm\RectorTool;
+use Dpt\McpRectorWarm\Support\ProtocolStdoutIsolator;
 use Dpt\McpRectorWarm\Support\ServerVersion;
+
+// #194: same isolation as bin/mcp-rector-warm -- see ProtocolStdoutIsolator's
+// own class docblock. A rule/project file writing straight to STDOUT during
+// analysis must not corrupt the Content-Length-framed LSP stream either.
+if (ProtocolStdoutIsolator::shouldIsolateHere()) {
+    ProtocolStdoutIsolator::reexecIsolated(__FILE__, $argv);
+}
+$lspStdout = ProtocolStdoutIsolator::protocolStream();
 
 // v1 (#52/#53): --working-dir is parsed here, same flag/behaviour as
 // bin/mcp-rector-warm. --config is deliberately NOT parsed out here either,
@@ -48,7 +57,7 @@ if ($workingDir !== null) {
     chdir($workingDir);
 }
 
-$transport = new StdioLspTransport(STDIN, STDOUT);
+$transport = new StdioLspTransport(STDIN, $lspStdout);
 $diagnostics = new RectorDiagnosticsSource(new RectorTool());
 
 $server = new LspServer(

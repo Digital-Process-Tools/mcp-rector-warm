@@ -1,0 +1,62 @@
+description: "#194 positive control: without pcntl, RectorRunner never forks (canFork() is false), so the SAME noisy rule that corrupts a pcntl-forked call's stdout must already be harmless here, both before and after the #194 fix -- pinning that the no-pcntl path never needed the re-exec isolation and the fix does not change it."
+oracle: true
+php_ini:
+  disable_functions: pcntl_fork
+config: |
+  <?php
+
+  declare(strict_types=1);
+
+  use PhpParser\Node;
+  use PhpParser\Node\Stmt\Class_;
+  use Rector\Config\RectorConfig;
+  use Rector\Php82\Rector\Class_\ReadOnlyClassRector;
+  use Rector\Rector\AbstractRector;
+  use Rector\ValueObject\PhpVersion;
+
+  final class NoisyRector extends AbstractRector
+  {
+      public function getNodeTypes(): array
+      {
+          return [Class_::class];
+      }
+
+      public function refactor(Node $node): ?Node
+      {
+          \fwrite(\STDOUT, "direct fwrite(STDOUT) noise\n");
+          \fwrite(\STDERR, "direct fwrite(STDERR) noise\n");
+          $stdout = \fopen('php://stdout', 'wb');
+          if ($stdout !== false) {
+              \fwrite($stdout, "php://stdout noise\n");
+              \fclose($stdout);
+          }
+          echo "echo noise\n";
+          print "print noise\n";
+          @\trigger_error('a warning during analysis', \E_USER_WARNING);
+
+          return null;
+      }
+  }
+
+  return RectorConfig::configure()
+      ->withPaths([__DIR__ . "/src"])
+      ->withPhpVersion(PhpVersion::PHP_83)
+      ->withRules([NoisyRector::class, ReadOnlyClassRector::class]);
+files:
+  src/Money.php: |
+    <?php
+
+    declare(strict_types=1);
+
+    final class Money
+    {
+        public function __construct(private readonly int $amount)
+        {
+        }
+    }
+steps:
+  - call: src/Money.php
+    expect:
+      is_error: false
+      changed: 1
+      diff_contains: "+final readonly class Money"
