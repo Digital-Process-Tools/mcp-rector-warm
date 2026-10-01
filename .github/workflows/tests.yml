@@ -430,7 +430,11 @@ jobs:
           # replaces the compiled-in scan dir rather than adding to it, so
           # overwriting it outright would silently unload every extension
           # setup-php just enabled.
-          default_scan_dir="$(php --ini | sed -n 's/^Scan for additional \.ini files in *//p')"
+          # `php --ini` prints "...files in:" with the colon directly adjacent
+          # to "in" (no space before it) -- a pattern that only strips spaces
+          # after "in" leaves a stray leading ": " on the captured path, which
+          # resolves to no real directory. (Reproduced on PHP 8.2/8.3 locally.)
+          default_scan_dir="$(php --ini | sed -n 's/^Scan for additional \.ini files in: *//p')"
           {
             printf 'auto_prepend_file = %s/tests/coverage/prepend.php\n' "$PWD"
             # pcov's own default (no ini override) is '<cwd>/src', not the
@@ -467,7 +471,23 @@ jobs:
         if: ${{ !cancelled() }}
         shell: bash
         run: |
+          # Self-check, not a gate (#209 is still "measure, not gate" --
+          # this is informational only): .coverage-run/cov always holds at
+          # least the top-level run own 00-main.cov, so phpcov merge never
+          # fails outright even if every forked child/subprocess silently
+          # failed to write its own file -- the job would stay green with
+          # before == after and nothing else would say so.
+          cov_count=$(find .coverage-run/cov -name "*.cov" | wc -l | tr -d " ")
           {
+            if [ "$cov_count" -le 1 ]; then
+              echo "### ${{ matrix.os }}: WARNING -- only ${cov_count} .cov file(s) found (#218)"
+              echo "Expected the top-level runs own 00-main.cov plus at least one per"
+              echo "forked child / proc_open() subprocess. This run produced none of the"
+              echo "latter, so the \"after\" numbers below are not measuring anything the"
+              echo "fork/subprocess mechanism added."
+            else
+              echo "### ${{ matrix.os }}: ${cov_count} .cov files merged (#218)"
+            fi
             echo "### ${{ matrix.os }}: before merging forked/subprocess children (#218)"
             echo '```text'
             cat coverage-before.txt
