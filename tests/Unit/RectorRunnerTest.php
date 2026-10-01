@@ -695,9 +695,7 @@ final class RectorRunnerTest extends TestCase
                     . 'that difference is exactly what #81 flaked on',
                 );
             } finally {
-                if (isset($client) && $client !== false) {
-                    fclose($client);
-                }
+                fclose($client);
             }
         } finally {
             fclose($server);
@@ -1741,6 +1739,17 @@ final class RectorRunnerTest extends TestCase
      * SIGKILLs the driver ("daemon") process and polls how long the reported
      * worker pid keeps answering kill(pid, 0).
      */
+    /**
+     * @phpstan-impure PHPStan otherwise assumes this is pure and "remembers"
+     *   the first return value for the rest of the scope -- but a process can
+     *   genuinely die between two calls with the same $pid, which is exactly
+     *   what the poll loop below depends on observing.
+     */
+    private static function isAlive(int $pid): bool
+    {
+        return posix_kill($pid, 0);
+    }
+
     public function testWarmWorkerExitsPromptlyWhenItsDaemonIsKilledMidCall(): void
     {
         if (!\function_exists('posix_kill') || !\function_exists('pcntl_fork')) {
@@ -1807,11 +1816,12 @@ final class RectorRunnerTest extends TestCase
             }
             self::assertNotNull($workerPid, "driver never reported a worker pid; stdout so far: {$buffer}");
             self::assertTrue(
-                posix_kill($workerPid, 0),
+                self::isAlive($workerPid),
                 'must fire: the reported worker pid must genuinely be alive right after boot()',
             );
 
             $status = proc_get_status($proc);
+            // @phpstan-ignore staticMethod.alreadyNarrowedType (defensive: proc_get_status()'s documented false-on-failure return is not reflected in the stub's array shape PHPStan infers here)
             self::assertIsArray($status);
             $daemonPid = (int) $status['pid'];
 
@@ -1828,14 +1838,14 @@ final class RectorRunnerTest extends TestCase
             // poll (or a pid reused instantly) would pass this test for free
             // by finding "no process" from the very first check.
             self::assertTrue(
-                posix_kill($workerPid, 0),
+                self::isAlive($workerPid),
                 'must fire: the worker must still exist immediately after the kill -- otherwise the poll below is vacuous',
             );
 
             $pollDeadline = microtime(true) + 8.0;
             $stillAlive = true;
             while (microtime(true) < $pollDeadline) {
-                if (!posix_kill($workerPid, 0)) {
+                if (!self::isAlive($workerPid)) {
                     $stillAlive = false;
                     break;
                 }
@@ -2015,18 +2025,12 @@ final class RectorRunnerTest extends TestCase
     {
         $runner = new RectorRunner();
 
-        $observedEnvDuringRun = null;
-        $application = new class ($observedEnvDuringRun) {
-            private $ref;
-
-            public function __construct(&$ref)
-            {
-                $this->ref = &$ref;
-            }
+        $application = new class () {
+            public string|false $observedEnvDuringRun = false;
 
             public function run(object $input, object $output): int
             {
-                $this->ref = getenv('RECTOR_ALLOW_XDEBUG');
+                $this->observedEnvDuringRun = getenv('RECTOR_ALLOW_XDEBUG');
 
                 return 0;
             }
@@ -2039,7 +2043,7 @@ final class RectorRunnerTest extends TestCase
 
         self::assertSame(
             '1',
-            $observedEnvDuringRun,
+            $application->observedEnvDuringRun,
             'RECTOR_ALLOW_XDEBUG must be "1" while application->run() executes, so '
             . "XdebugHandler::check() never restarts the process using stale argv",
         );
@@ -2290,7 +2294,7 @@ final class RectorRunnerTest extends TestCase
 final readonly class RectorRunnerTest184FakeInput
 {
     /** @param list<string> $argv */
-    public function __construct(array $argv)
+    public function __construct(public array $argv)
     {
     }
 }
@@ -2318,7 +2322,10 @@ final class RectorRunnerTest63CaptureFilter extends \php_user_filter
     {
         while ($bucket = stream_bucket_make_writeable($in)) {
             self::$captured .= $bucket->data;
-            $consumed += $bucket->datalen;
+            // php_user_filter::filter()'s &$consumed is declared int, but
+            // StreamBucket::$datalen is int|float (it can exceed PHP_INT_MAX
+            // on a 32-bit build) -- narrow explicitly to satisfy the by-ref type.
+            $consumed += (int) $bucket->datalen;
             stream_bucket_append($out, $bucket);
         }
 
@@ -2338,7 +2345,10 @@ final class RectorRunnerTestGenericCaptureFilter extends \php_user_filter
     {
         while ($bucket = stream_bucket_make_writeable($in)) {
             self::$captured .= $bucket->data;
-            $consumed += $bucket->datalen;
+            // php_user_filter::filter()'s &$consumed is declared int, but
+            // StreamBucket::$datalen is int|float (it can exceed PHP_INT_MAX
+            // on a 32-bit build) -- narrow explicitly to satisfy the by-ref type.
+            $consumed += (int) $bucket->datalen;
             stream_bucket_append($out, $bucket);
         }
 

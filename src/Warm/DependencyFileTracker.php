@@ -152,6 +152,7 @@ final class DependencyFileTracker
      *   indistinguishable from one this method is about to insert for the
      *   first time.
      */
+    // @phpstan-ignore parameterByRef.unusedType (the ?bool|null-default shape is this by-ref parameter's calling convention; narrowing it to bool is a signature change out of scope here)
     private function archivePathOrSelf(string $path, ?bool &$alreadyTracked = null): string
     {
         $alreadyTracked = false;

@@ -806,6 +806,7 @@ final class RectorRunnerStandbyWorkerTest extends TestCase
             );
 
             $status = proc_get_status($proc);
+            // @phpstan-ignore staticMethod.alreadyNarrowedType (defensive: proc_get_status()'s documented false-on-failure return is not reflected in the stub's array shape PHPStan infers here)
             self::assertIsArray($status);
             $daemonPid = (int) $status['pid'];
 
@@ -1055,6 +1056,12 @@ final class RectorRunnerStandbyWorkerTest extends TestCase
         }
     }
 
+    /**
+     * @phpstan-impure PHPStan otherwise assumes this is pure and "remembers"
+     *   the first return value for the rest of the scope -- but a process can
+     *   genuinely die between two calls with the same $pid, which is exactly
+     *   what every poll loop in this file depends on observing.
+     */
     private static function isAlive(int $pid): bool
     {
         if (\PHP_OS_FAMILY === 'Windows') {

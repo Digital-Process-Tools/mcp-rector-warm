@@ -458,11 +458,8 @@ final class LspServerTest extends TestCase
         // distinguishes (plain drive letter vs. percent-encoded colon) --
         // the second is reasoned rather than observed (no Windows here), but
         // the string transformation itself is exercised on any platform.
-        $seen = null;
-        $capturing = new class ($seen) implements DiagnosticsSource {
-            public function __construct(private mixed &$seen)
-            {
-            }
+        $capturing = new class implements DiagnosticsSource {
+            public ?string $seen = null;
 
             public function diagnose(string $absolutePath): array
             {
@@ -479,14 +476,14 @@ final class LspServerTest extends TestCase
         ];
 
         foreach ($cases as $uri => $expectedPath) {
-            $seen = null;
+            $capturing->seen = null;
             $server = new LspServer('1.0.0', $capturing);
             $server->handle([
                 'jsonrpc' => '2.0',
                 'method' => 'textDocument/didOpen',
                 'params' => ['textDocument' => ['uri' => $uri, 'version' => 1]],
             ]);
-            self::assertSame($expectedPath, $seen, $uri);
+            self::assertSame($expectedPath, $capturing->seen, $uri);
         }
     }
 
@@ -498,11 +495,8 @@ final class LspServerTest extends TestCase
         // `/share/A.php` (a plausible-looking but wrong, host-free path).
         // Deliberate handling: fold the host back in as a `\\host\share`
         // UNC prefix, backslash-separated, the form Windows itself expects.
-        $seen = null;
-        $capturing = new class ($seen) implements DiagnosticsSource {
-            public function __construct(private mixed &$seen)
-            {
-            }
+        $capturing = new class implements DiagnosticsSource {
+            public ?string $seen = null;
 
             public function diagnose(string $absolutePath): array
             {
@@ -519,7 +513,7 @@ final class LspServerTest extends TestCase
             'params' => ['textDocument' => ['uri' => 'file://server/share/A.php', 'version' => 1]],
         ]);
 
-        self::assertSame('\\\\server\\share\\A.php', $seen);
+        self::assertSame('\\\\server\\share\\A.php', $capturing->seen);
     }
 
     public function testDidOpenOnATwoSlashDriveLetterUriIsNotTreatedAsUnc(): void
@@ -533,11 +527,8 @@ final class LspServerTest extends TestCase
         // `\\c\foo\bar.php` instead of the intended `c:/foo/bar.php`. A
         // single-character host is a drive letter, never a real UNC server
         // name.
-        $seen = null;
-        $capturing = new class ($seen) implements DiagnosticsSource {
-            public function __construct(private mixed &$seen)
-            {
-            }
+        $capturing = new class implements DiagnosticsSource {
+            public ?string $seen = null;
 
             public function diagnose(string $absolutePath): array
             {
@@ -554,7 +545,7 @@ final class LspServerTest extends TestCase
             'params' => ['textDocument' => ['uri' => 'file://c:/foo/bar.php', 'version' => 1]],
         ]);
 
-        self::assertSame('c:/foo/bar.php', $seen);
+        self::assertSame('c:/foo/bar.php', $capturing->seen);
     }
 
     public function testDidOpenOnALocalhostAuthorityIsNotTreatedAsUnc(): void
@@ -563,11 +554,8 @@ final class LspServerTest extends TestCase
         // RFC 8089's spelling for an empty authority, not a UNC host -- it
         // must resolve exactly like the bare `file:///...` form, never grow
         // a `\\localhost\` prefix.
-        $seen = null;
-        $capturing = new class ($seen) implements DiagnosticsSource {
-            public function __construct(private mixed &$seen)
-            {
-            }
+        $capturing = new class implements DiagnosticsSource {
+            public ?string $seen = null;
 
             public function diagnose(string $absolutePath): array
             {
@@ -584,7 +572,7 @@ final class LspServerTest extends TestCase
             'params' => ['textDocument' => ['uri' => 'file://localhost/tmp/Sample.php', 'version' => 1]],
         ]);
 
-        self::assertSame('/tmp/Sample.php', $seen);
+        self::assertSame('/tmp/Sample.php', $capturing->seen);
     }
 
     public function testWatchedRectorConfigChangeReDiagnosesEveryOpenDocument(): void
@@ -933,10 +921,12 @@ final class LspServerTest extends TestCase
             'params' => ['changes' => [['uri' => 'file:///tmp/rector.php', 'type' => 2]]],
         ];
         $server->handle($configChange);
+        /** @var list<string> $firstOrder */
         $firstOrder = $source->order;
         $source->order = [];
 
         $server->handle($configChange);
+        /** @var list<string> $secondOrder */
         $secondOrder = $source->order;
 
         self::assertSame(['/tmp/B.php', '/tmp/A.php'], $firstOrder);
@@ -1695,7 +1685,7 @@ final class LspServerTest extends TestCase
         $server = new LspServer(
             '1.0.0',
             self::fakeSource([]),
-            tryReadAhead: static function (float $timeoutSeconds) use ($unrelated, $realReply, $calls): ?array {
+            tryReadAhead: static function (float $timeoutSeconds) use ($unrelated, $realReply, $calls): array {
                 $calls->count++;
 
                 return $calls->count === 1 ? $unrelated : $realReply;
