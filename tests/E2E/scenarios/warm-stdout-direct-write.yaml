@@ -1,0 +1,67 @@
+description: "#194: a rule writing straight to STDOUT/STDERR/php://stdout, plus plain echo/print and a warning, during a warm (pcntl-forked) call must never corrupt the MCP stream -- every byte on stdout stays a valid JSON-RPC frame. This exercises forkAndExecute()'s grandchild (and, with the session on by default, the #185 session child too) -- the exact fork path #193 made inherit the daemon's real stdio."
+oracle: true
+config: |
+  <?php
+
+  declare(strict_types=1);
+
+  use PhpParser\Node;
+  use PhpParser\Node\Stmt\Class_;
+  use Rector\Config\RectorConfig;
+  use Rector\Php82\Rector\Class_\ReadOnlyClassRector;
+  use Rector\Rector\AbstractRector;
+  use Rector\ValueObject\PhpVersion;
+
+  // Stands in for a noisy custom rule or an autoloaded project file that
+  // writes to the real process stdio directly, bypassing ob_*() entirely
+  // (#194's own acceptance fixture: fwrite(STDOUT), php://stdout, fwrite(STDERR),
+  // echo, print, and a warning).
+  final class NoisyRector extends AbstractRector
+  {
+      public function getNodeTypes(): array
+      {
+          return [Class_::class];
+      }
+
+      public function refactor(Node $node): ?Node
+      {
+          \fwrite(\STDOUT, "direct fwrite(STDOUT) noise\n");
+          \fwrite(\STDERR, "direct fwrite(STDERR) noise\n");
+          $stdout = \fopen('php://stdout', 'wb');
+          if ($stdout !== false) {
+              \fwrite($stdout, "php://stdout noise\n");
+              \fclose($stdout);
+          }
+          echo "echo noise\n";
+          print "print noise\n";
+          @\trigger_error('a warning during analysis', \E_USER_WARNING);
+
+          return null;
+      }
+  }
+
+  return RectorConfig::configure()
+      ->withPaths([__DIR__ . "/src"])
+      ->withPhpVersion(PhpVersion::PHP_83)
+      ->withRules([NoisyRector::class, ReadOnlyClassRector::class]);
+files:
+  src/Money.php: |
+    <?php
+
+    declare(strict_types=1);
+
+    final class Money
+    {
+        public function __construct(private readonly int $amount)
+        {
+        }
+    }
+steps:
+  - call: src/Money.php
+    expect:
+      is_error: false
+      changed: 1
+      diff_contains: "+final readonly class Money"
+  - call: src/Money.php
+    expect:
+      is_error: false
