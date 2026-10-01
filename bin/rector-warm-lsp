@@ -27,6 +27,7 @@ use Dpt\McpRectorWarm\Lsp\StdioLspTransport;
 use Dpt\McpRectorWarm\RectorTool;
 use Dpt\McpRectorWarm\Support\ProtocolStdoutIsolator;
 use Dpt\McpRectorWarm\Support\ServerVersion;
+use Dpt\McpRectorWarm\Support\WorkingDirectoryArgument;
 
 // #194: same isolation as bin/mcp-rector-warm -- see ProtocolStdoutIsolator's
 // own class docblock. A rule/project file writing straight to STDOUT during
@@ -41,13 +42,7 @@ $lspStdout = ProtocolStdoutIsolator::protocolStream();
 // for the same reason bin/mcp-rector-warm leaves it alone: it stays in
 // $_SERVER['argv'] untouched, and RectorConfigsResolver reads it from there
 // directly when Rector boots inside RectorTool::process() below.
-$workingDir = null;
-foreach (array_slice($argv, 1) as $arg) {
-    if (str_starts_with($arg, '--working-dir=')) {
-        $workingDir = substr($arg, 14);
-        break;
-    }
-}
+$workingDir = WorkingDirectoryArgument::parse($argv);
 
 if ($workingDir !== null) {
     if (!is_dir($workingDir)) {

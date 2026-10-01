@@ -26,6 +26,7 @@ foreach ([
 
 use Dpt\McpRectorWarm\Support\ProtocolStdoutIsolator;
 use Dpt\McpRectorWarm\Support\ServerVersion;
+use Dpt\McpRectorWarm\Support\WorkingDirectoryArgument;
 use Mcp\Server;
 use Mcp\Server\Transport\StdioTransport;
 
@@ -49,12 +50,10 @@ $mcpStdout = ProtocolStdoutIsolator::protocolStream();
 // keeps Server lean. --config is deliberately NOT parsed out here:
 // RectorConfigsResolver reads it straight from $_SERVER['argv'] later, so it is
 // left exactly where it is.
-$workingDir = null;
+$workingDir = WorkingDirectoryArgument::parse($argv);
 $callTimeoutSeconds = 600;
 foreach (array_slice($argv, 1) as $arg) {
-    if (str_starts_with($arg, '--working-dir=')) {
-        $workingDir = substr($arg, 14);
-    } elseif (str_starts_with($arg, '--call-timeout=')) {
+    if (str_starts_with($arg, '--call-timeout=')) {
         $value = substr($arg, 15);
         if (!ctype_digit($value)) {
             fwrite(STDERR, "mcp-rector-warm: --call-timeout must be a non-negative integer of seconds (0 = unlimited): {$value}\n");
