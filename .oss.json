@@ -26,6 +26,7 @@
         "src/RectorCallTimeoutException.php",
         "src/RunnerInterface.php",
         "src/Support",
+        "src/Warm",
         "bin/mcp-rector-warm",
         "bin/rector-cold-call.php",
         "bin/rector-warm-worker.php",
@@ -79,5 +80,6 @@
     }
   },
   "curate_route_threshold": 15,
-  "triage_route_threshold": 0
+  "triage_route_threshold": 0,
+  "test_measurement_configured": true
 }

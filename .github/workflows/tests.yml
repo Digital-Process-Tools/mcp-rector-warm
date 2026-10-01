@@ -393,3 +393,76 @@ jobs:
 
       - name: Rector (dry-run)
         run: vendor/bin/rector process --dry-run
+
+  # #209: coverage and per-test duration, one leg only -- pcov's instrumentation
+  # overhead would change how long every other leg takes, and the other legs
+  # exist to measure PHP-version/OS compatibility, not coverage. ubuntu/8.3
+  # matches the `tests` job's own middle-of-the-matrix leg. No coverage
+  # threshold enforced here (out of scope for #209: measure first, gate later).
+  coverage:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Setup PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.3'
+          coverage: pcov
+          tools: composer:v2
+          extensions: fileinfo, intl, mbstring
+
+      - name: Get composer cache directory
+        id: composer-cache
+        shell: bash
+        run: echo "dir=$(composer config cache-files-dir)" >> "$GITHUB_OUTPUT"
+
+      - name: Cache composer
+        uses: actions/cache@v6
+        with:
+          path: ${{ steps.composer-cache.outputs.dir }}
+          key: composer-coverage-${{ hashFiles('composer.json') }}
+
+      - name: Install dependencies
+        run: composer install --no-progress --prefer-dist
+
+      - name: Run tests with coverage
+        shell: bash
+        run: |
+          ./vendor/bin/phpunit --colors=never --no-progress --display-warnings \
+            --coverage-clover=coverage.xml \
+            --coverage-text=coverage.txt --only-summary-for-coverage-text \
+            --log-junit=junit.xml
+
+      - name: Coverage summary
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: |
+          {
+            echo '```text'
+            cat coverage.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Slowest tests summary
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: python3 tools/slowest-tests.py junit.xml --limit 10 >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload JUnit log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: junit-log
+          path: junit.xml
+
+      - name: Upload coverage to Codecov
+        # Codecov refuses tokenless uploads for this repo ("Token required"),
+        # so this needs the CODECOV_TOKEN repository secret. Without it the
+        # upload fails quietly (fail_ci_if_error: false); the coverage % is
+        # still in the job summary either way.
+        uses: codecov/codecov-action@v5
+        with:
+          files: coverage.xml
+          token: ${{ secrets.CODECOV_TOKEN }}
+          fail_ci_if_error: false

@@ -1,0 +1,12 @@
+# Coverage is measured, not gated (#209). Every PR still uploads, so Codecov
+# can compare it with main and report patch coverage, but it posts no comment
+# and its status checks never fail a PR.
+comment: false
+coverage:
+  status:
+    project:
+      default:
+        informational: true
+    patch:
+      default:
+        informational: true
