@@ -49,7 +49,7 @@ final class RectorToolRecoveryTest extends TestCase
             public int $runs = 0;
             public int $reboots = 0;
 
-            public function run(array $argv, bool $dryRun = true): array
+            public function run(array $argv, bool $dryRun = true, bool $noSession = false): array
             {
                 ++$this->runs;
                 if ($this->runs === 1) {
@@ -89,7 +89,7 @@ final class RectorToolRecoveryTest extends TestCase
             public int $runs = 0;
             public int $reboots = 0;
 
-            public function run(array $argv, bool $dryRun = true): array
+            public function run(array $argv, bool $dryRun = true, bool $noSession = false): array
             {
                 ++$this->runs;
                 throw new \RuntimeException('disk full');
@@ -130,7 +130,7 @@ final class RectorToolRecoveryTest extends TestCase
             public int $runs = 0;
             public int $reboots = 0;
 
-            public function run(array $argv, bool $dryRun = true): array
+            public function run(array $argv, bool $dryRun = true, bool $noSession = false): array
             {
                 ++$this->runs;
                 throw new \Error('Call to a member function toMutatingScope() on null');

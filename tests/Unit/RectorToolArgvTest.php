@@ -42,7 +42,7 @@ final class RectorToolArgvTest extends TestCase
             /** @var list<string> */
             public array $lastArgv = [];
 
-            public function run(array $argv, bool $dryRun = true): array
+            public function run(array $argv, bool $dryRun = true, bool $noSession = false): array
             {
                 $this->lastArgv = $argv;
 

@@ -63,16 +63,33 @@ final class RectorTool
      *
      * @return array{exit_code: int, output: string, warm_boot: bool}|CallToolResult
      */
-    public function processBufferCopy(string $tempPath, string $originalPath): array|CallToolResult
+    public function processBufferCopy(string $tempPath, string $originalPath, bool $noSession = false): array|CallToolResult
     {
-        return $this->processWith($tempPath, true, [RectorRunner::SKIP_AS_OPTION . '=' . $originalPath]);
+        return $this->processWith($tempPath, true, [RectorRunner::SKIP_AS_OPTION . '=' . $originalPath], $noSession);
+    }
+
+    /**
+     * #216: a dry run whose result is about to be turned into a
+     * WorkspaceEdit rather than merely displayed as a diagnostic -- an LSP
+     * code action ("Apply all Rector fixes", a per-diagnostic quickfix) or
+     * `rector-warm.fixWorkspace`. That result is applied to the user's file,
+     * so -- unlike a plain diagnostics dry run via process() -- it must never
+     * come from a warm session that may be stale on an input a custom rule
+     * reads itself (docs/how-it-works.md §1b); it always forks fresh from the
+     * pristine worker, exactly like a dryRun:false call already does.
+     *
+     * @return array{exit_code: int, output: string, warm_boot: bool}|CallToolResult
+     */
+    public function processForEdit(string $path): array|CallToolResult
+    {
+        return $this->processWith($path, true, [], noSession: true);
     }
 
     /**
      * @param list<string> $extraOptions options inserted before `--`
      * @return array{exit_code: int, output: string, warm_boot: bool}|CallToolResult
      */
-    private function processWith(string $path, bool $dryRun, array $extraOptions): array|CallToolResult
+    private function processWith(string $path, bool $dryRun, array $extraOptions, bool $noSession = false): array|CallToolResult
     {
         // Containment: rector reads (dry-run) or rewrites (non-dry) PHP files at
         // $path. Reject paths outside realpath(cwd) — set at boot via --working-dir.
@@ -127,7 +144,7 @@ final class RectorTool
         $argv[] = $path;
 
         try {
-            return $this->runner->run($argv, $dryRun);
+            return $this->runner->run($argv, $dryRun, $noSession);
         } catch (\Throwable $e) {
             // A warm container can corrupt across edits: PHPStan's scope/reflection
             // caches are not ResettableInterface, so a class whose shape changed on
@@ -138,7 +155,7 @@ final class RectorTool
             if ($this->runner->isWarm() && self::isRecoverableWarmCorruption($e)) {
                 $this->runner->reboot();
                 try {
-                    return $this->runner->run($argv, $dryRun);
+                    return $this->runner->run($argv, $dryRun, $noSession);
                 } catch (\Throwable $retryError) {
                     $e = $retryError;
                 }

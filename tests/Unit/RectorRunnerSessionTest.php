@@ -8,10 +8,13 @@ use Dpt\McpRectorWarm\RectorRunner;
 use PHPUnit\Framework\TestCase;
 
 /**
- * #185: which calls the warm worker may hand to its session child. Only a dry
- * run on exactly one existing file; a write call (#72) and anything else keep
- * forking from the pristine worker, and MCP_RECTOR_WARM_SESSION=0 turns the
- * session off entirely.
+ * #185/#216: which calls the warm worker may hand to its session child. Only a
+ * dry run on exactly one existing file, with no explicit no-session override;
+ * a write call (#72), an explicit no-session call (#216 -- LSP code actions
+ * and fixWorkspace build a WorkspaceEdit from a dry run, so that specific dry
+ * run must not come from the session), and anything else keep forking from
+ * the pristine worker. #216: the session is ON unless MCP_RECTOR_WARM_SESSION
+ * is explicitly one of 0/off/false/no -- unset means on.
  */
 final class RectorRunnerSessionTest extends TestCase
 {
@@ -24,7 +27,11 @@ final class RectorRunnerSessionTest extends TestCase
         $this->file = \sys_get_temp_dir() . '/runner-session-' . \bin2hex(\random_bytes(6)) . '.php';
         \file_put_contents($this->file, '<?php class RunnerSessionFixture {}');
         $this->previousEnv = \getenv(RectorRunner::SESSION_ENV);
-        // Switched on (it is opt-in), so each routing test below is about the call, not the switch.
+        // #216: explicit =1 pins it on regardless of this test process's
+        // ambient environment, so each routing test below is about the call,
+        // not the switch -- unset would already mean on since #216, but
+        // leaving that implicit here would make these tests silently depend
+        // on nothing having set MCP_RECTOR_WARM_SESSION=0 in the shell.
         \putenv(RectorRunner::SESSION_ENV . '=1');
     }
 
@@ -35,11 +42,11 @@ final class RectorRunnerSessionTest extends TestCase
     }
 
     /** @param list<string> $argv */
-    private function candidate(array $argv, bool $dryRun): ?string
+    private function candidate(array $argv, bool $dryRun, bool $noSession = false): ?string
     {
         $method = new \ReflectionMethod(RectorRunner::class, 'sessionCandidate');
 
-        return $method->invoke(new RectorRunner(), $argv, $dryRun);
+        return $method->invoke(new RectorRunner(), $argv, $dryRun, $noSession);
     }
 
     /** @return list<string> */
@@ -65,6 +72,19 @@ final class RectorRunnerSessionTest extends TestCase
         self::assertNull($this->candidate(['rector', 'process', '--output-format=json', '--', $this->file], false));
     }
 
+    /**
+     * #216: LSP code actions ("Apply all Rector fixes", per-diagnostic fixes)
+     * and fixWorkspace build their WorkspaceEdit from a dry run -- that
+     * specific dry run must not come from the session, even though it is a
+     * dry run on one file that would otherwise be a perfectly good session
+     * candidate. Diagnostics alone (noSession: false) keep using the session.
+     */
+    public function testAnExplicitNoSessionCallNeverGoesToTheSession(): void
+    {
+        self::assertSame($this->file, $this->candidate($this->argv('--', $this->file), true));
+        self::assertNull($this->candidate($this->argv('--', $this->file), true, true));
+    }
+
     public function testADirectoryOrSeveralPathsNeverGoToTheSession(): void
     {
         self::assertNull($this->candidate($this->argv('--', \dirname($this->file)), true));
@@ -73,22 +93,23 @@ final class RectorRunnerSessionTest extends TestCase
         self::assertNull($this->candidate($this->argv('--', $this->file . '.missing'), true));
     }
 
-    public function testTheSessionIsOffUnlessSwitchedOn(): void
+    public function testTheSessionIsOnUnlessSwitchedOff(): void
     {
-        // PR #189 review: opt-in. Unset, empty, 0 and anything unrecognised keep it off.
+        // #216: default on. Unset (and empty) mean on, same as before #216's
+        // own explicit "1"/"on"/"true"/"yes" values and anything unrecognised.
         \putenv(RectorRunner::SESSION_ENV);
-        self::assertTrue(RectorRunner::sessionSwitchedOff());
-        self::assertNull($this->candidate($this->argv('--', $this->file), true));
-        foreach (['', '0', 'off', 'false', 'no', 'maybe'] as $value) {
-            \putenv(RectorRunner::SESSION_ENV . '=' . $value);
-            self::assertTrue(RectorRunner::sessionSwitchedOff(), $value);
-            self::assertNull($this->candidate($this->argv('--', $this->file), true), $value);
-        }
-        // Positive control: switched on, the same call goes to the session.
-        foreach (['1', 'on', 'true', 'yes', ' ON '] as $value) {
+        self::assertFalse(RectorRunner::sessionSwitchedOff());
+        self::assertSame($this->file, $this->candidate($this->argv('--', $this->file), true));
+        foreach (['', '1', 'on', 'true', 'yes', ' ON ', 'maybe'] as $value) {
             \putenv(RectorRunner::SESSION_ENV . '=' . $value);
             self::assertFalse(RectorRunner::sessionSwitchedOff(), $value);
             self::assertSame($this->file, $this->candidate($this->argv('--', $this->file), true), $value);
+        }
+        // Positive control: only an explicit off token turns it off.
+        foreach (['0', 'off', 'false', 'no', ' OFF '] as $value) {
+            \putenv(RectorRunner::SESSION_ENV . '=' . $value);
+            self::assertTrue(RectorRunner::sessionSwitchedOff(), $value);
+            self::assertNull($this->candidate($this->argv('--', $this->file), true), $value);
         }
     }
 

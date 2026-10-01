@@ -38,12 +38,15 @@ One warm session (official Python `mcp` client, `rector_process` with `dryRun: t
 
 **Speed baseline** (2026-09-30, Apple M3 Pro, PHP 8.3.11 NTS, no OPcache, 30 files per project, `--jobs 1`, 30/30 match). This is the number behind the README and docs/benchmark.md; method and file sampling are there:
 
+Measured before #216 flipped the session's default from off to on -- the rows below name which
+mode produced which numbers rather than "default", so the table stays correct either way.
+
 | project, mode | warm later p50 / p95 | cold p50 / p95 | warm first call |
 | --- | --- | --- | --- |
-| laravel v13.34.0, `MCP_RECTOR_WARM_SESSION=1` | 76 / 1243 ms | 740 / 2271 ms | 1531 ms |
-| laravel, default | 224 / 1672 ms | 749 / 2008 ms | 1570 ms |
-| symfony v7.4.20, `MCP_RECTOR_WARM_SESSION=1` | 100 / 447 ms | 696 / 1286 ms | 2255 ms |
-| symfony, default | 159 / 557 ms | 659 / 1172 ms | 1872 ms |
+| laravel v13.34.0, session on (now the default; was `MCP_RECTOR_WARM_SESSION=1`) | 76 / 1243 ms | 740 / 2271 ms | 1531 ms |
+| laravel, session off (`MCP_RECTOR_WARM_SESSION=0`; was the default) | 224 / 1672 ms | 749 / 2008 ms | 1570 ms |
+| symfony v7.4.20, session on (now the default; was `MCP_RECTOR_WARM_SESSION=1`) | 100 / 447 ms | 696 / 1286 ms | 2255 ms |
+| symfony, session off (`MCP_RECTOR_WARM_SESSION=0`; was the default) | 159 / 557 ms | 659 / 1172 ms | 1872 ms |
 
 - The container is built **lazily, on the first `rector_process` call**, not at start. The first call costs the boot plus the first file: two to three cold runs on Laravel and Symfony.
 - `warm_first` in `report.json` is **not the boot cost**. The timer (`started` in `run_warm`) starts after `session.initialize()`, and the first file's own work is included. With a heavy first file it read 10.1s. To measure boot, start each session on a small file, repeat over fresh sessions, and time spawn-to-initialize separately.

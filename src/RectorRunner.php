@@ -44,11 +44,15 @@ class RectorRunner implements RunnerInterface
     public const SKIP_AS_OPTION = '--rector-warm-skip-as';
 
     /**
-     * #185: MCP_RECTOR_WARM_SESSION=1 (or on / true / yes) turns the session
-     * child on. OFF by default (PR #189 review): with the session on, inputs a
-     * custom rule reads itself at call time and keeps in a static are not
-     * watched unless declared in SESSION_WATCH_ENV -- see docs/how-it-works.md
-     * §1b. No effect without pcntl: there is no session there.
+     * #185/#216: MCP_RECTOR_WARM_SESSION turns the session child on or off.
+     * ON by default since #216: unset means on; an explicit 0/off/false/no
+     * turns it off. With the session on, inputs a custom rule reads itself at
+     * call time and keeps in a static are not watched unless declared in
+     * SESSION_WATCH_ENV -- see docs/how-it-works.md §1b. No effect without
+     * pcntl: there is no session there. A write call, and the specific dry
+     * run an LSP code action or fixWorkspace turns into a WorkspaceEdit, are
+     * never served by the session regardless of this switch -- see
+     * sessionCandidate()'s $noSession parameter.
      */
     public const SESSION_ENV = 'MCP_RECTOR_WARM_SESSION';
 
@@ -299,9 +303,13 @@ class RectorRunner implements RunnerInterface
      * @param bool $dryRun Whether THIS call is analysis-only. Gates whether the
      *   --call-timeout deadline applies at all (#72 correction): a dryRun:false
      *   call is never killed by it, at any of the kill sites below.
+     * @param bool $noSession #216: forces a fresh fork from the pristine
+     *   worker even for a dry run the session would otherwise accept -- see
+     *   sessionCandidate(). Has no effect when pcntl is unavailable (runCold()/
+     *   runViaStandbyWorker() never consult the session at all).
      * @return array{exit_code: int, output: string, warm_boot: bool}
      */
-    public function run(array $argv, bool $dryRun = true): array
+    public function run(array $argv, bool $dryRun = true, bool $noSession = false): array
     {
         // Reset up front, not merely at each decision point below: a call that
         // fails BEFORE reaching one (boot(), spawnProcWorker(), or
@@ -356,7 +364,7 @@ class RectorRunner implements RunnerInterface
         // process: the grandchild's copy-on-write memory absorbs every cache the
         // analysis fills in and dies with the grandchild, so the worker's container
         // stays exactly as pristine as right after boot() for every call.
-        return $this->runForked($argv, $warmBoot, $dryRun);
+        return $this->runForked($argv, $warmBoot, $dryRun, $noSession);
     }
 
     protected function canFork(): bool
@@ -685,8 +693,11 @@ class RectorRunner implements RunnerInterface
                 // unrecognised/older frame: it fails toward "may still be
                 // killed", never toward "silently unkillable" (#72).
                 $dryRun = !\is_array($request) || ($request['dry_run'] ?? true) === true;
+                // #216: default false when missing, matching every request
+                // frame this worker understood before this field existed.
+                $noSession = \is_array($request) && ($request['no_session'] ?? false) === true;
                 try {
-                    $result = $this->serveRequest($argv, $warmBoot, $dryRun, $daemonPid);
+                    $result = $this->serveRequest($argv, $warmBoot, $dryRun, $daemonPid, $noSession);
                 } catch (\Throwable $e) {
                     $result = ['error' => $e->getMessage(), 'error_class' => $e::class];
                 }
@@ -720,9 +731,13 @@ class RectorRunner implements RunnerInterface
      *   never be killed by --call-timeout, so no deadline is computed for it
      *   at all -- it falls back to the pre-#58 behaviour of relying on
      *   whatever default_socket_timeout already governs, unbounded.
+     * @param bool $noSession #216: forwarded to the worker over the socket so
+     *   its own serveRequest() never routes this call to the session, even
+     *   when the session is on and this is otherwise a perfectly good
+     *   single-file dry-run candidate.
      * @return array{exit_code: int, output: string, warm_boot: bool}
      */
-    protected function runForked(array $argv, bool $warmBoot, bool $dryRun): array
+    protected function runForked(array $argv, bool $warmBoot, bool $dryRun, bool $noSession = false): array
     {
         $this->lastCallWasWarm = $warmBoot;
         \assert($this->workerSocket !== null);
@@ -732,7 +747,7 @@ class RectorRunner implements RunnerInterface
         // make json_encode() return false here, silently sending an empty
         // request frame to the worker instead of a real one.
         $payload = (string) \json_encode(
-            ['argv' => $argv, 'warm_boot' => $warmBoot, 'dry_run' => $dryRun],
+            ['argv' => $argv, 'warm_boot' => $warmBoot, 'dry_run' => $dryRun, 'no_session' => $noSession],
             \JSON_INVALID_UTF8_SUBSTITUTE,
         );
         // Same short-per-read-timeout rationale as forkAndExecute()'s wait loop
@@ -1033,12 +1048,12 @@ class RectorRunner implements RunnerInterface
      * @param list<string> $argv
      * @return array{exit_code: int, output: string, warm_boot: bool}
      */
-    private function serveRequest(array $argv, bool $warmBoot, bool $dryRun, ?int $daemonPid): array
+    private function serveRequest(array $argv, bool $warmBoot, bool $dryRun, ?int $daemonPid, bool $noSession = false): array
     {
         // One deadline for the whole call: a session attempt that falls back to
         // a fork must not restart the --call-timeout budget.
         $deadline = $dryRun ? $this->callDeadlineNs() : null;
-        $path = $this->sessionCandidate($argv, $dryRun);
+        $path = $this->sessionCandidate($argv, $dryRun, $noSession);
         if ($path !== null) {
             $result = $this->runInSession($argv, $warmBoot, $path, $daemonPid, $deadline);
             if ($result !== null) {
@@ -1052,13 +1067,21 @@ class RectorRunner implements RunnerInterface
     /**
      * The one existing file a call analyses, when the session may take it: a
      * dry run (#72: a write call is never routed away from the path that has
-     * always guarded it) on exactly one file.
+     * always guarded it) on exactly one file, with no explicit no-session
+     * override.
      *
      * @param list<string> $argv
+     * @param bool $noSession #216: forces a fresh fork even for an otherwise
+     *   session-eligible dry run on one file. Set by callers that turn the
+     *   result straight into a WorkspaceEdit (LSP code actions, fixWorkspace)
+     *   rather than merely displaying it as a diagnostic: that result is
+     *   applied to the user's file, so it must never come from a session that
+     *   may be stale (docs/how-it-works.md §1b). A plain diagnostics dry run
+     *   leaves this false and may still be served by the session.
      */
-    private function sessionCandidate(array $argv, bool $dryRun): ?string
+    private function sessionCandidate(array $argv, bool $dryRun, bool $noSession = false): ?string
     {
-        if (!$dryRun || $this->sessionUnavailable || self::sessionSwitchedOff()) {
+        if (!$dryRun || $noSession || $this->sessionUnavailable || self::sessionSwitchedOff()) {
             return null;
         }
         [$argv] = self::extractSkipAs($argv);
@@ -1074,12 +1097,19 @@ class RectorRunner implements RunnerInterface
         return $paths[0];
     }
 
-    /** Off unless MCP_RECTOR_WARM_SESSION says on (PR #189 review: opt-in). */
+    /**
+     * #216: ON unless MCP_RECTOR_WARM_SESSION is explicitly one of
+     * 0/off/false/no (case-insensitive, trimmed) -- unset, empty, or any
+     * other value means on.
+     */
     public static function sessionSwitchedOff(): bool
     {
         $value = \getenv(self::SESSION_ENV);
+        if (!\is_string($value)) {
+            return false;
+        }
 
-        return !\is_string($value) || !\in_array(\strtolower(\trim($value)), ['1', 'on', 'true', 'yes'], true);
+        return \in_array(\strtolower(\trim($value)), ['0', 'off', 'false', 'no'], true);
     }
 
     /**

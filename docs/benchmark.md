@@ -1,6 +1,6 @@
 # Benchmark
 
-**Up to 10× faster per file on Laravel and Symfony**, with the warm session on (`MCP_RECTOR_WARM_SESSION=1`). Every warm answer was byte-identical to a cold `rector process`.
+**Up to 10× faster per file on Laravel and Symfony**, with the warm session (on by default since #216; `MCP_RECTOR_WARM_SESSION=0` turns it off). Every warm answer was byte-identical to a cold `rector process` -- including every write, which forks fresh from a pristine worker regardless of the session's state.
 
 ## Numbers
 
@@ -59,11 +59,11 @@ return RectorConfig::configure()
 
 ## The two modes
 
-**Session on** (`MCP_RECTOR_WARM_SESSION=1`) is the fastest mode. One long-lived session child serves every single-file dry run and keeps PHPStan's reflection and the rules' caches between calls. Before each call it checks every file the analysis relied on, and starts a fresh session if one changed. It is off by default.
+**Session on** (the default; `MCP_RECTOR_WARM_SESSION=0` turns it off) is the fastest mode. One long-lived session child serves every eligible single-file dry run and keeps PHPStan's reflection and the rules' caches between calls. Before each call it checks every file the analysis relied on, and starts a fresh session if one changed.
 
-What it cannot see: inputs a custom rule reads by itself at call time, for example with `file_get_contents()`, `glob()` or `json_decode()`, and keeps in a static. An edit to such a file is not seen until the session is replaced. List those files or directories in `MCP_RECTOR_WARM_SESSION_WATCH`, or leave the session off. What the session watches, and what it cannot, is in [How it works, 1b](how-it-works.md#1b-one-session-child-keeps-the-analysis-warm-between-calls-185).
+What it cannot see: inputs a custom rule reads by itself at call time, for example with `file_get_contents()`, `glob()` or `json_decode()`, and keeps in a static. An edit to such a file is not seen until the session is replaced. List those files or directories in `MCP_RECTOR_WARM_SESSION_WATCH`, or turn the session off. This limit never reaches a write: `rector_process` with `dryRun: false`, an LSP code action, and `rector-warm.fixWorkspace` always fork fresh from the pristine worker (#216), regardless of the session. What the session watches, and what it cannot, is in [How it works, 1b](how-it-works.md#1b-one-session-child-keeps-the-analysis-warm-between-calls-185).
 
-**Default** (session off): every call forks from a worker that has booted Rector but analysed nothing, so each call starts clean.
+**`MCP_RECTOR_WARM_SESSION=0`**: every call forks from a worker that has booted Rector but analysed nothing, so each call starts clean -- the only mode there was before #216.
 
 **Windows and PHP builds without pcntl** have no session and no fork. They use a per-call standby worker, and these numbers were not measured there: see [How it works](how-it-works.md#windows-and-other-php-builds-without-pcntl).
 
@@ -97,11 +97,11 @@ Then, in an mcp-rector-warm checkout, for each project `<p>`:
 ```bash
 composer install
 python3 -m venv venv && venv/bin/pip install -r tests/E2E/requirements.txt
-TMPDIR=$(mktemp -d) MCP_RECTOR_WARM_SESSION=1 venv/bin/python tools/warm-vs-cold.py --php "$(which php)" \
+TMPDIR=$(mktemp -d) venv/bin/python tools/warm-vs-cold.py --php "$(which php)" \
   --project <p> --config <p>/rector-bench.php --project-autoload <p>/vendor/autoload.php \
   --files @<p>-files.txt --jobs 1 --timeout 300 --progress --out out/<p>
 ```
 
-Drop `MCP_RECTOR_WARM_SESSION=1` for the default mode. The script writes the timings and a match verdict per file to `report.md` in `--out`, and exits non-zero if any warm answer differs from cold. It gives each cold process its own Rector cache directory. Compare the "warm, later calls" row with cold: the "warm, first call" row includes the boot.
+Add `MCP_RECTOR_WARM_SESSION=0` before the command for the session-off numbers. The script writes the timings and a match verdict per file to `report.md` in `--out`, and exits non-zero if any warm answer differs from cold. It gives each cold process its own Rector cache directory. Compare the "warm, later calls" row with cold: the "warm, first call" row includes the boot.
 
 On your own project, `--files 'src/**/*.php' --limit 30` samples the files for you.

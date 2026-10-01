@@ -59,7 +59,7 @@ final class RectorToolCallTimeoutSafetyTest extends TestCase
             {
             }
 
-            public function run(array $argv, bool $dryRun = true): array
+            public function run(array $argv, bool $dryRun = true, bool $noSession = false): array
             {
                 ++$this->runs;
                 $this->lastDryRunSeen[] = $dryRun;
