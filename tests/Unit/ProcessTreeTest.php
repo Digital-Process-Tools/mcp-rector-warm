@@ -162,6 +162,17 @@ final class ProcessTreeTest extends TestCase
         }
     }
 
+    /**
+     * Review finding (first round): descendantsOf() returns [] both when a
+     * pid genuinely has no descendants AND when the `ps` probe could not be
+     * run at all (src/Support/ProcessTree.php:94-120, same ambiguity
+     * lastProbeRanOk() exists to resolve for isAlive()/parentOf()). Without
+     * also checking lastProbeRanOk(), this test would still pass on an
+     * environment where the probe cannot run at all -- settled here by
+     * asserting the probe itself is reported as having run fine, not merely
+     * that it found nothing (mirrors testLastProbeRanOkIsTrueWhenPsRanFine...
+     * above for the same class's isAlive()/parentOf() pair).
+     */
     public function testDescendantsOfDoesNotIncludeUnrelatedProcesses(): void
     {
         if (\PHP_OS_FAMILY === 'Windows') {
@@ -171,6 +182,11 @@ final class ProcessTreeTest extends TestCase
         // A pid this unlikely to exist has no descendants at all -- proves
         // descendantsOf() does not simply return every pid in the table.
         self::assertSame([], ProcessTree::descendantsOf(0x7FFFFFFE));
+        self::assertTrue(
+            ProcessTree::lastProbeRanOk(),
+            'the [] above must mean "no descendants", not "the ps probe itself could not run" -- '
+                . 'without this, a ps-less environment would pass this assertion for the wrong reason',
+        );
     }
 
     /**
