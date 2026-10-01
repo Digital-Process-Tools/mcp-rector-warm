@@ -442,16 +442,19 @@ jobs:
             # proc_open() subprocess -d flags never propagate there, so only
             # an ini directive reaches it the same way auto_prepend_file does.
             printf 'pcov.directory = %s\n' "$PWD"
-            # #230 regression: widening pcov.directory to the repo root also
-            # instruments vendor/ for every subprocess pcov sees -- harmless
-            # for coverage (vendor was never in scope, see #218), but once
-            # php-cs-fixer pulled in real symfony/process, symfony/console,
-            # symfony/finder etc. as top-level dev deps, vendor/ grew enough
-            # that instrumenting it in every wedged-process kill test ate
-            # into the DEADLINE_SECONDS=8 margin those tests assert against,
-            # failing them on this leg only (coverage: pcov) and nowhere
-            # else. Excluding vendor restores the pre-php-cs-fixer scope
-            # without touching what #218 set out to measure.
+            # Correction to this line's own earlier history (#230): widening
+            # pcov.directory to the repo root also instruments vendor/ for
+            # every subprocess pcov sees. An earlier commit here blamed the
+            # #230 coverage-leg kill-test failures on this -- theorizing that
+            # php-cs-fixer's larger vendor/ ate into the kill tests'
+            # DEADLINE_SECONDS margin -- but that theory was refuted: the
+            # tests failed not from a slow timeout but from run() returning
+            # EARLY with no timeout at all (see tests/coverage/prepend.php's
+            # own comment for the real mechanism and fix). This exclude does
+            # NOT fix that regression and never did. It is kept anyway on its
+            # own, unrelated merit: vendor/ was never in #218's coverage
+            # scope, and pcov instrumenting it anyway only adds per-statement
+            # overhead with nothing to show for it.
             printf 'pcov.exclude = "~%s/vendor~"\n' "$PWD"
           } > .coverage-run/ini-scandir/zz-mcp-rector-warm-coverage.ini
           if [ -n "$default_scan_dir" ]; then
@@ -477,22 +480,6 @@ jobs:
           vendor/bin/phpcov merge .coverage-run/cov \
             --clover=coverage.xml \
             --text=coverage-after.txt
-
-      - name: Assert vendor/ was never instrumented (#230)
-        if: ${{ !cancelled() }}
-        shell: bash
-        run: |
-          # Guards the pcov.exclude line added for #230: pcov.directory is
-          # the repo root (see "Prepare child-process coverage" above), so
-          # if the vendor exclude is ever dropped or narrowed, pcov silently
-          # goes back to instrumenting vendor/ in every subprocess, which is
-          # what ate into the kill tests' DEADLINE_SECONDS margin last time.
-          # A clover report is the cheapest place to check: vendor/ should
-          # never appear as a covered file.
-          if grep -l 'name="vendor/' coverage.xml coverage-before.xml 2>/dev/null; then
-            echo "::error::vendor/ is being instrumented by pcov -- check pcov.exclude in the \"Prepare child-process coverage\" step (#230)" >&2
-            exit 1
-          fi
 
       - name: Coverage summary
         if: ${{ !cancelled() }}
