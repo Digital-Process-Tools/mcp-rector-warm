@@ -512,4 +512,44 @@ final class TempCopySweeperTest extends TestCase
             self::removeTree($externalRoot);
         }
     }
+
+    /**
+     * #225 must-not-fire: the directory-level isLinkOrJunction() checks
+     * above only ever examine $path itself -- an otherwise ordinary,
+     * non-symlinked directory can still hold a `.lock` ENTRY that is
+     * itself a symlink. fopen($lockPath, 'c') follows a symlink and
+     * creates its target if missing, so without a guard on the `.lock`
+     * entry's own type this would open (and create) the link's target,
+     * flock/unlock it, then unlink the symlink and remove the directory
+     * -- leaving no trace and having created a file outside the swept
+     * directory entirely. Paired with
+     * testReclaimStaleOwnLockRemovesAnEmptyFreeLockAndItsDirectory as the
+     * must-fire positive control this rule needs.
+     */
+    public function testReclaimStaleOwnLockDoesNotFollowASymlinkedLockFile(): void
+    {
+        $dir = $this->plantEmpty('src/.rector-warm-24');
+        $lockPath = $dir . '/' . TempCopySweeper::LOCK_FILE_NAME;
+        $externalTarget = sys_get_temp_dir() . '/mcp-rector-sweep-lock-target-' . bin2hex(random_bytes(4));
+
+        self::assertFileDoesNotExist($externalTarget, 'the external target must not exist before the call');
+        if (!@symlink($externalTarget, $lockPath)) {
+            self::markTestSkipped('could not create a symlink on this platform (needs elevated/Developer-Mode privilege on Windows).');
+        }
+
+        try {
+            self::assertFalse(TempCopySweeper::reclaimStaleOwnLock($dir));
+            self::assertFileDoesNotExist(
+                $externalTarget,
+                'a symlinked .lock must never have its target created/touched through fopen()',
+            );
+            self::assertDirectoryExists($dir, 'a directory whose .lock is a symlink must never be reclaimed');
+            self::assertTrue(is_link($lockPath), 'the symlink itself must be left in place when refused');
+        } finally {
+            self::removeLink($lockPath);
+            if (file_exists($externalTarget)) {
+                unlink($externalTarget);
+            }
+        }
+    }
 }

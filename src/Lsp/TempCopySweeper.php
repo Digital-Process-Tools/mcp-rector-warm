@@ -219,10 +219,14 @@ final class TempCopySweeper
      * this process itself can take the lock right now.
      *
      * Refuses (returns false, changing nothing) for: a symlinked or
-     * junctioned $path; anything other than exactly one `.lock` file
-     * inside it; and a `.lock` another process still holds -- the
-     * must-not-fire case a live server's own in-progress run must never
-     * be swept out from under it.
+     * junctioned $path; anything other than exactly one `.lock` ENTRY
+     * inside it; a `.lock` entry that is itself a symlink or junction
+     * rather than a regular file (#225 -- fopen($lockPath, 'c') follows a
+     * symlink and creates its target if missing, so an unguarded `.lock`
+     * entry could be used to create and then silently clean up a file
+     * anywhere the process can write); and a `.lock` another process
+     * still holds -- the must-not-fire case a live server's own
+     * in-progress run must never be swept out from under it.
      */
     public static function reclaimStaleOwnLock(string $path): bool
     {
@@ -239,6 +243,10 @@ final class TempCopySweeper
         }
 
         $lockPath = $path . DIRECTORY_SEPARATOR . self::LOCK_FILE_NAME;
+        if (self::isLinkOrJunction($lockPath) || !self::isRegularFile($lockPath)) {
+            return false;
+        }
+
         $handle = @fopen($lockPath, 'c');
         if ($handle === false) {
             return false;
@@ -258,14 +266,37 @@ final class TempCopySweeper
         // defensive shape removeIfStale()/the LSP's own `finally` block
         // use elsewhere in this feature: the lock was free a moment ago,
         // but nothing prevents a symlink swap between that check and this
-        // unlink() if $path is ever reachable by another writer.
-        if (self::isLinkOrJunction($path)) {
+        // unlink() if $path (or #225: $lockPath itself) is ever reachable
+        // by another writer.
+        if (self::isLinkOrJunction($path) || self::isLinkOrJunction($lockPath) || !self::isRegularFile($lockPath)) {
             return false;
         }
 
         @unlink($lockPath);
 
         return @rmdir($path);
+    }
+
+    /**
+     * #225 self-review (PHPStan): a bare is_file($lockPath) here reads,
+     * to PHPStan's static analysis, as the identical call already made a
+     * few lines above (and again at the top of this method) -- with
+     * nothing in between marked as able to change the filesystem, it
+     * narrows the second call's result to the first's and flags the
+     * re-check as `booleanNot.alwaysFalse`. The re-check is deliberate
+     * (see the comment above its call site): the lock can go from free to
+     * a symlink between the two checks, so is_file()'s return value is
+     * NOT invariant across calls the way PHPStan assumes for a native
+     * function with no side effects. Wrapping it in a function PHPStan
+     * cannot prove pure -- `@phpstan-impure`, same as isLinkOrJunction()
+     * just below -- tells it so, instead of silencing the warning with an
+     * inline ignore comment over code that is correct and needs to stay.
+     *
+     * @phpstan-impure
+     */
+    private static function isRegularFile(string $path): bool
+    {
+        return is_file($path);
     }
 
     /**
