@@ -1820,10 +1820,12 @@ final class RectorRunnerTest extends TestCase
                 'must fire: the reported worker pid must genuinely be alive right after boot()',
             );
 
+            // $proc is a still-open proc_open() resource at this point, so
+            // proc_get_status() cannot itself return false here.
             $status = proc_get_status($proc);
-            // @phpstan-ignore staticMethod.alreadyNarrowedType (defensive: proc_get_status()'s documented false-on-failure return is not reflected in the stub's array shape PHPStan infers here)
-            self::assertIsArray($status);
             $daemonPid = (int) $status['pid'];
+            // A pid of 0 would make the kill below signal the whole process group.
+            self::assertGreaterThan(0, $daemonPid, 'proc_get_status() must report a real driver pid');
 
             // Give the driver a brief moment to actually enter the sleep(10)
             // call (send the request frame, worker forks the grandchild)

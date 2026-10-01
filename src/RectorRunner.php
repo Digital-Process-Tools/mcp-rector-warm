@@ -611,6 +611,27 @@ class RectorRunner implements RunnerInterface
      */
     private function serveWorker($socket, ?int $daemonPid = null): void
     {
+        // #133/#208: the exit code is computed by runWorkerBody() below, with
+        // stopSession()/fclose() running in ITS OWN finally -- so they always
+        // run, on every path including an uncaught Throwable, before control
+        // ever reaches this exit() call. exit() itself cannot live inside
+        // that finally (PHPStan: finally.exitPoint) without also making the
+        // returns inside the try meaningless to PHPStan's flow analysis, so
+        // it moved here, one statement after the whole try/finally -- same
+        // ordering, same exit code, on every path.
+        exit($this->runWorkerBody($socket, $daemonPid));
+    }
+
+    /**
+     * The worker's whole life (see serveWorker()'s docblock on this class):
+     * boot, handshake, request loop, and the exit code to report for
+     * whichever of those paths was taken. Never returns normally to anyone
+     * but serveWorker(), which exit()s immediately with what this returns.
+     *
+     * @param resource $socket
+     */
+    private function runWorkerBody($socket, ?int $daemonPid = null): int
+    {
         // #133: an independent E2E check of #127 found that ANY Throwable escaping
         // this method (not only bootInPlace()'s, which the old code caught) unwinds
         // this FORKED CHILD straight back into boot()'s own call frame -- pcntl_fork()
@@ -627,9 +648,10 @@ class RectorRunner implements RunnerInterface
         // here (the boot-failure report, the boot-success handshake, or a normal
         // call's reply) throws exactly this way whenever the daemon's end of
         // $socket has already closed by the time it runs. Wrapping the ENTIRE body
-        // in one try/catch/finally, with an unconditional exit() in the finally, is
-        // what actually closes this: this worker process must NEVER return or
-        // unwind into its caller, no matter what throws or when.
+        // in one try/catch/finally, with the finally always running before the
+        // exit code reaches serveWorker()'s own exit(), is what actually closes
+        // this: this worker process must NEVER return or unwind into its caller,
+        // no matter what throws or when.
         $exitCode = 0;
         $this->workerDaemonSocket = $socket;
         try {
@@ -643,8 +665,7 @@ class RectorRunner implements RunnerInterface
                 ]));
                 $exitCode = 1;
 
-                // @phpstan-ignore finally.exitPoint (deliberate: the finally block's exit($exitCode) below is this worker's real exit point; this return only leaves the try block early)
-                return;
+                return $exitCode;
             }
             $this->writeFrame($socket, $this->encodeHandshakeFrame([
                 'ok' => true,
@@ -681,9 +702,9 @@ class RectorRunner implements RunnerInterface
             // #185: the session child dies with its worker, never outlives it.
             $this->stopSession();
             @\fclose($socket);
-            // @phpstan-ignore finally.exitPoint (deliberate: this worker process must never return into its caller; see the class docblock)
-            exit($exitCode);
         }
+
+        return $exitCode;
     }
 
     /**
@@ -757,18 +778,15 @@ class RectorRunner implements RunnerInterface
             throw $e;
         }
         $decoded = $raw === null ? null : \json_decode($raw, true);
-        if (!\is_array($decoded) || isset($decoded['error'])) {
-            // @phpstan-ignore function.impossibleType, isset.offset (defensive: $decoded is the warm worker's own untrusted JSON output; PHPStan narrows it from the preceding condition, but a malformed frame is exactly what this guards against)
-            $message = \is_array($decoded) && isset($decoded['error'])
-                ? (string) $decoded['error']
-                : 'the warm worker closed its connection unexpectedly';
-            // @phpstan-ignore function.impossibleType (defensive: same untrusted-JSON guard as above)
-            if (!\is_array($decoded)) {
-                // A clean EOF with no frame at all also means the worker is gone
-                // (its own end of the socket closed) -- same self-heal as above.
-                $this->forgetDeadWorker();
-            }
-            throw new \RuntimeException($message);
+        if (!\is_array($decoded)) {
+            // A clean EOF with no frame at all also means the worker is gone
+            // (its own end of the socket closed) -- same self-heal as above.
+            $this->forgetDeadWorker();
+
+            throw new \RuntimeException('the warm worker closed its connection unexpectedly');
+        }
+        if (isset($decoded['error'])) {
+            throw new \RuntimeException((string) $decoded['error']);
         }
 
         /** @var array{exit_code: int, output: string, warm_boot: bool} $decoded */
@@ -903,8 +921,9 @@ class RectorRunner implements RunnerInterface
             $chunk = \fread($parentSocket, 65536);
             if ($chunk === false || $chunk === '') {
                 $meta = \stream_get_meta_data($parentSocket);
-                // @phpstan-ignore nullCoalesce.offset (defensive: stream_get_meta_data()'s shape is not fully specified by any stub PHPStan uses here)
-                if ($meta['timed_out'] ?? false) {
+                // 'timed_out' is a documented key of stream_get_meta_data()'s
+                // return array, always present -- no ?? fallback needed.
+                if ($meta['timed_out']) {
                     if ($deadline !== null && \hrtime(true) >= $deadline) {
                         // The grandchild is genuinely wedged, not merely slow
                         // (#58): default_socket_timeout retrying forever (the #32
@@ -951,12 +970,11 @@ class RectorRunner implements RunnerInterface
         \pcntl_waitpid($pid, $status);
 
         $decoded = $raw === '' ? null : \json_decode($raw, true);
-        if (!\is_array($decoded) || isset($decoded['error'])) {
-            // @phpstan-ignore function.impossibleType, isset.offset (defensive: $decoded is the forked grandchild's own untrusted JSON output; PHPStan narrows it from the preceding condition, but a malformed frame is exactly what this guards against)
-            $message = \is_array($decoded) && isset($decoded['error'])
-                ? (string) $decoded['error']
-                : "forked rector call produced no output (child exit status {$status})";
-            throw new \RuntimeException($message);
+        if (!\is_array($decoded)) {
+            throw new \RuntimeException("forked rector call produced no output (child exit status {$status})");
+        }
+        if (isset($decoded['error'])) {
+            throw new \RuntimeException((string) $decoded['error']);
         }
 
         /** @var array{exit_code: int, output: string, warm_boot: bool} $decoded */
@@ -1345,6 +1363,23 @@ class RectorRunner implements RunnerInterface
      */
     private function serveSession($socket, int $workerPid): void
     {
+        // #208: see serveWorker()'s own comment on the same shape -- the exit
+        // code is computed by runSessionBody() below, with fclose() running
+        // in ITS OWN finally, so it always runs before control reaches this
+        // exit() call, on every path including an uncaught Throwable.
+        exit($this->runSessionBody($socket, $workerPid));
+    }
+
+    /**
+     * The session child's whole life -- see the section comment above and
+     * WarmSession -- and the exit code to report for whichever path was
+     * taken. Never returns normally to anyone but serveSession(), which
+     * exit()s immediately with what this returns.
+     *
+     * @param resource $socket
+     */
+    private function runSessionBody($socket, int $workerPid): int
+    {
         $exitCode = 0;
         try {
             // The daemon must read EOF from a dead worker even while this child
@@ -1379,8 +1414,7 @@ class RectorRunner implements RunnerInterface
                 $this->writeFrame($socket, $this->encodeHandshakeFrame(['ok' => false, 'error' => $e->getMessage()]));
                 $exitCode = 1;
 
-                // @phpstan-ignore finally.exitPoint (deliberate: the finally block's exit($exitCode) below is this worker's real exit point; this return only leaves the try block early)
-                return;
+                return $exitCode;
             }
             $this->writeFrame($socket, $this->encodeHandshakeFrame([
                 'ok' => true,
@@ -1471,9 +1505,9 @@ class RectorRunner implements RunnerInterface
             $exitCode = 1;
         } finally {
             @\fclose($socket);
-            // @phpstan-ignore finally.exitPoint (deliberate: this session child process must never return into its caller; see the class docblock)
-            exit($exitCode);
         }
+
+        return $exitCode;
     }
 
     /**
@@ -1659,8 +1693,7 @@ class RectorRunner implements RunnerInterface
                 $exitCode = null;
                 while (true) {
                     $procStatus = \proc_get_status($process);
-                    // @phpstan-ignore identical.alwaysFalse (defensive: proc_get_status()'s documented false-on-failure return is not reflected in the stub's array shape PHPStan infers here)
-                    if ($procStatus === false || !$procStatus['running']) {
+                    if (!$procStatus['running']) {
                         // #73: proc_get_status()'s exitcode field is only valid the
                         // FIRST time it is read after the child has exited -- exactly
                         // this call, since the loop breaks right here -- and on POSIX
@@ -1668,12 +1701,11 @@ class RectorRunner implements RunnerInterface
                         // already been consumed by an earlier proc_get_status() call
                         // (PHP's own long-standing proc_close()/proc_get_status()
                         // interaction, fixed upstream in PHP 8.3). Prefer the real
-                        // code observed here; proc_close()'s own return value is only
-                        // a fallback for the $procStatus === false case, where no
-                        // exit code was ever observed at all.
-                        $closeExitCode = \proc_close($process);
-                        // @phpstan-ignore notIdentical.alwaysTrue (defensive: same proc_get_status()-can-return-false guard as above)
-                        $exitCode = $procStatus !== false ? $procStatus['exitcode'] : $closeExitCode;
+                        // code observed here, which is always available: $process is
+                        // a still-open resource from proc_open() at this point, so
+                        // proc_get_status() cannot itself fail.
+                        \proc_close($process);
+                        $exitCode = $procStatus['exitcode'];
                         break;
                     }
                     if (\hrtime(true) >= $deadline) {
@@ -1717,23 +1749,25 @@ class RectorRunner implements RunnerInterface
 
             $resultJson = \is_file($resultFile) ? \file_get_contents($resultFile) : false;
             $decoded = $resultJson === false || $resultJson === '' ? null : \json_decode($resultJson, true);
-            if (!\is_array($decoded) || isset($decoded['error'])) {
+            if (!\is_array($decoded)) {
                 $stderr = (string) \file_get_contents($stderrFile);
                 $consoleOutput = (string) \file_get_contents($stdoutFile);
                 $diagnostic = \trim($stderr . ($consoleOutput !== '' ? \PHP_EOL . $consoleOutput : ''));
-                // @phpstan-ignore function.impossibleType, isset.offset (defensive: $decoded is the cold subprocess's own untrusted JSON output; PHPStan narrows it from the preceding condition, but a malformed frame is exactly what this guards against)
-                $message = \is_array($decoded) && isset($decoded['error'])
-                    ? (string) $decoded['error']
-                    : "cold rector subprocess produced no output (exit {$exitCode}): " . $diagnostic;
-                throw new \RuntimeException($message);
+
+                throw new \RuntimeException("cold rector subprocess produced no output (exit {$exitCode}): " . $diagnostic);
+            }
+            if (isset($decoded['error'])) {
+                throw new \RuntimeException((string) $decoded['error']);
             }
 
             /** @var array{exit_code: int, output: string, warm_boot: bool} $decoded */
             return $decoded;
         } finally {
+            // $resultFile/$stdoutFile/$stderrFile were all checked `!== false`
+            // right after tempnam() above (or this method already threw), so
+            // every entry here is a string by the time this finally runs.
             foreach ([$resultFile, $stdoutFile, $stderrFile] as $tempFile) {
-                // @phpstan-ignore function.alreadyNarrowedType (defensive: the array literal is all-string today, but this re-check protects against a future edit widening it)
-                if (\is_string($tempFile) && \is_file($tempFile)) {
+                if (\is_file($tempFile)) {
                     @\unlink($tempFile);
                 }
             }
@@ -1901,10 +1935,12 @@ class RectorRunner implements RunnerInterface
         \fclose($pipes[1]);
         \proc_close($proc);
         $decoded = \is_string($out) ? \json_decode($out, true) : null;
+        if (!\is_array($decoded)) {
+            return self::$pristineIniBaseline = [];
+        }
 
         /** @var array<string, array{global_value: string|null, local_value: string|null}> $decoded */
-        // @phpstan-ignore function.alreadyNarrowedType (defensive: the @var tag above documents the expected shape of this untrusted subprocess's JSON output; the is_array() re-check is the real guard if that output is ever malformed)
-        return self::$pristineIniBaseline = \is_array($decoded) ? $decoded : [];
+        return self::$pristineIniBaseline = $decoded;
     }
 
     /**
@@ -1959,7 +1995,13 @@ class RectorRunner implements RunnerInterface
      * caller's own `?: []` into "nothing to forward", indistinguishable from
      * the genuinely-empty case.
      *
-     * @param array<string, array<string, mixed>>|false $iniAll
+     * Deliberately NOT typed as array<string, array<string, mixed>>|false: that
+     * would tell PHPStan every per-directive entry is already an array, making
+     * the is_array() guard below look dead. ini_get_all()'s actual per-entry
+     * shape is PHPStan-stub territory, not something PHP >= 8.2 itself
+     * guarantees, so this keeps the guard genuinely load-bearing (#208).
+     *
+     * @param array<string, mixed>|false $iniAll
      * @return list<string>
      */
     private static function collectIniOverrideArgsFrom($iniAll): array
@@ -1977,7 +2019,6 @@ class RectorRunner implements RunnerInterface
         $baseline = self::loadPristineIniBaseline();
         $args = [];
         foreach ($iniAll as $name => $info) {
-            // @phpstan-ignore function.alreadyNarrowedType (defensive: ini_get_all()'s per-entry shape is not fully specified by any stub PHPStan uses here)
             if (!\is_array($info)) {
                 continue;
             }
@@ -2564,8 +2605,7 @@ class RectorRunner implements RunnerInterface
             return;
         }
         $status = @\proc_get_status($watchdog);
-        // @phpstan-ignore function.alreadyNarrowedType (defensive: proc_get_status()'s documented false-on-failure return is not reflected in the stub's array shape PHPStan infers here)
-        if (\is_array($status) && $status['running']) {
+        if ($status['running']) {
             \proc_terminate($watchdog, 9);
         }
         @\proc_close($watchdog);
@@ -2700,8 +2740,9 @@ class RectorRunner implements RunnerInterface
                 // default_socket_timeout must not be mistaken for the peer closing
                 // the connection here either.
                 $meta = \stream_get_meta_data($socket);
-                // @phpstan-ignore nullCoalesce.offset (defensive: stream_get_meta_data()'s shape is not fully specified by any stub PHPStan uses here)
-                if ($meta['timed_out'] ?? false) {
+                // 'timed_out' is a documented key of stream_get_meta_data()'s
+                // return array, always present -- no ?? fallback needed.
+                if ($meta['timed_out']) {
                     if ($deadlineNs !== null && \hrtime(true) >= $deadlineNs) {
                         // No specific "Ns" figure here, deliberately: this method
                         // has no idea whether its caller's $deadlineNs is the bare
@@ -3031,8 +3072,6 @@ class RectorRunner implements RunnerInterface
         $this->outputClass = $this->resolvePrefixed('Symfony\\Component\\Console\\Output\\BufferedOutput');
 
         $app = $container->get($this->appClass);
-        // @phpstan-ignore function.alreadyNarrowedType, function.alreadyNarrowedType (defensive: $container is a plain PSR container whose get() return type PHPStan already narrows via this class's own prior calls; both assert() and is_object() here are the real safety net if that ever stops holding)
-        \assert(is_object($app));
         \assert(method_exists($app, 'setAutoExit'));
         \assert(method_exists($app, 'setCatchExceptions'));
         $app->setAutoExit(false);

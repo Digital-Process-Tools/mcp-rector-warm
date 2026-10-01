@@ -58,56 +58,18 @@ final class RectorDiffParser
         $oldLine = 0;
         $rawNew = [];
 
-        $finalize = static function () use (&$current, &$rawNew): ?array {
-            // @phpstan-ignore identical.alwaysTrue (by-ref closure capture: PHPStan does not track the later reassignment of $current)
-            if ($current === null) {
-                return null;
-            }
-
-            // Self-review correction (post-merge CI failure on #91): `newLines`
-            // used to carry EVERY context/added line in the hunk, matching the
-            // old WIDE range. Once hunkRange() narrows to changeFrom/
-            // changeToExclusive only, replacement text built from the full
-            // hunk duplicates the leading/trailing context lines that are now
-            // OUTSIDE the range but still present on disk either side of it.
-            // Every `+` line is genuine added content and always belongs in
-            // the replacement; a ` ` (context) line belongs only when it sits
-            // strictly between the first and last change (interior context --
-            // e.g. two edits three lines apart, kept in the same hunk) rather
-            // than being pure leading/trailing padding.
-            // @phpstan-ignore deadCode.unreachable (reachable at runtime; see the identical.alwaysTrue note above)
-            $changeFrom = $current['changeFrom'];
-            $changeToExclusive = $current['changeToExclusive'];
-            $core = [];
-            foreach ($rawNew as $entry) {
-                if ($entry['isAdd']) {
-                    $core[] = $entry['text'];
-                    continue;
-                }
-                if (
-                    $changeFrom !== null && $changeToExclusive !== null
-                    && $entry['pos'] >= $changeFrom && $entry['pos'] < $changeToExclusive
-                ) {
-                    $core[] = $entry['text'];
-                }
-            }
-            $current['newLines'] = $core;
-
-            return $current;
-        };
-
         foreach (explode("\n", $diff) as $line) {
             if (preg_match('/^@@ -(\d+)(?:,(\d+))? \+\d+(?:,\d+)? @@/', $line, $m) === 1) {
-                $finalized = $finalize();
-                // @phpstan-ignore notIdentical.alwaysFalse (same by-ref closure limitation: $finalize()'s return type is mistracked as always-null)
+                $finalized = self::finalizeHunk($current, $rawNew);
                 if ($finalized !== null) {
                     $hunks[] = $finalized;
                 }
                 $oldStart = (int) $m[1];
                 $current = [
                     'oldStart' => $oldStart,
-                    // @phpstan-ignore notIdentical.alwaysTrue (defensive: isset() still guards the genuinely-unmatched optional group)
-                    'oldCount' => isset($m[2]) && $m[2] !== '' ? (int) $m[2] : 1,
+                    // isset() still guards the genuinely-unmatched optional group;
+                    // the pattern's \d+ guarantees a MATCHED group 2 is never ''.
+                    'oldCount' => isset($m[2]) ? (int) $m[2] : 1,
                     'newLines' => [],
                     'hasChange' => false,
                     'changeFrom' => null,
@@ -143,13 +105,65 @@ final class RectorDiffParser
             }
         }
 
-        $finalized = $finalize();
-        // @phpstan-ignore notIdentical.alwaysFalse (same by-ref closure limitation as the earlier note)
+        $finalized = self::finalizeHunk($current, $rawNew);
         if ($finalized !== null) {
             $hunks[] = $finalized;
         }
 
         return $hunks;
+    }
+
+    /**
+     * Builds the finalized hunk array for $current (narrowing `newLines` down
+     * to the `changeFrom`/`changeToExclusive` span), or null when there is no
+     * open hunk to close. A private method rather than a closure (#208): the
+     * closure this replaced captured $current/$rawNew by reference for READS
+     * only -- it never wrote to either -- but PHPStan's closure analysis only
+     * sees the types at the point the closure is DEFINED, not the later
+     * reassignments parseHunks() makes from outside it, so it treated
+     * $current as permanently null inside the closure. Explicit parameters
+     * give PHPStan (and everyone else reading this) the real type at each
+     * call site instead; the body below is byte-for-byte what the closure did.
+     *
+     * @param array{oldStart: int, oldCount: int, newLines: list<string>, hasChange: bool, changeFrom: int|null, changeToExclusive: int|null}|null $current
+     * @param list<array{pos: int, text: string, isAdd: bool}> $rawNew
+     * @return array{oldStart: int, oldCount: int, newLines: list<string>, hasChange: bool, changeFrom: int|null, changeToExclusive: int|null}|null
+     */
+    private static function finalizeHunk(?array $current, array $rawNew): ?array
+    {
+        if ($current === null) {
+            return null;
+        }
+
+        // Self-review correction (post-merge CI failure on #91): `newLines`
+        // used to carry EVERY context/added line in the hunk, matching the
+        // old WIDE range. Once hunkRange() narrows to changeFrom/
+        // changeToExclusive only, replacement text built from the full
+        // hunk duplicates the leading/trailing context lines that are now
+        // OUTSIDE the range but still present on disk either side of it.
+        // Every `+` line is genuine added content and always belongs in
+        // the replacement; a ` ` (context) line belongs only when it sits
+        // strictly between the first and last change (interior context --
+        // e.g. two edits three lines apart, kept in the same hunk) rather
+        // than being pure leading/trailing padding.
+        $changeFrom = $current['changeFrom'];
+        $changeToExclusive = $current['changeToExclusive'];
+        $core = [];
+        foreach ($rawNew as $entry) {
+            if ($entry['isAdd']) {
+                $core[] = $entry['text'];
+                continue;
+            }
+            if (
+                $changeFrom !== null && $changeToExclusive !== null
+                && $entry['pos'] >= $changeFrom && $entry['pos'] < $changeToExclusive
+            ) {
+                $core[] = $entry['text'];
+            }
+        }
+        $current['newLines'] = $core;
+
+        return $current;
     }
 
     /**
@@ -209,10 +223,11 @@ final class RectorDiffParser
                 }
             }
 
-            // @phpstan-ignore notIdentical.alwaysTrue (defensive: correctness does not depend on the $activeHunks non-empty guarantee)
-            if ($bestIndex !== null) {
-                $rectorsByHunk[$bestIndex][] = $rector;
-            }
+            // $windows (and so $rectorsByHunk) is never empty here: buildFixes()
+            // already returned [] above when $activeHunks === [], and $windows
+            // is built 1:1 from $activeHunks -- so this loop always runs at
+            // least once and $bestIndex is always set by the time it ends.
+            $rectorsByHunk[$bestIndex][] = $rector;
         }
 
         // #100: a hunk can genuinely have no per-change attribution (its
