@@ -152,7 +152,17 @@ final class DependencyFileTracker
      *   indistinguishable from one this method is about to insert for the
      *   first time.
      */
-    // @phpstan-ignore parameterByRef.unusedType (the ?bool|null-default shape is this by-ref parameter's calling convention; narrowing it to bool is a signature change out of scope here)
+    // #208: tried narrowing this to `bool &$alreadyTracked = false` (the
+    // `null` branch is indeed unreachable -- this method's first statement
+    // always overwrites it before anyone reads it) -- but both call sites
+    // pass an UNDECLARED variable by reference, and PHPStan only accepts
+    // that for a by-ref parameter whose type admits null; narrowed to plain
+    // `bool`, it reports `variable.undefined` at both call sites instead.
+    // Keeping the ignore: removing it here trades one PHPStan finding for
+    // two, not zero, and this method is private with exactly these two
+    // callers -- not a public signature where adding `bool $x = false` and
+    // a pre-declaration at each site would be worth the extra diff.
+    // @phpstan-ignore parameterByRef.unusedType (the ?bool|null-default shape is this by-ref parameter's calling convention; narrowing it to bool moves the error to both call sites instead of removing it)
     private function archivePathOrSelf(string $path, ?bool &$alreadyTracked = null): string
     {
         $alreadyTracked = false;

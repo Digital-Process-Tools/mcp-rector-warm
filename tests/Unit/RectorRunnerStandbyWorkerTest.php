@@ -805,9 +805,9 @@ final class RectorRunnerStandbyWorkerTest extends TestCase
                 'must fire: the reported worker pid must genuinely be alive right after the daemon reported it',
             );
 
+            // $proc is a still-open proc_open() resource at this point, so
+            // proc_get_status() cannot itself return false here.
             $status = proc_get_status($proc);
-            // @phpstan-ignore staticMethod.alreadyNarrowedType (defensive: proc_get_status()'s documented false-on-failure return is not reflected in the stub's array shape PHPStan infers here)
-            self::assertIsArray($status);
             $daemonPid = (int) $status['pid'];
 
             // Give the pre-spawned standby time to finish booting and receive the

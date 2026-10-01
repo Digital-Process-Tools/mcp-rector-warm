@@ -156,16 +156,18 @@ final class StdioLspTransport
     /** Windows' select() does handle sockets; only pipes and files need polling. */
     private function isSocket(): bool
     {
-        // @phpstan-ignore nullCoalesce.offset (defensive: stream_get_meta_data()'s shape is not fully specified by any stub PHPStan uses here)
-        return str_contains(strtolower((string) (stream_get_meta_data($this->in)['stream_type'] ?? '')), 'socket');
+        // 'stream_type' is a documented key of stream_get_meta_data()'s
+        // return array, always present -- no ?? fallback needed.
+        return str_contains(strtolower((string) stream_get_meta_data($this->in)['stream_type']), 'socket');
     }
 
     private function hasBufferedInput(): bool
     {
         $meta = stream_get_meta_data($this->in);
 
-        // @phpstan-ignore nullCoalesce.offset (defensive: stream_get_meta_data()'s shape is not fully specified by any stub PHPStan uses here)
-        return ($meta['unread_bytes'] ?? 0) > 0;
+        // 'unread_bytes' is a documented key of stream_get_meta_data()'s
+        // return array, always present -- no ?? fallback needed.
+        return $meta['unread_bytes'] > 0;
     }
 
     private function pollForInput(float $timeoutSeconds): bool
@@ -177,9 +179,11 @@ final class StdioLspTransport
                 return true;
             }
 
+            // is_array() guards fstat()'s documented false-on-error return;
+            // 'size' itself is one of fstat()'s own always-present keys once
+            // it succeeds, so no ?? fallback is needed on top of that.
             $stat = @fstat($this->in);
-            // @phpstan-ignore nullCoalesce.offset (defensive: fstat()'s array shape is not fully specified by any stub PHPStan uses here)
-            if (is_array($stat) && ($stat['size'] ?? 0) > 0) {
+            if (is_array($stat) && $stat['size'] > 0) {
                 return true;
             }
 
