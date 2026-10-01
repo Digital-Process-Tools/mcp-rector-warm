@@ -79,5 +79,6 @@
     }
   },
   "curate_route_threshold": 15,
-  "triage_route_threshold": 0
+  "triage_route_threshold": 0,
+  "test_measurement_configured": true
 }

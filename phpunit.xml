@@ -13,4 +13,13 @@
             <directory>tests/Integration</directory>
         </testsuite>
     </testsuites>
+
+    <source>
+        <include>
+            <directory suffix=".php">src</directory>
+            <directory suffix=".php">bin</directory>
+            <file>bin/mcp-rector-warm</file>
+            <file>bin/rector-warm-lsp</file>
+        </include>
+    </source>
 </phpunit>

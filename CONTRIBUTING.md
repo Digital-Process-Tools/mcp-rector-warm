@@ -25,6 +25,13 @@ Open a GitHub issue with:
    ```
 4. Open the PR with a one-paragraph summary of the change.
 
+Coverage and per-test timing are measured in CI, not locally by default: the
+`coverage` job in `.github/workflows/tests.yml` runs the suite once with pcov
+and posts the coverage summary and the 10 slowest tests to that job's GitHub
+Actions summary page (plus a `junit-log` artifact and, when the repo is
+activated on Codecov, the README badge). No coverage threshold is enforced
+(#209).
+
 ## Validators on every edit (#201)
 
 If you're editing this repo with [claude-supertool](https://github.com/Digital-Process-Tools/claude-supertool)
