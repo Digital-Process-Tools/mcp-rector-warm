@@ -808,6 +808,7 @@ final class LspServer
      * isProgressCreateRefused() matching on that one literal id stays
      * correct for either token.
      */
+    /** @return array<string, mixed> */
     private function progressCreate(string $token = 'rector-warm-lsp/cold-boot'): array
     {
         return [
@@ -818,6 +819,7 @@ final class LspServer
         ];
     }
 
+    /** @return array<string, mixed> */
     private function progressBegin(string $title, string $message, string $token = 'rector-warm-lsp/cold-boot'): array
     {
         return [
@@ -830,6 +832,7 @@ final class LspServer
         ];
     }
 
+    /** @return array<string, mixed> */
     private function progressEnd(string $token = 'rector-warm-lsp/cold-boot'): array
     {
         return [
@@ -847,6 +850,7 @@ final class LspServer
      * MessageType enum -- a notification, not a request, so there is no
      * reply to wait for or ignore.
      */
+    /** @return array<string, mixed> */
     private function showMessageWarning(string $message): array
     {
         return [
@@ -1078,7 +1082,7 @@ final class LspServer
             $fresh = isset($this->buffers[$uri])
                 ? $this->diagnostics->diagnoseBufferForEdit($path, $this->buffers[$uri])
                 : $this->diagnostics->diagnoseForEdit($path);
-            $fixes = $fresh['fixes'] ?? [];
+            $fixes = $fresh['fixes'];
             if ($fixes === []) {
                 return $this->result($id, []);
             }

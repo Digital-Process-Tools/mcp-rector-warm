@@ -308,6 +308,7 @@ final class RectorDiffParser
 
     /**
      * @param array{oldStart: int, oldCount: int, newLines: list<string>, hasChange: bool, changeFrom: int|null, changeToExclusive: int|null} $hunk
+     * @return array{start: array{line:int,character:int}, end: array{line:int,character:int}}
      */
     private static function hunkRange(array $hunk): array
     {

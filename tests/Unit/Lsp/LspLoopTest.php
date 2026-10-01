@@ -17,6 +17,7 @@ use PHPUnit\Framework\TestCase;
  */
 final class LspLoopTest extends TestCase
 {
+    /** @param array<string, mixed> $message */
     private static function frame(array $message): string
     {
         $body = json_encode($message, JSON_UNESCAPED_SLASHES);
@@ -64,6 +65,7 @@ final class LspLoopTest extends TestCase
     }
 
     /**
+     * @param resource $stream
      * @return list<array<string, mixed>>
      */
     private static function framesIn($stream): array

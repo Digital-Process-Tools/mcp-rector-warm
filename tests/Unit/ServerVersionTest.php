@@ -115,6 +115,7 @@ final class ServerVersionTest extends TestCase
         );
     }
 
+    /** @return array<string, array{string|null, string|null}> */
     public static function composerVersionShapes(): array
     {
         return [

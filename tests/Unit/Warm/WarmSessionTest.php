@@ -59,6 +59,7 @@ final class WarmSessionTest extends TestCase
         return new FakeSymbolResolver($declared, $standard, $autoloadPaths);
     }
 
+    /** @param list<string> $autoloadDirectories */
     private function session(?FakeSymbolResolver $resolver = null, ?DirectorySnapshot $directories = null, array $autoloadDirectories = []): WarmSession
     {
         $resolver ??= $this->resolver();

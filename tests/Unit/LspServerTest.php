@@ -29,6 +29,7 @@ final class LspServerTest extends TestCase
     private static function fakeSource(array $fixes): DiagnosticsSource
     {
         return new class ($fixes) implements DiagnosticsSource {
+            /** @param list<array{range: array{start: array{line:int,character:int}, end: array{line:int,character:int}}, newText: string, rectors: list<string>}> $fixes */
             public function __construct(private readonly array $fixes) {}
 
             public function diagnose(string $absolutePath): array
@@ -38,6 +39,7 @@ final class LspServerTest extends TestCase
         };
     }
 
+    /** @return array{range: array{start: array{line:int,character:int}, end: array{line:int,character:int}}, newText: string, rectors: list<string>} */
     private static function fix(int $startLine, int $endLine, string $newText, string $rector): array
     {
         return [
@@ -58,6 +60,10 @@ final class LspServerTest extends TestCase
     private static function fakeWorkspaceSource(array $files, array $errors = []): DiagnosticsSource
     {
         return new class ($files, $errors) implements DiagnosticsSource, WorkspaceDiagnosticsSource {
+            /**
+             * @param array<string, list<array<string, mixed>>> $files
+             * @param list<array{message: string, line: int, file?: string}> $errors
+             */
             public function __construct(private readonly array $files, private readonly array $errors) {}
 
             public function diagnose(string $absolutePath): array
@@ -85,6 +91,7 @@ final class LspServerTest extends TestCase
     private static function fakeWorkspaceAndBufferSource(array $files): DiagnosticsSource
     {
         return new class ($files) implements DiagnosticsSource, WorkspaceDiagnosticsSource, BufferDiagnosticsSource {
+            /** @param array<string, list<array<string, mixed>>> $files */
             public function __construct(private readonly array $files) {}
 
             public function diagnose(string $absolutePath): array
@@ -1081,6 +1088,10 @@ final class LspServerTest extends TestCase
         $stale = [self::fix(3, 12, "stale\n", 'SimplifyIfReturnBoolRector')];
         $fresh = [self::fix(3, 12, "fresh\n", 'SimplifyIfReturnBoolRector')];
         $source = new class ($stale, $fresh) implements DiagnosticsSource, EditDiagnosticsSource {
+            /**
+             * @param list<array{range: array{start: array{line:int,character:int}, end: array{line:int,character:int}}, newText: string, rectors: list<string>}> $stale
+             * @param list<array{range: array{start: array{line:int,character:int}, end: array{line:int,character:int}}, newText: string, rectors: list<string>}> $fresh
+             */
             public function __construct(private readonly array $stale, private readonly array $fresh) {}
 
             public function diagnose(string $absolutePath): array
@@ -1088,11 +1099,23 @@ final class LspServerTest extends TestCase
                 return ['fixes' => $this->stale];
             }
 
+            /**
+             * @return array{
+             *   fixes: list<array{range: array{start: array{line:int,character:int}, end: array{line:int,character:int}}, newText: string, rectors: list<string>}>,
+             *   errors?: list<array{message: string, line: int}>,
+             * }
+             */
             public function diagnoseForEdit(string $absolutePath): array
             {
                 return ['fixes' => $this->fresh];
             }
 
+            /**
+             * @return array{
+             *   fixes: list<array{range: array{start: array{line:int,character:int}, end: array{line:int,character:int}}, newText: string, rectors: list<string>}>,
+             *   errors?: list<array{message: string, line: int}>,
+             * }
+             */
             public function diagnoseBufferForEdit(string $absolutePath, string $content): array
             {
                 return ['fixes' => []];

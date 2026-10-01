@@ -1478,7 +1478,7 @@ final class RectorRunnerTest extends TestCase
     public function testGetmypidFailureIsLoggedNotSilentlyDisablingOrphanDetection(): void
     {
         $runner = new class extends RectorRunner {
-            protected function currentPid()
+            protected function currentPid(): int|false
             {
                 return false;
             }
@@ -1574,7 +1574,7 @@ final class RectorRunnerTest extends TestCase
     public function testSpawnOrphanWatchdogSkipsSpawningAndLogsWhenOwnPidIsFalse(): void
     {
         $runner = new class extends RectorRunner {
-            protected function currentPid()
+            protected function currentPid(): int|false
             {
                 return false;
             }
@@ -1641,7 +1641,7 @@ final class RectorRunnerTest extends TestCase
         }
 
         $runner = new class extends RectorRunner {
-            protected function currentPid()
+            protected function currentPid(): int|false
             {
                 return false;
             }

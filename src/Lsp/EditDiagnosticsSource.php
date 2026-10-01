@@ -24,9 +24,23 @@ namespace Dpt\McpRectorWarm\Lsp;
  */
 interface EditDiagnosticsSource
 {
-    /** Same result shape and contract as DiagnosticsSource::diagnose(), computed with the session forced off. */
+    /**
+     * Same result shape and contract as DiagnosticsSource::diagnose(), computed with the session forced off.
+     *
+     * @return array{
+     *   fixes: list<array{range: array{start: array{line:int,character:int}, end: array{line:int,character:int}}, newText: string, rectors: list<string>}>,
+     *   errors?: list<array{message: string, line: int}>,
+     * }
+     */
     public function diagnoseForEdit(string $absolutePath): array;
 
-    /** Same result shape and contract as BufferDiagnosticsSource::diagnoseBuffer(), computed with the session forced off. */
+    /**
+     * Same result shape and contract as BufferDiagnosticsSource::diagnoseBuffer(), computed with the session forced off.
+     *
+     * @return array{
+     *   fixes: list<array{range: array{start: array{line:int,character:int}, end: array{line:int,character:int}}, newText: string, rectors: list<string>}>,
+     *   errors?: list<array{message: string, line: int}>,
+     * }
+     */
     public function diagnoseBufferForEdit(string $absolutePath, string $content): array;
 }

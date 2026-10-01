@@ -45,6 +45,10 @@ final class RectorRunnerNoSessionFrameTest extends TestCase
         return [$tmp, ['rector', 'process', '--output-format=json', '--debug', '--no-progress-bar', '--dry-run', '--', $tmp . '/Sample.php']];
     }
 
+    /**
+     * @param list<string> $argv
+     * @return array<string, mixed>
+     */
     private function captureFrame(RectorRunner $runner, array $argv, bool $dryRun, bool $noSession): array
     {
         try {

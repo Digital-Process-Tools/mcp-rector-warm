@@ -15,6 +15,7 @@ use PHPUnit\Framework\TestCase;
  */
 final class StdioLspTransportTest extends TestCase
 {
+    /** @return resource */
     private function streamWith(string $contents)
     {
         $stream = fopen('php://memory', 'r+');

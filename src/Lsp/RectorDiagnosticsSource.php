@@ -40,6 +40,12 @@ final readonly class RectorDiagnosticsSource implements BufferDiagnosticsSource,
      * whose result an LSP code action is about to turn into a WorkspaceEdit.
      * See EditDiagnosticsSource's own docblock for why.
      */
+    /**
+     * @return array{
+     *   fixes: list<array{range: array{start: array{line:int,character:int}, end: array{line:int,character:int}}, newText: string, rectors: list<string>}>,
+     *   errors?: list<array{message: string, line: int}>,
+     * }
+     */
     public function diagnoseForEdit(string $absolutePath): array
     {
         return $this->interpret($this->tool->processForEdit($absolutePath), $absolutePath);
@@ -235,11 +241,23 @@ final readonly class RectorDiagnosticsSource implements BufferDiagnosticsSource,
      * WorkspaceEdit over an unsaved buffer. See EditDiagnosticsSource's own
      * docblock for why.
      */
+    /**
+     * @return array{
+     *   fixes: list<array{range: array{start: array{line:int,character:int}, end: array{line:int,character:int}}, newText: string, rectors: list<string>}>,
+     *   errors?: list<array{message: string, line: int}>,
+     * }
+     */
     public function diagnoseBufferForEdit(string $absolutePath, string $content): array
     {
         return $this->diagnoseBufferImpl($absolutePath, $content, true);
     }
 
+    /**
+     * @return array{
+     *   fixes: list<array{range: array{start: array{line:int,character:int}, end: array{line:int,character:int}}, newText: string, rectors: list<string>}>,
+     *   errors?: list<array{message: string, line: int}>,
+     * }
+     */
     private function diagnoseBufferImpl(string $absolutePath, string $content, bool $noSession): array
     {
         $directory = dirname($absolutePath);
