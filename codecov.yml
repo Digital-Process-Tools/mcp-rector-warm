@@ -10,3 +10,18 @@ coverage:
     patch:
       default:
         informational: true
+
+# #218: one upload per OS leg (`coverage` job's ubuntu/macOS matrix, plus the
+# separate `coverage-windows` job). The `flags:` passed to each
+# `codecov/codecov-action@v5` call in the workflow (not this file) is what
+# makes Codecov merge the three uploads instead of the last one winning; this
+# file declares the flag NAMES, with no `paths` restriction, purely so the
+# dashboard shows a per-OS breakdown under those names rather than an
+# implicit, undeclared flag. An explicit `paths: []` was tried here first and
+# dropped: Codecov's own handling of an empty include-list for a flag is not
+# documented clearly enough to be sure it does not zero out that flag's
+# reported coverage instead of leaving it unrestricted.
+flags:
+  linux: {}
+  macos: {}
+  windows: {}

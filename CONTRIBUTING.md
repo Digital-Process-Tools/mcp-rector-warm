@@ -26,11 +26,23 @@ Open a GitHub issue with:
 4. Open the PR with a one-paragraph summary of the change.
 
 Coverage and per-test timing are measured in CI, not locally by default: the
-`coverage` job in `.github/workflows/tests.yml` runs the suite once with pcov
-and posts the coverage summary and the 10 slowest tests to that job's GitHub
-Actions summary page (plus a `junit-log` artifact and, when the repo is
-activated on Codecov, the README badge). No coverage threshold is enforced
-(#209).
+`coverage` job in `.github/workflows/tests.yml` (ubuntu and macOS) runs the
+suite once with pcov and posts the coverage summary and the 10 slowest tests
+to that job's GitHub Actions summary page (plus a `junit-log` artifact and,
+when the repo is activated on Codecov, the README badge). No coverage
+threshold is enforced (#209).
+
+pcov only instruments the one process phpunit runs in, so a `pcntl_fork()`
+child or a `proc_open()` subprocess (every `bin/*` script) does not count on
+its own (#218). `tests/coverage/prepend.php`, loaded via `auto_prepend_file`
+only when `MCP_RECTOR_WARM_COVERAGE_DIR` is set, has each such process write
+its own `.cov` file; the `coverage` job's "Merge forked/subprocess coverage"
+step folds those into the final report with `phpcov merge`. This is CI-only
+plumbing -- no product code path changes when that env var is unset, which is
+every non-coverage run, local included. A Windows leg (`coverage-windows`)
+runs plain pcov without this mechanism, since `RectorRunner::canFork()` is
+always false there (#31) and there is no forked-child gap on that platform
+to close.
 
 ## Validators on every edit (#201)
 
