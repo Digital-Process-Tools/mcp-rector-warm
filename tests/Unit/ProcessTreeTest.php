@@ -271,7 +271,13 @@ final class ProcessTreeTest extends TestCase
                 "excluded descendant must still be RUNNING, not merely alive -- ps stat was '{$stat}'",
             );
         } finally {
-            @\posix_kill($grandchildPid ?? 0, \SIGKILL);
+            // SIGKILL is a pcntl constant, not a posix one -- this test's own
+            // skip guard only checks posix_kill()'s availability, so a build
+            // with posix but no pcntl must not hit "Undefined constant
+            // SIGKILL" here (review finding: the first version of this line
+            // did exactly that, with no fallback, unlike production
+            // ProcessTree::signal()'s own `\defined('SIG' . $name)` guard).
+            @\posix_kill($grandchildPid ?? 0, \defined('SIGKILL') ? \SIGKILL : 9);
             \proc_terminate($root, 9);
             \proc_close($root);
         }
