@@ -1,0 +1,4 @@
+# One-time reformat commits to skip with `git blame --ignore-revs-file .git-blame-ignore-revs`.
+#
+# b289fa8 -- #230: php-cs-fixer @PER-CS2.0 one-time reformat, no manual changes.
+b289fa86f173a0710f64185e004e521677e34705
