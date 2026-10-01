@@ -1,4 +1,6 @@
 # One-time reformat commits to skip with `git blame --ignore-revs-file .git-blame-ignore-revs`.
 #
-# b289fa8 -- #230: php-cs-fixer @PER-CS2.0 one-time reformat, no manual changes.
-b289fa86f173a0710f64185e004e521677e34705
+# #230: php-cs-fixer @PER-CS2.0 one-time reformat, no manual changes.
+# This SHA must be the reformat commit as it exists on main. If the PR is
+# squash-merged, replace it with the squash commit's SHA in a follow-up.
+14f681037a613a2741de3732313a1fae615b603f
