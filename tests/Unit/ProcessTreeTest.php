@@ -213,42 +213,83 @@ final class ProcessTreeTest extends TestCase
     }
 
     /**
-     * killTree($rootPid, [$rootPid]) -- the root pid itself listed in its
-     * own $excludePids -- must leave the root alive: array_diff() in
-     * killTree()'s final signal() call removes $rootPid from the kill list
-     * exactly like any other excluded pid. This is #134's own exclusion
-     * mechanism, exercised here with the root as its own exclusion so the
-     * test never has to enumerate or synchronise with a real descendant.
+     * $excludePids (#134) protects a DESCENDANT of $rootPid -- real callers
+     * (bin/rector-warm-orphan-watchdog.php:120) pass `[\getmypid()]` where
+     * the watchdog itself is a child of the worker it is killing, never the
+     * root pid itself. This test mirrors that real shape: a genuine
+     * grandchild of $rootPid, excluded, must come out of killTree() still
+     * RUNNING -- not merely isAlive() (which also reads true for a
+     * SIGSTOP'd process), confirmed with `ps -o stat=` so a process left
+     * frozen in state T cannot pass as "excluded".
+     *
+     * (An earlier version of this test excluded $rootPid from its own kill
+     * instead of a descendant. That is not the contract any real caller
+     * uses, and it hits a real edge in killTree(): self::signal([$rootPid],
+     * 'STOP') runs unconditionally before $excludePids is ever consulted,
+     * so a root excluding itself ends up frozen in state T forever, not
+     * left alone -- isAlive() cannot tell the difference since a SIGSTOP'd
+     * process is still "alive" to posix_kill(pid, 0). Flagged in review;
+     * replaced with this test of the actual contract rather than a fix to
+     * an unreachable self-exclusion path no caller exercises.)
      */
-    public function testKillTreeExcludePidsCanExcludeTheRootItself(): void
+    public function testKillTreeLeavesAnExcludedDescendantRunning(): void
     {
         if (\PHP_OS_FAMILY === 'Windows') {
             self::markTestSkipped('killTree() exclusion is POSIX-only (#134 taskkill /T has no per-pid exclusion)');
         }
         if (!\function_exists('posix_kill')) {
-            self::markTestSkipped('posix_kill() is needed to confirm the excluded root is still alive afterwards');
+            self::markTestSkipped('posix_kill() is needed to confirm the excluded descendant afterwards');
         }
 
+        // $root spawns $grandchild itself and prints its pid as the first
+        // line of stdout before sleeping, so the test can read the real pid
+        // without any IPC beyond a pipe.
+        $rootScript = '$gc = proc_open([' . \var_export(\PHP_BINARY, true) . ', "-r", "sleep(10);"],'
+            . ' [0 => ["pipe", "r"], 1 => ["file", "/dev/null", "w"], 2 => ["file", "/dev/null", "w"]], $p);'
+            . 'fclose($p[0]); echo proc_get_status($gc)["pid"] . "\n"; sleep(10);';
         $descriptors = [0 => ['pipe', 'r'], 1 => ['pipe', 'w'], 2 => ['file', '/dev/null', 'w']];
-        $child = \proc_open([\PHP_BINARY, '-r', 'sleep(10);'], $descriptors, $pipes);
-        self::assertIsResource($child, 'must be able to spawn a real child process for this test');
+        $root = \proc_open([\PHP_BINARY, '-r', $rootScript], $descriptors, $pipes);
+        self::assertIsResource($root, 'must be able to spawn a real root process for this test');
         \fclose($pipes[0]);
-        \fclose($pipes[1]);
 
         try {
-            $status = \proc_get_status($child);
-            $childPid = $status['pid'];
+            $rootPid = \proc_get_status($root)['pid'];
+            $grandchildPid = (int) \trim((string) \fgets($pipes[1]));
+            \fclose($pipes[1]);
+            self::assertGreaterThan(0, $grandchildPid, 'must have read a real grandchild pid off the root process stdout');
 
-            ProcessTree::killTree($childPid, [$childPid]);
+            ProcessTree::killTree($rootPid, [$grandchildPid]);
 
             self::assertTrue(
-                ProcessTree::isAlive($childPid),
-                'a root pid listed in its own $excludePids must survive killTree()',
+                ProcessTree::isAlive($grandchildPid),
+                'a genuinely excluded descendant must survive killTree() on its ancestor',
+            );
+            $stat = \trim((string) self::psOutput(['ps', '-o', 'stat=', '-p', (string) $grandchildPid]));
+            self::assertStringNotContainsString(
+                'T',
+                $stat,
+                "excluded descendant must still be RUNNING, not merely alive -- ps stat was '{$stat}'",
             );
         } finally {
-            \proc_terminate($child, 9);
-            \proc_close($child);
+            @\posix_kill($grandchildPid ?? 0, \SIGKILL);
+            \proc_terminate($root, 9);
+            \proc_close($root);
         }
+    }
+
+    /** @param list<string> $command */
+    private static function psOutput(array $command): string
+    {
+        $descriptors = [0 => ['file', '/dev/null', 'r'], 1 => ['pipe', 'w'], 2 => ['file', '/dev/null', 'w']];
+        $process = \proc_open($command, $descriptors, $pipes);
+        if (!\is_resource($process)) {
+            return '';
+        }
+        $out = \stream_get_contents($pipes[1]);
+        \fclose($pipes[1]);
+        \proc_close($process);
+
+        return $out === false ? '' : $out;
     }
 
     public function testKillTreeIsANoOpForANonPositivePid(): void
