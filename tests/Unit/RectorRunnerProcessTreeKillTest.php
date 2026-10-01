@@ -40,7 +40,7 @@ final class RectorRunnerProcessTreeKillTest extends TestCase
 
             // The pre-#108 cold subprocess per call: since #108 only reached through
             // the MCP_RECTOR_WARM_NO_PCNTL=cold escape hatch, pinned here directly.
-            $runner = new class(self::DEADLINE_SECONDS) extends RectorRunner {
+            $runner = new class (self::DEADLINE_SECONDS) extends RectorRunner {
                 protected function canFork(): bool
                 {
                     return false;
@@ -90,7 +90,7 @@ final class RectorRunnerProcessTreeKillTest extends TestCase
             $_SERVER['argv'] = ['rector'];
 
             // The boot is setup, not what is under test (#113).
-            $runner = new class(self::DEADLINE_SECONDS) extends RectorRunner {
+            $runner = new class (self::DEADLINE_SECONDS) extends RectorRunner {
                 protected function bootDeadlineNs(): ?int
                 {
                     return null;
@@ -155,7 +155,7 @@ final class RectorRunnerProcessTreeKillTest extends TestCase
             chdir($tmp);
             $_SERVER['argv'] = ['rector'];
 
-            $runner = new class(self::DEADLINE_SECONDS) extends RectorRunner {
+            $runner = new class (self::DEADLINE_SECONDS) extends RectorRunner {
                 protected function canFork(): bool
                 {
                     return false;

@@ -147,8 +147,7 @@ final class LspServer
          * @var (\Closure(array<string, mixed>): void)|null
          */
         private readonly ?\Closure $pushBackMessage = null,
-    ) {
-    }
+    ) {}
 
     /**
      * Write $frame immediately via $frameWriter when one is wired (the
@@ -1102,7 +1101,7 @@ final class LspServer
             'title' => 'Apply all Rector fixes',
             'kind' => 'source.fixAll.rector',
             'edit' => $this->workspaceEdit($uri, $fixesVersion, array_map(
-                static fn (array $fix): array => ['range' => $fix['range'], 'newText' => $fix['newText']],
+                static fn(array $fix): array => ['range' => $fix['range'], 'newText' => $fix['newText']],
                 $fixes,
             )),
         ];
@@ -1274,7 +1273,7 @@ final class LspServer
             }
 
             $edits = array_map(
-                static fn (array $fix): array => ['range' => $fix['range'], 'newText' => $fix['newText']],
+                static fn(array $fix): array => ['range' => $fix['range'], 'newText' => $fix['newText']],
                 $fixes,
             );
 

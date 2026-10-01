@@ -33,9 +33,7 @@ final class StdioLspTransport
      * @param resource $in
      * @param resource $out
      */
-    public function __construct(private $in, private $out)
-    {
-    }
+    public function __construct(private $in, private $out) {}
 
     /**
      * Reads one framed message. Returns null only at a CLEAN EOF -- nothing

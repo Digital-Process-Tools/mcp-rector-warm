@@ -104,9 +104,7 @@ final class RectorDiagnosticsSourceBufferTest extends TestCase
     private function source(\Closure $behaviour, ?\Closure $lockAcquirer = null): RectorDiagnosticsSource
     {
         $runner = new class ($behaviour) implements RunnerInterface {
-            public function __construct(private readonly \Closure $behaviour)
-            {
-            }
+            public function __construct(private readonly \Closure $behaviour) {}
 
             public function run(array $argv, bool $dryRun = true, bool $noSession = false): array
             {
@@ -118,9 +116,7 @@ final class RectorDiagnosticsSourceBufferTest extends TestCase
                 return false;
             }
 
-            public function reboot(): void
-            {
-            }
+            public function reboot(): void {}
 
             public function getCallTimeoutSeconds(): int
             {
@@ -196,7 +192,7 @@ final class RectorDiagnosticsSourceBufferTest extends TestCase
         })->diagnose($this->original);
 
         self::assertNotNull($argvSeen);
-        self::assertSame([], array_values(array_filter($argvSeen, static fn (string $a): bool => str_starts_with($a, '--rector-warm-skip-as'))));
+        self::assertSame([], array_values(array_filter($argvSeen, static fn(string $a): bool => str_starts_with($a, '--rector-warm-skip-as'))));
     }
 
     public function testABufferRunCleansUpADeadServersLeftoverBesideIt(): void
@@ -217,7 +213,7 @@ final class RectorDiagnosticsSourceBufferTest extends TestCase
         // the sweep below to remove it at all.
         file_put_contents($leftover . '/' . \Dpt\McpRectorWarm\Lsp\TempCopySweeper::LOCK_FILE_NAME, 'Sample.php');
 
-        $this->source(fn (): string => '{"totals":{"changed_files":0,"errors":0}}')
+        $this->source(fn(): string => '{"totals":{"changed_files":0,"errors":0}}')
             ->diagnoseBuffer($this->original, "<?php\n");
 
         self::assertSame(['src', 'src/Sample.php'], $this->projectEntries());
@@ -374,7 +370,7 @@ final class RectorDiagnosticsSourceBufferTest extends TestCase
         self::assertSame(['src', 'src/Sample.php'], $this->projectEntries(), 'control: nothing written for the colliding name, and the original buffer is untouched');
 
         // Must-fire control: an ordinary basename, same run, is unaffected.
-        $ordinary = $this->source(fn (): string => '{"totals":{"changed_files":0,"errors":0}}')
+        $ordinary = $this->source(fn(): string => '{"totals":{"changed_files":0,"errors":0}}')
             ->diagnoseBuffer($this->original, "<?php\n");
         self::assertSame([], $ordinary['errors']);
     }
@@ -710,7 +706,7 @@ final class RectorDiagnosticsSourceBufferTest extends TestCase
     {
         $tempDirectory = null;
         $failed = $this->source(
-            fn (): string => '{"totals":{"changed_files":0,"errors":0}}',
+            fn(): string => '{"totals":{"changed_files":0,"errors":0}}',
             function ($handle) use (&$tempDirectory): bool {
                 $meta = stream_get_meta_data($handle);
                 $tempDirectory = dirname($meta['uri']);
@@ -726,7 +722,7 @@ final class RectorDiagnosticsSourceBufferTest extends TestCase
             'the lock-failure branch must not leave the temp directory (or its .lock) behind',
         );
 
-        $succeeded = $this->source(fn (): string => '{"totals":{"changed_files":0,"errors":0}}')
+        $succeeded = $this->source(fn(): string => '{"totals":{"changed_files":0,"errors":0}}')
             ->diagnoseBuffer($this->original, "<?php\n");
         self::assertSame(
             [],
@@ -748,7 +744,7 @@ final class RectorDiagnosticsSourceBufferTest extends TestCase
         mkdir($tempDirectory, 0o700, true);
         file_put_contents($tempDirectory . '/' . \Dpt\McpRectorWarm\Lsp\TempCopySweeper::LOCK_FILE_NAME, '');
 
-        $result = $this->source(fn (): string => '{"totals":{"changed_files":0,"errors":0}}')
+        $result = $this->source(fn(): string => '{"totals":{"changed_files":0,"errors":0}}')
             ->diagnoseBuffer($this->original, "<?php\n");
 
         self::assertSame(

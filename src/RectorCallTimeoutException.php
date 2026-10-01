@@ -13,6 +13,4 @@ namespace Dpt\McpRectorWarm;
  * by forcing the worker down itself (SIGKILL + reap) rather than waiting on a
  * read that may never arrive.
  */
-final class RectorCallTimeoutException extends \RuntimeException
-{
-}
+final class RectorCallTimeoutException extends \RuntimeException {}

@@ -521,7 +521,7 @@ final class RectorRunnerTest extends TestCase
             // into an already-forked child. $argv, by contrast, is decoded fresh
             // by the worker on every request (serveWorker()'s readFrame() loop),
             // so it is the only per-call signal available here.
-            $runner = new class(1) extends RectorRunner {
+            $runner = new class (1) extends RectorRunner {
                 // #113: a real zero-rule container build takes ~0.9s idle and
                 // 1.3-1.6s under CPU load -- over this test's 1s budget, which
                 // killed the BOOT and failed the timing bounds below with a
@@ -745,7 +745,7 @@ final class RectorRunnerTest extends TestCase
 
             // #113: the boot is only this test's setup, so keep it out of the 1s
             // budget; the outer backstop's own deadline is untouched.
-            $runner = new class(1) extends RectorRunner {
+            $runner = new class (1) extends RectorRunner {
                 protected function bootDeadlineNs(): ?int
                 {
                     return null;
@@ -866,7 +866,7 @@ final class RectorRunnerTest extends TestCase
             // enough that a passing test (dryRun:false must run to
             // completion, unkilled) does not itself become the slowest test
             // in the suite.
-            $runner = new class(1) extends RectorRunner {
+            $runner = new class (1) extends RectorRunner {
                 // #113: keep the real boot out of the 1s budget, same as the
                 // sibling wedge test above.
                 protected function bootDeadlineNs(): ?int
@@ -1062,7 +1062,7 @@ final class RectorRunnerTest extends TestCase
             // deadline is what is under test. #113: the fast-config half only
             // needs a boot to succeed, and a real one can itself outrun 1s
             // under load, so it lifts the bound there.
-            $runner = new class(1) extends RectorRunner {
+            $runner = new class (1) extends RectorRunner {
                 public bool $unboundedBoot = false;
 
                 protected function bootDeadlineNs(): ?int
@@ -1174,7 +1174,7 @@ final class RectorRunnerTest extends TestCase
             );
             self::assertLessThan(2.4, $elapsed, "the boot must be killed at its 1s deadline -- took {$elapsed}s");
 
-            $runner = new class(1) extends RectorRunner {
+            $runner = new class (1) extends RectorRunner {
                 protected function bootDeadlineNs(): ?int
                 {
                     return null;
@@ -1253,7 +1253,7 @@ final class RectorRunnerTest extends TestCase
             // 5s deadline: generous room over the real container-boot cost this
             // path pays every call (no warm reuse, by construction), while still
             // far under the sleep(30) the rule itself would otherwise block on.
-            $runner = new class(5) extends RectorRunner {
+            $runner = new class (5) extends RectorRunner {
                 protected function canFork(): bool
                 {
                     return false;
@@ -1345,7 +1345,7 @@ final class RectorRunnerTest extends TestCase
             // 30s deadline: far above what this call takes, so the deadline-poll
             // loop's "child stopped running on its own" branch fires, never its
             // "child hit the deadline" branch -- the branch this test is not about.
-            $runner = new class(30) extends RectorRunner {
+            $runner = new class (30) extends RectorRunner {
                 protected function canFork(): bool
                 {
                     return false;
@@ -2027,7 +2027,7 @@ final class RectorRunnerTest extends TestCase
     {
         $runner = new RectorRunner();
 
-        $application = new class () {
+        $application = new class {
             public string|false $observedEnvDuringRun = false;
 
             public function run(object $input, object $output): int
@@ -2065,7 +2065,7 @@ final class RectorRunnerTest extends TestCase
 
         try {
             $runner = new RectorRunner();
-            $application = new class () {
+            $application = new class {
                 public function run(object $input, object $output): int
                 {
                     return 0;
@@ -2116,7 +2116,7 @@ final class RectorRunnerTest extends TestCase
 
         try {
             $runner = new RectorRunner();
-            $application = new class () {
+            $application = new class {
                 public function run(object $input, object $output): int
                 {
                     return 0;
@@ -2146,7 +2146,7 @@ final class RectorRunnerTest extends TestCase
     {
         foreach ([
             'application' => $application,
-            'container' => new class () {
+            'container' => new class {
                 public function get(string $id): object
                 {
                     // Deliberately has no areSomeRectorsLoaded() method, so execute()'s
@@ -2296,9 +2296,7 @@ final class RectorRunnerTest extends TestCase
 final readonly class RectorRunnerTest184FakeInput
 {
     /** @param list<string> $argv */
-    public function __construct(public array $argv)
-    {
-    }
+    public function __construct(public array $argv) {}
 }
 
 /**

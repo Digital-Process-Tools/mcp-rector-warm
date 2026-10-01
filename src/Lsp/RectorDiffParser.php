@@ -183,7 +183,7 @@ final class RectorDiffParser
         // quickfix that both do nothing when applied.
         $activeHunks = array_values(array_filter(
             $hunks,
-            static fn (array $hunk): bool => $hunk['hasChange'],
+            static fn(array $hunk): bool => $hunk['hasChange'],
         ));
         if ($activeHunks === []) {
             return [];
@@ -198,7 +198,7 @@ final class RectorDiffParser
         // when `$changes` is empty (Rector gave no per-change attribution at
         // all), never merely because THIS hunk's own window missed.
         $windows = array_map(
-            static fn (array $hunk): array => [
+            static fn(array $hunk): array => [
                 $hunk['oldStart'],
                 $hunk['oldCount'] > 0 ? $hunk['oldStart'] + $hunk['oldCount'] - 1 : $hunk['oldStart'],
             ],

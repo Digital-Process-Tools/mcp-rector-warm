@@ -317,8 +317,7 @@ final class FakeSymbolResolver implements SymbolResolver
         private readonly array $declared,
         private readonly array $standard,
         private readonly array $autoloadPaths,
-    ) {
-    }
+    ) {}
 
     public function declaredSymbols(string $path): array
     {

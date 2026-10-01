@@ -472,15 +472,13 @@ final class LspServerBufferTest extends TestCase
      */
     public function testRunDueDiagnosticsReportsColdBootProgressWithNoPrecedingDidOpen(): void
     {
-        $log = new class () {
+        $log = new class {
             /** @var list<string> */
             public array $entries = [];
         };
 
         $source = new class ($log) implements BufferDiagnosticsSource {
-            public function __construct(private readonly object $log)
-            {
-            }
+            public function __construct(private readonly object $log) {}
 
             public function diagnose(string $absolutePath): array
             {

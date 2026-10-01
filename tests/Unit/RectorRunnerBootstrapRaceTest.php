@@ -135,7 +135,7 @@ final class RectorRunnerBootstrapRaceTest extends TestCase
 
     private static function noPcntlRunner(): RectorRunner
     {
-        return new class(120) extends RectorRunner {
+        return new class (120) extends RectorRunner {
             protected function canFork(): bool
             {
                 return false;

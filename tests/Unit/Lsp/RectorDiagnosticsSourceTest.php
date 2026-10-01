@@ -39,9 +39,7 @@ final class RectorDiagnosticsSourceTest extends TestCase
     private function fakeSource(string $output): RectorDiagnosticsSource
     {
         $runner = new class ($output) implements RunnerInterface {
-            public function __construct(private readonly string $output)
-            {
-            }
+            public function __construct(private readonly string $output) {}
 
             public function run(array $argv, bool $dryRun = true, bool $noSession = false): array
             {
@@ -53,9 +51,7 @@ final class RectorDiagnosticsSourceTest extends TestCase
                 return false;
             }
 
-            public function reboot(): void
-            {
-            }
+            public function reboot(): void {}
 
             public function getCallTimeoutSeconds(): int
             {

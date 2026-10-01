@@ -25,8 +25,7 @@ final readonly class RectorDiagnosticsSource implements BufferDiagnosticsSource,
     public function __construct(
         private RectorTool $tool,
         private ?\Closure $lockAcquirer = null,
-    ) {
-    }
+    ) {}
 
     /** #106: the hidden per-server directory an unsaved buffer's temp copy lives in */
     public const TEMP_DIRECTORY_PREFIX = '.rector-warm-';
