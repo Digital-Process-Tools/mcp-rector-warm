@@ -809,6 +809,8 @@ final class RectorRunnerStandbyWorkerTest extends TestCase
             // proc_get_status() cannot itself return false here.
             $status = proc_get_status($proc);
             $daemonPid = (int) $status['pid'];
+            // A pid of 0 would make the kill below signal the whole process group.
+            self::assertGreaterThan(0, $daemonPid, 'proc_get_status() must report a real driver pid');
 
             // Give the pre-spawned standby time to finish booting and receive the
             // second (wedge) call's request frame -- it started booting the moment
