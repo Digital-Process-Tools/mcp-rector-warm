@@ -27,7 +27,7 @@ final class RectorRunnerDeclaredClassLikeNamesTest extends TestCase
             ['App\AClass', 'App\AnInterface', 'App\ATrait', 'App\AnEnum'],
             $this->names(
                 '<?php namespace App; '
-                . 'class AClass {} interface AnInterface {} trait ATrait {} enum AnEnum {}'
+                . 'class AClass {} interface AnInterface {} trait ATrait {} enum AnEnum {}',
             ),
         );
     }
