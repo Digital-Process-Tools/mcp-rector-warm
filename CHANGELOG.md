@@ -6,6 +6,63 @@ This project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-10-01
+
+### Added
+
+- Dogfooding (#201): `.supertool.json` now runs this checkout's own
+  `bin/mcp-rector-warm` and `mcp-phpstan-warm` as claude-supertool validators
+  on every PHP edit, plus phplint/py-compile/bash-check/jsonlint/yaml-check
+  for the cheap syntax checks. Added `phpstan/phpstan` and
+  `dpt/mcp-phpstan-warm` (require-dev), a conservative `rector.php`, a
+  `phpstan.neon` (level 5 + baseline), and a `static-analysis` CI job running
+  `phpstan analyse` and `rector process --dry-run`.
+
+- CI now measures what it runs (#209): a `coverage` job builds the suite once
+  with pcov and posts the coverage summary and the 10 slowest tests (computed
+  from the JUnit log, not hand-maintained) to the job's GitHub Actions summary,
+  plus a `junit-log` artifact and a Codecov upload for a README badge (gated
+  on the repo being activated on Codecov). `phpunit.xml` now declares `src/`
+  and `bin/` as the coverage source. The other CI legs are unchanged and keep
+  `--no-coverage`. No coverage threshold is enforced yet.
+
+### Changed
+
+- The README now says to keep cold `vendor/bin/rector process --dry-run` in CI (#205). Warm output is built to match cold and is checked against it, but it is editor feedback, and CI stays the gate.
+
+- The warm session (`MCP_RECTOR_WARM_SESSION`) is now on by default: set it to `0` to turn it off. Every write -- `rector_process` with `dryRun: false`, an LSP code action, and `rector-warm.fixWorkspace` -- always forks fresh from a pristine worker instead, never the session, so the one documented session limit (a custom rule's undeclared inputs can go stale) never reaches bytes written to a file (#216).
+
+### Fixed
+
+- Fixed a lock-acquisition race in the LSP's buffer diagnostics (#188): when a
+  second server briefly won the flock a server was about to acquire on its own
+  `.rector-warm-<pid>/.lock`, the failure path removed the lock handle but
+  never unlinked the lock file itself, so `rmdir()` silently failed and left
+  an orphaned `.lock` behind. Every later buffer diagnosed in that directory
+  then hit the "pre-existing temp directory" guard, silently disabling
+  unsaved-buffer diagnostics there until the server restarted. The
+  lock-failure branch now unlinks `.lock` before removing the directory, the
+  same as the success path already did, and a server whose own directory is
+  ever found holding nothing but an empty, unheld `.lock` reclaims it instead
+  of refusing it for the rest of its life.
+
+- Fixed checkout mode inferring more types than a cold `vendor/bin/rector
+  process` run when the analysed project ships its own Rector (#195):
+  `RectorRunner::ensureProjectAutoloaded()` required the project's own
+  `vendor/autoload.php` unconditionally, unlike rector/rector's own
+  `bin/rector.php` (`AutoloadIncluder::autoloadRectorInstalledAsGlobalDependency()`),
+  which skips that require when the project already has its own
+  `vendor/rector/rector` -- exactly the checkout-mode signature. warm could
+  then resolve real project classes/types through the project's real Composer
+  autoloader that a matching cold run never touches, so warm's answers
+  differed from cold on every project with its own Rector as a dev dependency
+  (measured on laravel/framework and symfony/symfony). warm now mirrors the
+  same guard and skips the project's autoloader in that case, matching cold.
+
+### Security
+
+- `TempCopySweeper::reclaimStaleOwnLock()` now refuses when a swept directory's `.lock` entry is a symlink or junction rather than a regular file. Previously, a repository planting `.rector-warm-<pid>/.lock` as a symlink could make the sweeper's `fopen($lockPath, 'c')` create (and later silently delete the trace of) a file at the symlink's target the first time that pid's buffer was diagnosed, leaving no record (#225).
+
 ## [0.8.0] - 2026-09-30
 
 ### Added
@@ -527,7 +584,8 @@ MCP `output` field now contains `file_diffs[].applied_rectors` + `diff` so consu
 - PHPUnit unit + integration tests covering boot, tool listing, warm reuse (`warm_boot: true` on second call).
 - Standalone CLI: `--working-dir`, `--config` flags pinned at server start.
 
-[Unreleased]: https://github.com/Digital-Process-Tools/mcp-rector-warm/compare/v0.8.0...HEAD
+[Unreleased]: https://github.com/Digital-Process-Tools/mcp-rector-warm/compare/v0.9.0...HEAD
+[0.9.0]: https://github.com/Digital-Process-Tools/mcp-rector-warm/releases/tag/v0.9.0
 [0.8.0]: https://github.com/Digital-Process-Tools/mcp-rector-warm/releases/tag/v0.8.0
 [0.7.2]: https://github.com/Digital-Process-Tools/mcp-rector-warm/releases/tag/v0.7.2
 [0.7.1]: https://github.com/Digital-Process-Tools/mcp-rector-warm/releases/tag/v0.7.1
