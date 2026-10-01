@@ -1,26 +1,15 @@
 ---
-title: "A fresh git worktree has no .supertool.json -- gh-*/git-* project ops refuse with 'no project ops loaded'"
+title: "A fresh git worktree has no vendor/ -- run composer install before phpunit or the validators"
 tool: Bash
 match: "git worktree add"
 mode: remind
 ---
 
-`.supertool.json` is untracked (confirmed: `git ls-files` doesn't list it), so `git worktree add`
-never checks it out into the new worktree -- for ANY worktree, not only one nested under the
-primary clone. The PreToolUse hook that refuses a raw `git commit`/`git diff`/etc. still finds it
-by walking up from cwd and points at the `supertool 'git-commit:...'` op as the fix, but that op
-then refuses too: `.supertool.json was found and could not be loaded, so no project ops are
-loaded` -- confirmed live in this worktree (`gh-issues`, `gh-issue-create` etc. all missing until
-fixed).
+`vendor/` is ignored, so `git worktree add` never checks it out. `./vendor/bin/phpunit` fails
+outright, and the `phpstan` and `rector` supertool validators (which run `vendor/bin/mcp-phpstan-warm`
+and this checkout's `bin/mcp-rector-warm`) report "not found" or "NOT CHECKED" until
+`composer install --no-interaction --quiet` runs in the new worktree. Nothing else is needed.
 
-**Fix, once per worktree:** `cp <primary-clone>/.supertool.json .` at the worktree root before
-any `gh-*`/git-preset op. It's untracked, so it never shows in `git status` -- but remove it
-again once you're done (`rm .supertool.json`) so it doesn't linger as a stray copy.
-
-Plain `read`/`edit`/`paste`/`grep` work fine via `cwd:<worktree>` even without the copy -- only
-the `git-*`/`gh-*` preset ops need it.
-
-**A fresh worktree also has no `vendor/` -- Composer dependencies aren't checked out either,
-same root cause (untracked/ignored).** `./vendor/bin/phpunit` fails outright until `composer
-install --no-interaction --quiet` runs in the new worktree; nothing else is needed once that
-completes.
+`.supertool.json` is tracked since #204, so a worktree of any commit after that has it, and the
+`gh-*`/`git-*` ops work there with no copy. A worktree of an older commit still lacks it: copy it
+from the primary clone, and remove the copy when done.
