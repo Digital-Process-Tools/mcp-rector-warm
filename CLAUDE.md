@@ -37,6 +37,10 @@ the maintainer on 2026-10-02:
   `@phpstan-ignore`. Level 10 is reached. Stricter options (bleedingEdge, strict-rules,
   deprecation-rules and the opt-in strict parameters) are adopted as they become clean, not
   skipped.
+- **100% native type coverage:** every property, parameter and return value has a native type,
+  and every file declares `strict_types=1`, enforced by PHPStan's type-coverage extension. A
+  type PHP cannot express natively (a signature imposed by an interface) is the only exception,
+  and it carries a PHPDoc type instead.
 - **Rector's own quality sets run on this repo and stay clean**, not only the PHP-version set.
   A set that would change runtime behaviour on a write path is adopted with the write-path
   E2E check, never silently.
