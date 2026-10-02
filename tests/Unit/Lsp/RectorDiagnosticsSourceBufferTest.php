@@ -796,6 +796,49 @@ final class RectorDiagnosticsSourceBufferTest extends TestCase
     }
 
     /**
+     * #245 coverage: `!@mkdir($tempDirectory, 0o700)` (the line right
+     * after the pre-existing-directory guard above) has its own distinct
+     * failure message -- "could not create a temp directory" -- for the
+     * case the guard above does NOT cover: mkdir() failing for a reason
+     * that has nothing to do with something already being there (a
+     * read-only parent, here; a full disk or a too-long path in
+     * production). Forced by chmod()ing the buffer's own directory
+     * read-only: `src/` itself still exists and is listable, so is_dir()
+     * and isLinkOrJunction() both pass, and only the mkdir() call fails.
+     * POSIX-only: chmod() does not restrict directory writes the same way
+     * on Windows, and this process may run as root in some CI images,
+     * where permission bits are not enforced at all -- skipped rather
+     * than silently vacuous in either case.
+     */
+    public function testAReadOnlyParentDirectoryRefusesWithItsOwnDistinctMessage(): void
+    {
+        if (PHP_OS_FAMILY === 'Windows') {
+            self::markTestSkipped('chmod() does not restrict directory writes on Windows.');
+        }
+        if (function_exists('posix_getuid') && posix_getuid() === 0) {
+            self::markTestSkipped('permission bits are not enforced while running as root.');
+        }
+
+        $srcDir = $this->workDir . '/src';
+        chmod($srcDir, 0o500);
+
+        try {
+            $called = false;
+            $result = $this->source(function () use (&$called): string {
+                $called = true;
+
+                return '{"totals":{"changed_files":0,"errors":0}}';
+            })->diagnoseBuffer($this->original, "<?php\n\nclass Sample\n{\n    // unsaved\n}\n");
+
+            self::assertFalse($called, 'a temp directory that cannot be created must be refused before Rector is asked to run');
+            self::assertStringContainsString('could not create a temp directory', ($result['errors'] ?? [])[0]['message']);
+            self::assertStringNotContainsString('pre-existing temp directory', ($result['errors'] ?? [])[0]['message']);
+        } finally {
+            chmod($srcDir, 0o700);
+        }
+    }
+
+    /**
      * `mklink /J` needs no elevated privilege, unlike `mklink /D`. Uses
      * cmd.exe's mklink directly -- PHP's symlink() cannot create a
      * junction, and link() creates a hardlink, a different reparse type
