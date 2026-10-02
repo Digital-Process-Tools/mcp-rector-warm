@@ -25,8 +25,8 @@ final class RectorRunnerFallbackBranchesTest extends TestCase
 
     private string $previousCwd;
 
-    /** @var list<string> */
-    private array $previousArgv;
+    /** $_SERVER['argv'] exactly as found, restored verbatim in tearDown() */
+    private mixed $previousArgv;
 
     /** @var list<string> */
     private array $created = [];
