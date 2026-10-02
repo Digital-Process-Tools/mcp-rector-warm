@@ -2906,4 +2906,336 @@ final class LspServerTest extends TestCase
         self::assertNotNull($result);
         self::assertNull($result['result']);
     }
+
+    /**
+     * #245 coverage: takeReadyDiagnostics() drops a held buffer result once
+     * the document's version has moved on since runDueDiagnostics()
+     * snapshotted it -- mirrors testAStaleResultIsDiscardedWhenTheVersionChangedMidCall
+     * above, but on the buffer/debounce path. runDueDiagnostics() captures
+     * the version BEFORE calling diagnoseBuffer() and only stores it into
+     * $readyResults AFTER that call returns; a diagnoseBuffer() that
+     * (synchronously, by re-entering handle()) causes a NEWER version to be
+     * recorded for the same uri leaves takeReadyDiagnostics() holding a
+     * result for a version that is no longer current.
+     */
+    public function testAReadyBufferResultForAStaleVersionIsDroppedWhenTheVersionMovedOnMidRun(): void
+    {
+        $holder = new class {
+            public ?LspServer $server = null;
+        };
+        $racy = new class ($holder) implements BufferDiagnosticsSource {
+            /** @param object{server: ?LspServer} $holder */
+            public function __construct(private readonly object $holder) {}
+
+            public function diagnose(string $absolutePath): array
+            {
+                return ['fixes' => []];
+            }
+
+            public function diagnoseBuffer(string $absolutePath, string $content): array
+            {
+                $this->holder->server?->handle([
+                    'jsonrpc' => '2.0',
+                    'method' => 'textDocument/didSave',
+                    'params' => ['textDocument' => ['uri' => 'file:///tmp/Sample.php', 'version' => 2]],
+                ]);
+
+                return ['fixes' => []];
+            }
+        };
+        $server = new LspServer('1.0.0', $racy);
+        $holder->server = $server;
+
+        $server->handle([
+            'jsonrpc' => '2.0',
+            'method' => 'textDocument/didChange',
+            'params' => [
+                'textDocument' => ['uri' => 'file:///tmp/Sample.php', 'version' => 1],
+                'contentChanges' => [['text' => "<?php\n"]],
+            ],
+        ]);
+
+        $server->runDueDiagnostics(1.0e12);
+
+        self::assertSame([], $server->takeReadyDiagnostics());
+    }
+
+    /**
+     * #245 coverage: changeDocument() refuses (returns []) when the
+     * configured diagnostics source does not implement
+     * BufferDiagnosticsSource at all -- there is nowhere to hold an
+     * unsaved-buffer diagnosis, so textDocument/didChange is a no-op.
+     */
+    public function testDidChangeIsANoOpWithoutABufferCapableSource(): void
+    {
+        $server = new LspServer('1.0.0', self::fakeSource([]));
+
+        $responses = $server->handle([
+            'jsonrpc' => '2.0',
+            'method' => 'textDocument/didChange',
+            'params' => [
+                'textDocument' => ['uri' => 'file:///tmp/Sample.php', 'version' => 1],
+                'contentChanges' => [['text' => "<?php\n"]],
+            ],
+        ]);
+
+        self::assertSame([], $responses);
+        self::assertNull($server->nextDiagnosticsDeadline());
+    }
+
+    /**
+     * #245 coverage: `initialize` with no `capabilities` key at all (a
+     * conforming-but-minimal client, or one that omitted it) must treat
+     * every per-feature capability check as unsupported rather than
+     * crashing on a missing array -- clientSupportsDocumentChanges(),
+     * clientSupportsApplyEdit(), clientSupportsDynamicWatchedFiles() and
+     * clientSupportsWorkDoneProgress() all short-circuit to false on a
+     * non-array $capabilities.
+     */
+    public function testInitializeTreatsMissingCapabilitiesAsUnsupported(): void
+    {
+        $server = new LspServer('1.0.0', self::fakeWorkspaceAndBufferSource([
+            '/proj/Sample.php' => [self::fix(0, 1, "<?php\n", 'SomeRector')],
+        ]));
+
+        $responses = $server->handle([
+            'jsonrpc' => '2.0',
+            'id' => 1,
+            'method' => 'initialize',
+            'params' => ['processId' => null, 'rootUri' => null],
+        ]);
+
+        self::assertArrayNotHasKey('executeCommandProvider', $responses[0]['result']['capabilities']);
+
+        // Positive control: workspace.applyEdit declared explicitly still
+        // works normally, proving the no-capabilities case above is really
+        // "treated as unsupported", not a crash this call just happened to
+        // survive.
+        $withApplyEdit = new LspServer('1.0.0', self::fakeWorkspaceAndBufferSource([
+            '/proj/Sample.php' => [self::fix(0, 1, "<?php\n", 'SomeRector')],
+        ]));
+        $withResponses = $withApplyEdit->handle([
+            'jsonrpc' => '2.0',
+            'id' => 1,
+            'method' => 'initialize',
+            'params' => ['capabilities' => self::APPLY_EDIT_ONLY],
+        ]);
+        self::assertArrayHasKey('executeCommandProvider', $withResponses[0]['result']['capabilities']);
+    }
+
+    /**
+     * #245 coverage: diagnoseDocument() (didOpen/didSave) refuses (returns
+     * []) when the textDocument params carry no string uri -- there is
+     * nothing to diagnose.
+     */
+    public function testDidOpenWithAMissingUriIsANoOp(): void
+    {
+        $server = new LspServer('1.0.0', self::fakeSource([]));
+
+        $responses = $server->handle([
+            'jsonrpc' => '2.0',
+            'method' => 'textDocument/didOpen',
+            'params' => ['textDocument' => ['version' => 1]],
+        ]);
+
+        self::assertSame([], $responses);
+    }
+
+    /**
+     * #245 coverage: isProgressCreateRefused()'s retry loop re-checks the
+     * deadline at the TOP of each iteration (not only after a null read),
+     * so the window can elapse while $tryReadAhead keeps returning real
+     * (unrelated) messages, never null. Each fake call sleeps long enough
+     * that a handful of iterations exhausts the 0.2s window from inside
+     * the loop's own deadline check, pinning the branch
+     * testAnUnrelatedReadAheadMessageIsPushedBackAndProgressIsSkipped above
+     * does not reach (that one terminates via the $message === null branch
+     * instead).
+     */
+    public function testProgressTimesOutWhileStillReceivingUnrelatedMessages(): void
+    {
+        $pushedBack = [];
+        $unrelated = ['jsonrpc' => '2.0', 'method' => 'textDocument/didSave', 'params' => ['textDocument' => ['uri' => 'file:///tmp/Other.php']]];
+
+        $server = new LspServer(
+            '1.0.0',
+            self::fakeSource([]),
+            tryReadAhead: static function (float $timeoutSeconds) use ($unrelated): array {
+                usleep(60_000);
+
+                return $unrelated;
+            },
+            pushBackMessage: function (array $message) use (&$pushedBack): void {
+                $pushedBack[] = $message;
+            },
+        );
+
+        $server->handle([
+            'jsonrpc' => '2.0',
+            'id' => 1,
+            'method' => 'initialize',
+            'params' => ['capabilities' => ['window' => ['workDoneProgress' => true]]],
+        ]);
+
+        $responses = $server->handle([
+            'jsonrpc' => '2.0',
+            'method' => 'textDocument/didOpen',
+            'params' => ['textDocument' => ['uri' => 'file:///tmp/Sample.php', 'version' => 1]],
+        ]);
+
+        $methods = array_map(static fn(array $frame): ?string => $frame['method'] ?? null, $responses);
+
+        self::assertSame(
+            ['window/workDoneProgress/create', 'textDocument/publishDiagnostics'],
+            $methods,
+        );
+        self::assertNotEmpty($pushedBack, 'every unrelated message consumed while waiting must still be pushed back');
+        self::assertSame($unrelated, $pushedBack[0]);
+    }
+
+    /**
+     * #245 coverage: clearDocument() (didClose) refuses (returns []) when
+     * the textDocument params carry no string uri.
+     */
+    public function testDidCloseWithAMissingUriIsANoOp(): void
+    {
+        $server = new LspServer('1.0.0', self::fakeSource([]));
+
+        $responses = $server->handle([
+            'jsonrpc' => '2.0',
+            'method' => 'textDocument/didClose',
+            'params' => ['textDocument' => []],
+        ]);
+
+        self::assertSame([], $responses);
+    }
+
+    /**
+     * #245 coverage: codeAction() refuses with an empty result (never a
+     * JSON-RPC error) when the textDocument params carry no string uri.
+     */
+    public function testCodeActionWithAMissingUriReturnsNoActions(): void
+    {
+        $server = new LspServer('1.0.0', self::fakeSource([]));
+
+        $responses = $server->handle([
+            'jsonrpc' => '2.0',
+            'id' => 9,
+            'method' => 'textDocument/codeAction',
+            'params' => [
+                'textDocument' => [],
+                'context' => ['diagnostics' => []],
+            ],
+        ]);
+
+        self::assertSame([], $responses[0]['result']);
+    }
+
+    /**
+     * #245 coverage: codeAction()'s #216 recompute-before-edit guard offers
+     * nothing when the freshly recomputed fixes come back empty, even
+     * though the cached (possibly session-served) $fixesByUri was
+     * non-empty -- the stale cached text must never be the only thing
+     * standing between an empty recompute and a WorkspaceEdit.
+     */
+    public function testCodeActionOffersNothingWhenTheFreshRecomputeReturnsNoFixes(): void
+    {
+        $cached = [self::fix(3, 12, "stale\n", 'SimplifyIfReturnBoolRector')];
+        $source = new class ($cached) implements DiagnosticsSource, EditDiagnosticsSource {
+            /** @param list<array{range: array{start: array{line:int,character:int}, end: array{line:int,character:int}}, newText: string, rectors: list<string>}> $cached */
+            public function __construct(private readonly array $cached) {}
+
+            public function diagnose(string $absolutePath): array
+            {
+                return ['fixes' => $this->cached];
+            }
+
+            public function diagnoseForEdit(string $absolutePath): array
+            {
+                return ['fixes' => []];
+            }
+
+            public function diagnoseBufferForEdit(string $absolutePath, string $content): array
+            {
+                return ['fixes' => []];
+            }
+        };
+        $server = new LspServer('1.0.0', $source);
+        $server->handle([
+            'jsonrpc' => '2.0',
+            'method' => 'textDocument/didOpen',
+            'params' => ['textDocument' => ['uri' => 'file:///tmp/Sample.php', 'version' => 1]],
+        ]);
+
+        $responses = $server->handle([
+            'jsonrpc' => '2.0',
+            'id' => 20,
+            'method' => 'textDocument/codeAction',
+            'params' => [
+                'textDocument' => ['uri' => 'file:///tmp/Sample.php'],
+                'context' => ['diagnostics' => []],
+            ],
+        ]);
+
+        self::assertSame([], $responses[0]['result']);
+    }
+
+    /**
+     * #245 coverage: executeCommand() refuses rector-warm.fixWorkspace with
+     * a visible JSON-RPC error when the configured diagnostics source does
+     * not implement WorkspaceDiagnosticsSource at all -- there is nothing a
+     * workspace-wide fix could run against.
+     */
+    public function testExecuteCommandRefusesFixWorkspaceWithoutAWorkspaceFixSource(): void
+    {
+        $server = new LspServer('1.0.0', self::fakeSource([]));
+        self::initialize($server, self::APPLY_EDIT_ONLY);
+
+        $responses = $server->handle([
+            'jsonrpc' => '2.0',
+            'id' => 12,
+            'method' => 'workspace/executeCommand',
+            'params' => ['command' => 'rector-warm.fixWorkspace'],
+        ]);
+
+        self::assertCount(1, $responses);
+        self::assertSame(12, $responses[0]['id']);
+        self::assertArrayHasKey('error', $responses[0]);
+        self::assertSame(-32803, $responses[0]['error']['code']);
+        self::assertStringContainsString('no workspace-fix source configured', $responses[0]['error']['message']);
+    }
+
+    /**
+     * #245 coverage: parseRange() returns null (treated exactly like a
+     * missing range -- every fix offered, none filtered by overlap) when
+     * `range` is present and is an array, but `start`/`end` are malformed
+     * (here: a non-int `line`) -- distinct from the missing-range case
+     * already covered elsewhere, which never reaches parseRange()'s
+     * array-shape check at all.
+     */
+    public function testCodeActionTreatsAMalformedRangeAsMissing(): void
+    {
+        $fixes = [self::fix(3, 12, "fixed\n", 'SimplifyIfReturnBoolRector')];
+        $server = new LspServer('1.0.0', self::fakeSource($fixes));
+        $server->handle([
+            'jsonrpc' => '2.0',
+            'method' => 'textDocument/didOpen',
+            'params' => ['textDocument' => ['uri' => 'file:///tmp/Sample.php', 'version' => 1]],
+        ]);
+
+        $responses = $server->handle([
+            'jsonrpc' => '2.0',
+            'id' => 21,
+            'method' => 'textDocument/codeAction',
+            'params' => [
+                'textDocument' => ['uri' => 'file:///tmp/Sample.php'],
+                'range' => ['start' => ['line' => 'not-an-int', 'character' => 0], 'end' => ['line' => 12, 'character' => 0]],
+                'context' => ['diagnostics' => []],
+            ],
+        ]);
+
+        $actions = $responses[0]['result'];
+        self::assertCount(2, $actions);
+        self::assertSame('Apply Rector: SimplifyIfReturnBoolRector', $actions[0]['title']);
+    }
 }
