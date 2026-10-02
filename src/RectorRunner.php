@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Dpt\McpRectorWarm;
 
 use Dpt\McpRectorWarm\Support\CallRequestFrame;
+use Dpt\McpRectorWarm\Support\CallResultFrame;
 use Dpt\McpRectorWarm\Support\HandshakeFrame;
 use Dpt\McpRectorWarm\Support\ProcessTree;
 use Dpt\McpRectorWarm\Warm\DependencyFileTracker;
@@ -796,19 +797,21 @@ class RectorRunner implements RunnerInterface
             $this->forgetDeadWorker();
             throw $e;
         }
-        $decoded = $raw === null ? null : \json_decode($raw, true);
-        if (!\is_array($decoded)) {
+        $frame = CallResultFrame::decode($raw);
+        if (!$frame->decodedToArray()) {
             // A clean EOF with no frame at all also means the worker is gone
             // (its own end of the socket closed) -- same self-heal as above.
             $this->forgetDeadWorker();
 
             throw new \RuntimeException('the warm worker closed its connection unexpectedly');
         }
-        if (isset($decoded['error'])) {
-            throw new \RuntimeException((string) $decoded['error']);
+        if ($frame->error() !== null) {
+            throw new \RuntimeException($frame->error());
         }
 
         /** @var array{exit_code: int, output: string, warm_boot: bool} $decoded */
+        $decoded = $frame->fields();
+
         return $decoded;
     }
 
@@ -992,15 +995,17 @@ class RectorRunner implements RunnerInterface
         \fclose($parentSocket);
         \pcntl_waitpid($pid, $status);
 
-        $decoded = $raw === '' ? null : \json_decode($raw, true);
-        if (!\is_array($decoded)) {
+        $frame = CallResultFrame::decode($raw);
+        if (!$frame->decodedToArray()) {
             throw new \RuntimeException("forked rector call produced no output (child exit status {$status})");
         }
-        if (isset($decoded['error'])) {
-            throw new \RuntimeException((string) $decoded['error']);
+        if ($frame->error() !== null) {
+            throw new \RuntimeException($frame->error());
         }
 
         /** @var array{exit_code: int, output: string, warm_boot: bool} $decoded */
+        $decoded = $frame->fields();
+
         return $decoded;
     }
 
@@ -1794,19 +1799,21 @@ class RectorRunner implements RunnerInterface
             }
 
             $resultJson = \is_file($resultFile) ? \file_get_contents($resultFile) : false;
-            $decoded = $resultJson === false || $resultJson === '' ? null : \json_decode($resultJson, true);
-            if (!\is_array($decoded)) {
+            $frame = CallResultFrame::decode($resultJson === false ? null : $resultJson);
+            if (!$frame->decodedToArray()) {
                 $stderr = (string) \file_get_contents($stderrFile);
                 $consoleOutput = (string) \file_get_contents($stdoutFile);
                 $diagnostic = \trim($stderr . ($consoleOutput !== '' ? \PHP_EOL . $consoleOutput : ''));
 
                 throw new \RuntimeException("cold rector subprocess produced no output (exit {$exitCode}): " . $diagnostic);
             }
-            if (isset($decoded['error'])) {
-                throw new \RuntimeException((string) $decoded['error']);
+            if ($frame->error() !== null) {
+                throw new \RuntimeException($frame->error());
             }
 
             /** @var array{exit_code: int, output: string, warm_boot: bool} $decoded */
+            $decoded = $frame->fields();
+
             return $decoded;
         } finally {
             // $resultFile/$stdoutFile/$stderrFile were all checked `!== false`
@@ -2329,17 +2336,19 @@ class RectorRunner implements RunnerInterface
             $this->discardProcWorker(true);
             throw $e;
         }
-        $decoded = $raw === null ? null : \json_decode($raw, true);
-        if (!\is_array($decoded)) {
+        $frame = CallResultFrame::decode($raw);
+        if (!$frame->decodedToArray()) {
             $message = 'the warm worker process closed its connection unexpectedly: ' . $this->procWorkerStderrTail();
             $this->discardProcWorker(true);
             throw new \RuntimeException($message);
         }
-        if (isset($decoded['error'])) {
-            throw new \RuntimeException((string) $decoded['error']);
+        if ($frame->error() !== null) {
+            throw new \RuntimeException($frame->error());
         }
 
         /** @var array{exit_code: int, output: string, warm_boot: bool} $decoded */
+        $decoded = $frame->fields();
+
         return $decoded;
     }
 
