@@ -218,9 +218,26 @@ final class ProtocolStdoutIsolatorTest extends TestCase
      */
     private static function withFd3UnavailableDuring(callable $callback): mixed
     {
-        \stream_wrapper_unregister('php');
-        \stream_wrapper_register('php', AlwaysFailingPhpWrapper::class);
+        self::assertTrue(
+            \stream_wrapper_unregister('php'),
+            'failed to unregister the built-in "php" stream wrapper',
+        );
         try {
+            self::assertTrue(
+                \stream_wrapper_register('php', AlwaysFailingPhpWrapper::class),
+                'failed to install the simulated "php" stream wrapper',
+            );
+
+            // Positive control: confirm the override is actually live before
+            // trusting what it measures -- a silently no-op override would
+            // let fopen() fall through to the real wrapper, and the whole
+            // point of this helper is to be independent of whatever this
+            // process's ambient fd table happens to look like.
+            self::assertFalse(
+                \is_resource(@\fopen('php://memory', 'r')),
+                'the simulated wrapper must fail every php:// open, including this canary',
+            );
+
             return $callback();
         } finally {
             \stream_wrapper_restore('php');
