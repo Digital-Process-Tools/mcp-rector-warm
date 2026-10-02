@@ -39,7 +39,7 @@ final readonly class HandshakeFrame
         $decoded = $raw === null ? null : \json_decode($raw, true);
         $isArray = \is_array($decoded);
         $ok = $isArray && ($decoded['ok'] ?? false) === true;
-        $error = $isArray && isset($decoded['error']) ? (string) $decoded['error'] : null;
+        $error = $isArray && isset($decoded['error']) ? Scalar::toString($decoded['error'], 'handshake frame "error"') : null;
 
         return new self($ok, $error, $isArray, $isArray ? $decoded : []);
     }
@@ -67,8 +67,31 @@ final readonly class HandshakeFrame
         return \is_array($this->fields[$key] ?? null) ? $this->fields[$key] : [];
     }
 
+    /**
+     * A path => hash map (the fork and standby handshakes' "bootstrap_files",
+     * #33): each value is a content hash, or null for a file that could not be
+     * read. Absent or non-array reads as [] exactly like array(); an entry of
+     * any other type throws, since storing it would poison every later
+     * staleness check that compares hashes.
+     *
+     * @return array<string, string|null>
+     * @throws \UnexpectedValueException
+     */
+    public function stringOrNullMap(string $key): array
+    {
+        $map = [];
+        foreach ($this->array($key) as $path => $hash) {
+            if ($hash !== null && !\is_string($hash)) {
+                throw new \UnexpectedValueException(\sprintf('handshake frame "%s": entry "%s" is %s, expected string or null', $key, $path, \get_debug_type($hash)));
+            }
+            $map[$path] = $hash;
+        }
+
+        return $map;
+    }
+
     public function int(string $key): int
     {
-        return (int) ($this->fields[$key] ?? 0);
+        return Scalar::toInt($this->fields[$key] ?? 0, \sprintf('handshake frame "%s"', $key));
     }
 }

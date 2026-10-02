@@ -146,7 +146,8 @@ if ($coverageDir === false || $coverageDir === '' || !extension_loaded('pcov')) 
 // of only reducing pcov's instrumentation footprint (#230's prior,
 // insufficient attempt: scoping pcov.exclude to vendor/ left this require
 // -- not pcov's instrumentation -- as the actual trigger).
-if (\in_array('worker', $_SERVER['argv'] ?? [], true)) {
+$prependArgv = $_SERVER['argv'] ?? [];
+if (\is_array($prependArgv) && \in_array('worker', $prependArgv, true)) {
     return;
 }
 

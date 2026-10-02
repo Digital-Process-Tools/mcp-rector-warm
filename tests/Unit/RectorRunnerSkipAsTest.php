@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Dpt\McpRectorWarm\Tests\Unit;
 
+use Dpt\McpRectorWarm\Tests\Support\Json;
 use Dpt\McpRectorWarm\RectorRunner;
 use PHPUnit\Framework\TestCase;
 
@@ -93,7 +94,7 @@ final class RectorRunnerSkipAsTest extends TestCase
         $this->apply($this->runnerWith($skipper, $this->pathsResolver(), $classes), '/p/src/Foo.php', '/p/src/.rector-warm-1/Foo.php');
 
         $resolved = self::callResolve($classes);
-        self::assertContains('/p/src/.rector-warm-1/Foo.php', $resolved['App\\SomeRule']);
+        self::assertContains('/p/src/.rector-warm-1/Foo.php', Json::array($resolved, 'App\\SomeRule'));
         self::assertSame(['/p/src/Bar.php'], $resolved['App\\Other']);
     }
 
@@ -125,7 +126,7 @@ final class RectorRunnerSkipAsTest extends TestCase
 
         $this->apply($this->runnerWith($skipper, $this->pathsResolver(), $classes), '/p/src/Foo.php', '/p/src/.rector-warm-1/Foo.php');
 
-        self::assertContains('/p/src/.rector-warm-1/Foo.php', self::callResolve($classes)['App\\SomeRule']);
+        self::assertContains('/p/src/.rector-warm-1/Foo.php', Json::array(self::callResolve($classes), 'App\\SomeRule'));
         self::assertFalse($skipper->marked);
     }
 

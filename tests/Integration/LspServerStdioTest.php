@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Dpt\McpRectorWarm\Tests\Integration;
 
+use Dpt\McpRectorWarm\Tests\Support\Json;
 use PHPUnit\Framework\TestCase;
 
 /**
@@ -108,7 +109,7 @@ final class LspServerStdioTest extends TestCase
             ]);
             $init = $this->readFrame($stdout, 1, $stderr);
             self::assertArrayHasKey('result', $init, 'initialize failed: ' . $this->stderrTail($stderr));
-            self::assertSame('rector-warm-lsp', $init['result']['serverInfo']['name']);
+            self::assertSame('rector-warm-lsp', Json::at($init, 'result', 'serverInfo', 'name'));
 
             $this->writeFrame($stdin, [
                 'jsonrpc' => '2.0',

@@ -36,8 +36,8 @@ final class RectorRunnerSessionWorkerTest extends TestCase
 
     private string $previousCwd;
 
-    /** @var list<string> */
-    private array $previousArgv;
+    /** $_SERVER['argv'] exactly as found, restored verbatim in tearDown() */
+    private mixed $previousArgv;
 
     protected function setUp(): void
     {

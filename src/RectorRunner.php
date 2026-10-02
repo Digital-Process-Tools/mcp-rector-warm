@@ -8,6 +8,7 @@ use Dpt\McpRectorWarm\Support\CallRequestFrame;
 use Dpt\McpRectorWarm\Support\CallResultFrame;
 use Dpt\McpRectorWarm\Support\HandshakeFrame;
 use Dpt\McpRectorWarm\Support\ProcessTree;
+use Dpt\McpRectorWarm\Support\Scalar;
 use Dpt\McpRectorWarm\Warm\DependencyFileTracker;
 use Dpt\McpRectorWarm\Warm\DirectorySnapshot;
 use Dpt\McpRectorWarm\Warm\Path;
@@ -606,7 +607,7 @@ class RectorRunner implements RunnerInterface
         // built the container -- the worker, never THIS instance -- so, unlike
         // $configFile/$configFileHash, they cannot be independently re-resolved here;
         // take the worker's own bootInPlace()-computed hashes verbatim off the handshake.
-        $this->bootstrapFileHashes = $frame->array('bootstrap_files');
+        $this->bootstrapFileHashes = $frame->stringOrNullMap('bootstrap_files');
     }
 
     /**
@@ -1234,12 +1235,12 @@ class RectorRunner implements RunnerInterface
             $kind = $reply['kind'] ?? null;
             if ($kind === 'stale') {
                 $this->reapSession();
-                $this->sessionLog('respawn', (string) ($reply['reason'] ?? 'stale'));
+                $this->sessionLog('respawn', Scalar::toString($reply['reason'] ?? 'stale', 'session reply "reason"'));
 
                 continue;
             }
             if ($kind === 'decline') {
-                $this->sessionLog('decline', (string) ($reply['reason'] ?? ''));
+                $this->sessionLog('decline', Scalar::toString($reply['reason'] ?? '', 'session reply "reason"'));
 
                 return null;
             }
@@ -1249,13 +1250,13 @@ class RectorRunner implements RunnerInterface
                     \sprintf(
                         'pid %d, call %d, %d files tracked',
                         (int) $this->sessionPid,
-                        (int) ($reply['calls'] ?? 0),
-                        (int) ($reply['tracked'] ?? 0),
+                        Scalar::toInt($reply['calls'] ?? 0, 'session reply "calls"'),
+                        Scalar::toInt($reply['tracked'] ?? 0, 'session reply "tracked"'),
                     ),
                 );
                 if (($reply['retire'] ?? false) === true) {
                     // The session exits by itself right after this reply.
-                    $this->sessionLog('retire', (string) ($reply['retire_reason'] ?? ''));
+                    $this->sessionLog('retire', Scalar::toString($reply['retire_reason'] ?? '', 'session reply "retire_reason"'));
                     $this->reapSession();
                 }
 
@@ -2296,7 +2297,7 @@ class RectorRunner implements RunnerInterface
         $this->configFileHash = $frame->string('config_file_hash');
         $this->composerFile = $frame->string('composer_file');
         $this->composerFileHash = $frame->string('composer_file_hash');
-        $this->bootstrapFileHashes = $frame->array('bootstrap_files');
+        $this->bootstrapFileHashes = $frame->stringOrNullMap('bootstrap_files');
     }
 
     /**
@@ -2903,10 +2904,10 @@ class RectorRunner implements RunnerInterface
         // Rector's parallel mode forks workers via proc_open(PHP_BINARY . ' ' . $_SERVER['argv'][0] . ' worker --port=X ...').
         // From within an MCP server, argv[0] is our bin (not rector) so workers can't respawn.
         // Spoof argv[0] to the real rector binary path so workers spawn correctly. Restore after.
-        $origArgv0 = $_SERVER['argv'][0] ?? null;
+        $origArgv0 = self::serverArgv()[0] ?? null;
         $rectorBin = $this->findRectorBin();
         if ($rectorBin !== null) {
-            $_SERVER['argv'][0] = $rectorBin;
+            self::setServerArgv0($rectorBin);
         }
 
         // #184: Rector\Console\ConsoleApplication::doRun() unconditionally calls
@@ -2934,7 +2935,7 @@ class RectorRunner implements RunnerInterface
         } finally {
             $echoed = ob_get_clean();
             if ($origArgv0 !== null) {
-                $_SERVER['argv'][0] = $origArgv0;
+                self::setServerArgv0($origArgv0);
             }
             if ($origAllowXdebugEnv === false) {
                 putenv('RECTOR_ALLOW_XDEBUG');
@@ -2943,16 +2944,40 @@ class RectorRunner implements RunnerInterface
             }
         }
 
-        $combined = (string) self::callDynamic($output, 'fetch');
+        $combined = Scalar::toString(self::callDynamic($output, 'fetch'), 'Rector output fetch()');
         if (is_string($echoed) && $echoed !== '') {
             $combined = $combined === '' ? $echoed : $combined . "\n" . $echoed;
         }
 
         return [
-            'exit_code' => (int) $exit,
+            'exit_code' => Scalar::toInt($exit, 'Rector application run() exit code'),
             'output' => $combined,
             'warm_boot' => $warmBoot,
         ];
+    }
+
+    /**
+     * $_SERVER['argv'] as an array; [] when it is unset (PHP leaves it unset
+     * when register_argc_argv is off), so writing index 0 creates it, exactly
+     * as a bare `$_SERVER['argv'][0] = ...` did.
+     *
+     * @return array<mixed>
+     */
+    private static function serverArgv(): array
+    {
+        $argv = $_SERVER['argv'] ?? [];
+        if (!\is_array($argv)) {
+            throw new \UnexpectedValueException(\sprintf('$_SERVER[\'argv\'] is %s, expected an array', \get_debug_type($argv)));
+        }
+
+        return $argv;
+    }
+
+    private static function setServerArgv0(mixed $value): void
+    {
+        $argv = self::serverArgv();
+        $argv[0] = $value;
+        $_SERVER['argv'] = $argv;
     }
 
     /**
@@ -3009,14 +3034,14 @@ class RectorRunner implements RunnerInterface
             if (self::callDynamic($skipper, 'shouldSkipFilePath', [$originalPath])) {
                 $pathsResolver = self::callDynamic($this->container, 'get', [\Rector\Skipper\SkipCriteriaResolver\SkippedPathsResolver::class]);
                 \assert(\is_object($pathsResolver));
-                self::overwriteResolved($pathsResolver, 'skippedPaths', \array_merge(self::callDynamic($pathsResolver, 'resolve'), $copyPaths));
+                self::overwriteResolved($pathsResolver, 'skippedPaths', \array_merge(self::resolvedSkippedPaths($pathsResolver), $copyPaths));
 
                 return;
             }
 
             $classResolver = self::callDynamic($this->container, 'get', [\Rector\Skipper\SkipCriteriaResolver\SkippedClassResolver::class]);
             \assert(\is_object($classResolver));
-            $classes = self::callDynamic($classResolver, 'resolve');
+            $classes = self::resolvedSkippedClasses($classResolver);
             $changed = false;
             foreach ($classes as $class => $files) {
                 if ($files === null) {
@@ -3235,6 +3260,68 @@ class RectorRunner implements RunnerInterface
     private static function callDynamic(object $object, string $method, array $arguments = []): mixed
     {
         return $object->$method(...$arguments);
+    }
+
+    /**
+     * SkippedPathsResolver::resolve()'s list, checked: applySkipsOfOriginalPath()
+     * catches the throw and fails open, same as any other Rector API drift.
+     *
+     * @return list<string>
+     */
+    private static function resolvedSkippedPaths(object $resolver): array
+    {
+        $paths = self::callDynamic($resolver, 'resolve');
+        if (!\is_array($paths)) {
+            throw new \UnexpectedValueException(\sprintf('%s::resolve() returned %s, expected an array', $resolver::class, \get_debug_type($paths)));
+        }
+        $checked = [];
+        foreach ($paths as $path) {
+            if (!\is_string($path)) {
+                throw new \UnexpectedValueException(\sprintf('%s::resolve() holds %s, expected strings', $resolver::class, \get_debug_type($path)));
+            }
+            $checked[] = $path;
+        }
+
+        return $checked;
+    }
+
+    /**
+     * SkippedClassResolver::resolve()'s rule => files map (null = skipped
+     * everywhere), checked: applySkipsOfOriginalPath() catches the throw and
+     * fails open, same as any other Rector API drift.
+     *
+     * @return array<string, list<string>|null>
+     */
+    private static function resolvedSkippedClasses(object $resolver): array
+    {
+        $classes = self::callDynamic($resolver, 'resolve');
+        if (!\is_array($classes)) {
+            throw new \UnexpectedValueException(\sprintf('%s::resolve() returned %s, expected an array', $resolver::class, \get_debug_type($classes)));
+        }
+        $checked = [];
+        foreach ($classes as $class => $files) {
+            if (!\is_string($class)) {
+                throw new \UnexpectedValueException(\sprintf('%s::resolve() has key %s, expected a class name', $resolver::class, \get_debug_type($class)));
+            }
+            if ($files === null) {
+                $checked[$class] = null;
+
+                continue;
+            }
+            if (!\is_array($files) || !\array_is_list($files)) {
+                throw new \UnexpectedValueException(\sprintf('%s::resolve()["%s"] is not a list of paths', $resolver::class, $class));
+            }
+            $paths = [];
+            foreach ($files as $file) {
+                if (!\is_string($file)) {
+                    throw new \UnexpectedValueException(\sprintf('%s::resolve()["%s"] holds %s, expected paths', $resolver::class, $class, \get_debug_type($file)));
+                }
+                $paths[] = $file;
+            }
+            $checked[$class] = $paths;
+        }
+
+        return $checked;
     }
 
     /** @param list<string>|array<string, list<string>|null> $value */

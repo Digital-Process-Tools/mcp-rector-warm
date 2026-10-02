@@ -84,7 +84,8 @@ final class RectorDiagnosticsSourceBufferTest extends TestCase
             \RecursiveIteratorIterator::SELF_FIRST,
         );
         foreach ($iterator as $file) {
-            $entries[] = str_replace('\\', '/', substr((string) $file, strlen($this->workDir) + 1));
+            self::assertInstanceOf(\SplFileInfo::class, $file);
+            $entries[] = str_replace('\\', '/', substr($file->getPathname(), strlen($this->workDir) + 1));
         }
         sort($entries);
 

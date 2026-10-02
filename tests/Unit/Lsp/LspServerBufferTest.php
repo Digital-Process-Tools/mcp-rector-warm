@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Dpt\McpRectorWarm\Tests\Unit\Lsp;
 
+use Dpt\McpRectorWarm\Tests\Support\Json;
 use Dpt\McpRectorWarm\Lsp\BufferDiagnosticsSource;
 use Dpt\McpRectorWarm\Lsp\EditDiagnosticsSource;
 use Dpt\McpRectorWarm\Lsp\LspServer;
@@ -135,11 +136,11 @@ final class LspServerBufferTest extends TestCase
     }
 
     /**
-     * @return list<array<string, mixed>>
+     * @return array<mixed>
      */
     private static function codeAction(LspServer $server): array
     {
-        return $server->handle([
+        return Json::array($server->handle([
             'jsonrpc' => '2.0',
             'id' => 7,
             'method' => 'textDocument/codeAction',
@@ -148,7 +149,7 @@ final class LspServerBufferTest extends TestCase
                 'range' => ['start' => ['line' => 1, 'character' => 0], 'end' => ['line' => 1, 'character' => 0]],
                 'context' => ['diagnostics' => []],
             ],
-        ])[0]['result'];
+        ]), 0, 'result');
     }
 
     public function testInitializeAdvertisesFullSyncWhenTheSourceCanDiagnoseBuffers(): void
@@ -157,7 +158,7 @@ final class LspServerBufferTest extends TestCase
 
         $response = $server->handle(['jsonrpc' => '2.0', 'id' => 1, 'method' => 'initialize', 'params' => ['capabilities' => []]]);
 
-        self::assertSame(1, $response[0]['result']['capabilities']['textDocumentSync']['change']);
+        self::assertSame(1, Json::at($response, 0, 'result', 'capabilities', 'textDocumentSync', 'change'));
     }
 
     public function testInitializeKeepsSyncNoneWhenTheSourceCannotDiagnoseBuffers(): void
@@ -166,7 +167,7 @@ final class LspServerBufferTest extends TestCase
 
         $response = $server->handle(['jsonrpc' => '2.0', 'id' => 1, 'method' => 'initialize', 'params' => ['capabilities' => []]]);
 
-        self::assertSame(0, $response[0]['result']['capabilities']['textDocumentSync']['change']);
+        self::assertSame(0, Json::at($response, 0, 'result', 'capabilities', 'textDocumentSync', 'change'));
     }
 
     public function testADidChangeWithFixableContentPublishesADiagnosticWithoutAnySave(): void
@@ -183,10 +184,10 @@ final class LspServerBufferTest extends TestCase
 
         self::assertCount(1, $frames);
         self::assertSame('textDocument/publishDiagnostics', $frames[0]['method']);
-        self::assertSame(self::URI, $frames[0]['params']['uri']);
-        self::assertSame(2, $frames[0]['params']['version']);
-        self::assertCount(1, $frames[0]['params']['diagnostics']);
-        self::assertSame('SimplifyIfReturnBoolRector', $frames[0]['params']['diagnostics'][0]['message']);
+        self::assertSame(self::URI, Json::at($frames, 0, 'params', 'uri'));
+        self::assertSame(2, Json::at($frames, 0, 'params', 'version'));
+        self::assertCount(1, Json::array($frames, 0, 'params', 'diagnostics'));
+        self::assertSame('SimplifyIfReturnBoolRector', Json::at($frames, 0, 'params', 'diagnostics', 0, 'message'));
         self::assertSame([['kind' => 'buffer', 'path' => '/tmp/Sample.php', 'content' => "<?php\nfixable\n"]], $source->calls);
         self::assertNull($server->nextDiagnosticsDeadline());
     }
@@ -218,7 +219,7 @@ final class LspServerBufferTest extends TestCase
 
         self::assertCount(1, $source->calls);
         self::assertSame("<?php\nfixable\n", $source->calls[0]['content']);
-        self::assertSame(3, $server->takeReadyDiagnostics()[0]['params']['version']);
+        self::assertSame(3, Json::at($server->takeReadyDiagnostics(), 0, 'params', 'version'));
     }
 
     public function testAResultForVersionNIsNotPublishedOnceVersionNPlusOneHasArrived(): void
@@ -238,8 +239,8 @@ final class LspServerBufferTest extends TestCase
         $server->runDueDiagnostics(self::LATER);
         $frames = $server->takeReadyDiagnostics();
         self::assertCount(1, $frames);
-        self::assertSame(2, $frames[0]['params']['version']);
-        self::assertSame([], $frames[0]['params']['diagnostics']);
+        self::assertSame(2, Json::at($frames, 0, 'params', 'version'));
+        self::assertSame([], Json::at($frames, 0, 'params', 'diagnostics'));
     }
 
     public function testABufferChangedToCleanContentPublishesAnEmptyList(): void
@@ -248,14 +249,14 @@ final class LspServerBufferTest extends TestCase
 
         self::change($server, 1, "<?php\nfixable\n");
         $server->runDueDiagnostics(self::LATER);
-        self::assertCount(1, $server->takeReadyDiagnostics()[0]['params']['diagnostics']);
+        self::assertCount(1, Json::array($server->takeReadyDiagnostics(), 0, 'params', 'diagnostics'));
 
         self::change($server, 2, "<?php\nclean\n");
         $server->runDueDiagnostics(self::LATER);
         $frames = $server->takeReadyDiagnostics();
 
         self::assertCount(1, $frames);
-        self::assertSame([], $frames[0]['params']['diagnostics']);
+        self::assertSame([], Json::at($frames, 0, 'params', 'diagnostics'));
     }
 
     public function testABrokenBufferPublishesTheErrorDiagnostic(): void
@@ -264,11 +265,11 @@ final class LspServerBufferTest extends TestCase
 
         self::change($server, 1, "<?php\nbroken\n");
         $server->runDueDiagnostics(self::LATER);
-        $diagnostics = $server->takeReadyDiagnostics()[0]['params']['diagnostics'];
+        $diagnostics = Json::array($server->takeReadyDiagnostics(), 0, 'params', 'diagnostics');
 
         self::assertCount(1, $diagnostics);
-        self::assertSame(1, $diagnostics[0]['severity']);
-        self::assertSame(2, $diagnostics[0]['range']['start']['line']);
+        self::assertSame(1, Json::at($diagnostics, 0, 'severity'));
+        self::assertSame(2, Json::at($diagnostics, 0, 'range', 'start', 'line'));
     }
 
     public function testCodeActionsUseTheDiagnosticsVersionAndGoQuietOnceTheBufferMovesOn(): void
@@ -283,7 +284,7 @@ final class LspServerBufferTest extends TestCase
         // buffer is still at version 1.
         $actions = self::codeAction($server);
         self::assertNotSame([], $actions);
-        self::assertSame("fixed\n", $actions[0]['edit']['changes'][self::URI][0]['newText']);
+        self::assertSame("fixed\n", Json::at($actions, 0, 'edit', 'changes', self::URI, 0, 'newText'));
 
         // Must not fire: the buffer is now at version 2, so ranges computed
         // for version 1 would land on the wrong text.
@@ -310,7 +311,7 @@ final class LspServerBufferTest extends TestCase
 
         $actions = self::codeAction($server);
         self::assertNotSame([], $actions);
-        self::assertSame('fresh' . "\n", $actions[0]['edit']['changes'][self::URI][0]['newText']);
+        self::assertSame('fresh' . "\n", Json::at($actions, 0, 'edit', 'changes', self::URI, 0, 'newText'));
     }
 
     public function testCodeActionsCarryTheVersionWhenTheClientSupportsDocumentChanges(): void
@@ -324,10 +325,10 @@ final class LspServerBufferTest extends TestCase
         $server->runDueDiagnostics(self::LATER);
         $server->takeReadyDiagnostics();
 
-        $edit = self::codeAction($server)[0]['edit'];
+        $edit = Json::array(self::codeAction($server), 0, 'edit');
         self::assertArrayNotHasKey('changes', $edit);
-        self::assertSame(['uri' => self::URI, 'version' => 4], $edit['documentChanges'][0]['textDocument']);
-        self::assertSame("fixed\n", $edit['documentChanges'][0]['edits'][0]['newText']);
+        self::assertSame(['uri' => self::URI, 'version' => 4], Json::at($edit, 'documentChanges', 0, 'textDocument'));
+        self::assertSame("fixed\n", Json::at($edit, 'documentChanges', 0, 'edits', 0, 'newText'));
     }
 
     public function testDidCloseDropsThePendingBuffer(): void
@@ -337,7 +338,7 @@ final class LspServerBufferTest extends TestCase
 
         self::change($server, 1, "<?php\nfixable\n");
         $closed = $server->handle(['jsonrpc' => '2.0', 'method' => 'textDocument/didClose', 'params' => ['textDocument' => ['uri' => self::URI]]]);
-        self::assertSame([], $closed[0]['params']['diagnostics']);
+        self::assertSame([], Json::at($closed, 0, 'params', 'diagnostics'));
 
         self::assertNull($server->nextDiagnosticsDeadline());
         $server->runDueDiagnostics(self::LATER);

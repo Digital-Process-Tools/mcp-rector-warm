@@ -108,6 +108,30 @@ final class HandshakeFrameTest extends TestCase
         self::assertFalse($frame->decodedToArray());
     }
 
+    public function testStringOrNullMapKeepsHashesAndNullsVerbatim(): void
+    {
+        $frame = HandshakeFrame::decode((string) json_encode([
+            'ok' => true,
+            'bootstrap_files' => ['/tmp/a.php' => 'abc', '/tmp/gone.php' => null],
+        ]));
+
+        self::assertSame(['/tmp/a.php' => 'abc', '/tmp/gone.php' => null], $frame->stringOrNullMap('bootstrap_files'));
+        self::assertSame([], $frame->stringOrNullMap('missing'));
+    }
+
+    public function testStringOrNullMapRejectsAnEntryThatIsNeitherHashNorNull(): void
+    {
+        $frame = HandshakeFrame::decode((string) json_encode([
+            'ok' => true,
+            'bootstrap_files' => ['/tmp/a.php' => 'abc', '/tmp/b.php' => 7],
+        ]));
+
+        $this->expectException(\UnexpectedValueException::class);
+        $this->expectExceptionMessage('handshake frame "bootstrap_files": entry "/tmp/b.php" is int, expected string or null');
+
+        $frame->stringOrNullMap('bootstrap_files');
+    }
+
     public function testJsonScalarRawIsNotOkAndDidNotDecodeToArray(): void
     {
         // json_decode('"ok"', true) decodes successfully to a string, not an
