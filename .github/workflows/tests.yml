@@ -369,9 +369,12 @@ jobs:
   # coverage" below points `PHP_INI_SCAN_DIR` at a generated ini that sets
   # `auto_prepend_file = tests/coverage/prepend.php` for every `php`
   # invocation this job's shell session launches from that point on
-  # (`proc_open()` inherits the parent's environment unless told otherwise,
-  # and none of this repo's call sites override that -- so the subprocess
-  # case needs nothing beyond the env var; a `pcntl_fork()` child needs
+  # (`proc_open()` inherits the parent's environment unless told otherwise;
+  # the one call site that does override it -- OrphanWatchdogTest's PATH-
+  # break test (#269) -- seeds its override from `getenv()` and only
+  # replaces `PATH`, so `PHP_INI_SCAN_DIR` still reaches that subprocess too
+  # -- so the subprocess case needs nothing beyond the env var; a
+  # `pcntl_fork()` child needs
   # even less, since forking duplicates tests/coverage/prepend.php's
   # already-registered shutdown function along with the rest of the
   # process). "Merge forked/subprocess coverage" folds every one of those

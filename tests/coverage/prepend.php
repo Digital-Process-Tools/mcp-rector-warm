@@ -19,9 +19,13 @@ declare(strict_types=1);
  * launches:
  *
  *   - the top-level `vendor/bin/phpunit` process itself;
- *   - every `proc_open([PHP_BINARY, ...])` subprocess, because none of those
- *     call sites pass an explicit `env` array, so PHP inherits the parent's
- *     environment -- `PHP_INI_SCAN_DIR` included -- for free;
+ *   - every `proc_open([PHP_BINARY, ...])` subprocess: most call sites pass
+ *     no explicit `env` array at all, so PHP inherits the parent's
+ *     environment -- `PHP_INI_SCAN_DIR` included -- for free. The one
+ *     exception (tests/Integration/OrphanWatchdogTest.php's PATH-break test,
+ *     #269) DOES pass an explicit `env` array, but seeds it from `getenv()`
+ *     and only overrides `PATH`, so `PHP_INI_SCAN_DIR` still comes through
+ *     unchanged;
  *   - every `pcntl_fork()` child, because a fork duplicates the whole
  *     process image. This file does not run again in the child; the child
  *     simply inherits the shutdown function this file already registered in
