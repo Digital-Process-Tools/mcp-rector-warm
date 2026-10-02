@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Dpt\McpRectorWarm;
 
+use Dpt\McpRectorWarm\Support\CallRequestFrame;
 use Dpt\McpRectorWarm\Support\HandshakeFrame;
 use Dpt\McpRectorWarm\Support\ProcessTree;
 use Dpt\McpRectorWarm\Warm\DependencyFileTracker;
@@ -687,18 +688,17 @@ class RectorRunner implements RunnerInterface
                 if ($frame === null) {
                     break;
                 }
-                $request = \json_decode($frame, true);
-                /** @var list<string> $argv */
-                $argv = \is_array($request) && \is_array($request['argv'] ?? null) ? \array_values(\array_filter($request['argv'], \is_string(...))) : [];
-                $warmBoot = \is_array($request) && ($request['warm_boot'] ?? false) === true;
+                $request = CallRequestFrame::decode($frame);
+                $argv = $request->argv();
+                $warmBoot = $request->bool('warm_boot', false);
                 // Default true (analysis, deadline applies) when the field is
                 // somehow missing -- the safer of the two readings for an
                 // unrecognised/older frame: it fails toward "may still be
                 // killed", never toward "silently unkillable" (#72).
-                $dryRun = !\is_array($request) || ($request['dry_run'] ?? true) === true;
+                $dryRun = $request->bool('dry_run', true);
                 // #216: default false when missing, matching every request
                 // frame this worker understood before this field existed.
-                $noSession = \is_array($request) && ($request['no_session'] ?? false) === true;
+                $noSession = $request->bool('no_session', false);
                 try {
                     $result = $this->serveRequest($argv, $warmBoot, $dryRun, $daemonPid, $noSession);
                 } catch (\Throwable $e) {
@@ -1473,13 +1473,12 @@ class RectorRunner implements RunnerInterface
                 if ($frame === null) {
                     break;
                 }
-                $request = \json_decode($frame, true);
-                /** @var list<string> $argv */
-                $argv = \is_array($request) && \is_array($request['argv'] ?? null) ? \array_values(\array_filter($request['argv'], \is_string(...))) : [];
-                $path = \is_array($request) ? (string) ($request['path'] ?? '') : '';
-                $warmBoot = \is_array($request) && ($request['warm_boot'] ?? false) === true;
-                $bufferCopy = \is_array($request) && ($request['buffer_copy'] ?? false) === true;
-                $deadline = \is_array($request) && \is_int($request['deadline_ns'] ?? null) ? $request['deadline_ns'] : null;
+                $request = CallRequestFrame::decode($frame);
+                $argv = $request->argv();
+                $path = $request->string('path');
+                $warmBoot = $request->bool('warm_boot', false);
+                $bufferCopy = $request->bool('buffer_copy', false);
+                $deadline = $request->intOrNull('deadline_ns');
 
                 $stale = $session->staleReason();
                 if ($stale !== null) {
@@ -2593,10 +2592,9 @@ class RectorRunner implements RunnerInterface
         if ($frame === null) {
             return 0;
         }
-        $request = \json_decode($frame, true);
-        /** @var list<string> $argv */
-        $argv = \is_array($request) && \is_array($request['argv'] ?? null) ? \array_values(\array_filter($request['argv'], \is_string(...))) : [];
-        $warmBoot = \is_array($request) && ($request['warm_boot'] ?? false) === true;
+        $request = CallRequestFrame::decode($frame);
+        $argv = $request->argv();
+        $warmBoot = $request->bool('warm_boot', false);
         // #134: execute() below runs the real analysis synchronously, in this
         // process, with no fork and no tick point to hang a daemon-liveness poll
         // off (that is exactly why the idle-wait loop above cannot help once a
