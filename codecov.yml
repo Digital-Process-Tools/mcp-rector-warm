@@ -1,12 +1,15 @@
-# Coverage is measured, not gated (#209). Every PR still uploads, so Codecov
-# can compare it with main and report patch coverage, but it posts no comment
-# and its status checks never fail a PR.
+# Project coverage is gated at 90% (#275), reached in #279. A PR fails the
+# codecov/project check if it takes total line coverage below 90%, with 0.5%
+# slack for upload noise across the three OS legs. Patch coverage stays
+# informational: a small PR touching hard-to-test fork/kill paths should not
+# be blocked on its own diff's percentage. No PR comment is posted.
 comment: false
 coverage:
   status:
     project:
       default:
-        informational: true
+        target: 90%
+        threshold: 0.5%
     patch:
       default:
         informational: true
