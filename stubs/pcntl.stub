@@ -1,0 +1,15 @@
+<?php
+
+// PHPStan stub (phpstan.neon stubFiles), never loaded at runtime. PHPStan's own
+// pcntl_waitpid() signature types $status going IN but declares no out-type, so
+// at level 10 every read of $status after a wait is `mixed`. PHP always writes an
+// int status there; this stub says so, and nothing else.
+
+/**
+ * @param mixed $status
+ * @param-out int $status
+ * @param array<mixed> $resource_usage
+ */
+function pcntl_waitpid(int $process_id, &$status, int $flags = 0, &$resource_usage = []): int
+{
+}

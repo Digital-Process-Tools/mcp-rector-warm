@@ -173,7 +173,9 @@ final class LspServer
     }
 
     /**
-     * @param array<string, mixed> $message
+     * @param array<mixed> $message json_decode() output, and so array<mixed>
+     *   rather than array<string, mixed>: a numeric member name ("0") decodes
+     *   to an int key. Every params array handed on from here is the same.
      * @return list<array<string, mixed>> zero or more frames to write --
      *   0 for a notification needing no reply and producing no diagnostics
      *   push, 1 for an ordinary request/response or a single
@@ -423,7 +425,7 @@ final class LspServer
      * (incremental) changes cannot be followed; its buffer is dropped rather
      * than diagnosed from a wrong reconstruction.
      *
-     * @param array<string, mixed> $params
+     * @param array<mixed> $params
      * @return list<array<string, mixed>>
      */
     private function changeDocument(array $params): array
@@ -689,7 +691,7 @@ final class LspServer
     }
 
     /**
-     * @param array<string, mixed> $textDocument
+     * @param array<mixed> $textDocument
      * @param bool $touchActivity #115 self-review finding: `diagnoseDocument()`
      *   is ALSO the function `watchedFilesChanged()`'s own re-diagnose loop
      *   calls for every open document. If that call touched activity too,
@@ -1034,7 +1036,7 @@ final class LspServer
     }
 
     /**
-     * @param array<string, mixed> $textDocument
+     * @param array<mixed> $textDocument
      * @return list<array<string, mixed>>
      */
     private function clearDocument(array $textDocument): array
@@ -1072,7 +1074,7 @@ final class LspServer
     }
 
     /**
-     * @param array<string, mixed> $params
+     * @param array<mixed> $params
      * @return array<string, mixed>
      */
     private function codeAction(mixed $id, array $params): array
@@ -1192,7 +1194,7 @@ final class LspServer
      * dropped. A file that is open but not dirty is unaffected and still
      * gets its fix.
      *
-     * @param array<string, mixed> $params
+     * @param array<mixed> $params
      * @return list<array<string, mixed>>
      */
     private function executeCommand(mixed $id, array $params): array

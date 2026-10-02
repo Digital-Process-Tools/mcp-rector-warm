@@ -1,0 +1,22 @@
+<?php
+
+// PHPStan stub (phpstan.neon stubFiles), never loaded at runtime. The
+// phpstorm-stubs PHPStan ships type pcov\waiting() and pcov\collect() as a bare
+// `array`; tests/coverage/prepend.php feeds them to str_starts_with() and to
+// RawCodeCoverageData::fromXdebugWithoutPathCoverage(). These are the shapes
+// pcov documents and returns: file paths, and per-file line => hit-count maps.
+
+namespace pcov;
+
+/**
+ * @param list<string> $filter
+ * @return array<string, array<int, int>>
+ */
+function collect(int $type = 0, array $filter = []): array
+{
+}
+
+/** @return list<string> */
+function waiting(): array
+{
+}

@@ -1354,7 +1354,7 @@ class RectorRunner implements RunnerInterface
      * recognises those kill sites recognises this one.
      *
      * @param array<string, mixed> $request
-     * @return array<string, mixed>|null
+     * @return array<mixed>|null
      */
     private function askSession(array $request, ?int $deadline, ?int $daemonPid): ?array
     {
@@ -2062,7 +2062,7 @@ class RectorRunner implements RunnerInterface
      * shape is PHPStan-stub territory, not something PHP >= 8.2 itself
      * guarantees, so this keeps the guard genuinely load-bearing (#208).
      *
-     * @param array<string, mixed>|false $iniAll
+     * @param array<mixed>|false $iniAll
      * @return list<string>
      */
     private static function collectIniOverrideArgsFrom($iniAll): array
@@ -2775,7 +2775,7 @@ class RectorRunner implements RunnerInterface
             return null;
         }
         $unpacked = \unpack('N', $header);
-        $length = \is_array($unpacked) ? (int) $unpacked[1] : 0;
+        $length = \is_array($unpacked) ? Scalar::toInt($unpacked[1], 'frame length header') : 0;
         if ($length === 0) {
             return '';
         }
@@ -3235,7 +3235,18 @@ class RectorRunner implements RunnerInterface
         }
 
         if (\method_exists($skipper, 'shouldSkipElementAndFilePath')) {
-            return $skipper->shouldSkipElementAndFilePath($class, $path);
+            $skipped = $skipper->shouldSkipElementAndFilePath($class, $path);
+            if (!\is_bool($skipped)) {
+                // Was a TypeError on this method's own bool return; same
+                // failure, now named like the unsupported-version throw below.
+                throw new \RuntimeException(\sprintf(
+                    '%s::shouldSkipElementAndFilePath() returned %s, expected bool -- unsupported Skipper version.',
+                    $skipper::class,
+                    \get_debug_type($skipped),
+                ));
+            }
+
+            return $skipped;
         }
 
         throw new \RuntimeException(\sprintf(

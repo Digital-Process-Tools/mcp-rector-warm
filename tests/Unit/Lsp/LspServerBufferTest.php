@@ -8,6 +8,7 @@ use Dpt\McpRectorWarm\Tests\Support\Json;
 use Dpt\McpRectorWarm\Lsp\BufferDiagnosticsSource;
 use Dpt\McpRectorWarm\Lsp\EditDiagnosticsSource;
 use Dpt\McpRectorWarm\Lsp\LspServer;
+use Dpt\McpRectorWarm\Support\Scalar;
 use PHPUnit\Framework\TestCase;
 
 /**
@@ -509,7 +510,7 @@ final class LspServerBufferTest extends TestCase
         };
 
         $frameWriter = function (array $frame) use ($addEntry): void {
-            $addEntry('wrote:' . ($frame['method'] ?? '?'));
+            $addEntry('wrote:' . Scalar::toString($frame['method'] ?? '?', 'frame method'));
         };
 
         $server = new LspServer('1.0.0', $source, frameWriter: $frameWriter);

@@ -1,0 +1,28 @@
+<?php
+
+// PHPStan scan file (phpstan.neon scanFiles), never loaded at runtime.
+// RectorRunner::bootInPlace() names these three classes only to build the
+// PHP-Scoper-prefixed names inside Rector's own build
+// (RectorPrefix<N>\Symfony\Component\Console\...) and resolves those at
+// runtime. This package does not depend on symfony/console: the unprefixed
+// classes are in vendor/ only while a dev tool (php-cs-fixer) pulls them in,
+// and without them PHPStan reports class.notFound on those ::class names.
+// scanFiles, not stubFiles: a stub cannot declare a class nothing else does.
+
+namespace Symfony\Component\Console {
+    class Application
+    {
+    }
+}
+
+namespace Symfony\Component\Console\Input {
+    class ArgvInput
+    {
+    }
+}
+
+namespace Symfony\Component\Console\Output {
+    class BufferedOutput
+    {
+    }
+}
