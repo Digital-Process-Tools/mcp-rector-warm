@@ -25,16 +25,32 @@ final class RectorRunnerConfigResolutionTest extends TestCase
 
     private string $previousCwd;
 
+    /** @var list<string> */
+    private array $previousArgv;
+
     protected function setUp(): void
     {
         $this->tmp = sys_get_temp_dir() . '/rector-runner-config-resolution-test-' . bin2hex(random_bytes(8));
         mkdir($this->tmp);
         $this->previousCwd = (string) getcwd();
+
+        // resolveMainConfigFile() -> RectorConfigsResolver::provide() builds a
+        // Symfony ArgvInput from the REAL process $_SERVER['argv'] and looks
+        // for --config/-c there. Left untouched, PHPUnit's own -c/--config
+        // flag (an ordinary PHPUnit invocation, e.g. from an IDE) is
+        // indistinguishable to that check from "the user passed Rector a
+        // --config", so it tries to treat phpunit.xml as Rector's own config
+        // file, resolves it relative to this test's chdir()'d tmp dir, and
+        // throws "The path "phpunit.xml" does not exist." Same reset this
+        // file's own sibling tests already use (RectorRunnerSessionWorkerTest.php).
+        $this->previousArgv = $_SERVER['argv'] ?? ['rector'];
+        $_SERVER['argv'] = ['rector'];
     }
 
     protected function tearDown(): void
     {
         chdir($this->previousCwd);
+        $_SERVER['argv'] = $this->previousArgv;
     }
 
     private function method(string $name): \ReflectionMethod
@@ -237,6 +253,20 @@ final class RectorRunnerConfigResolutionTest extends TestCase
         self::assertTrue(class_exists($fqn, false));
     }
 
+    /**
+     * Run in a fresh process: declareFakePrefixedProbeClass() eval()s a real
+     * class declaration, which (like any class declaration) is permanent for
+     * the rest of whichever PHP process it runs in -- get_declared_classes()
+     * never forgets it. Left in the main shared PHPUnit process, this class
+     * would stay declared for every test that runs afterward in the same
+     * run, so a LATER, unrelated test calling detectRectorPrefix() would see
+     * it and misreport 'RectorPrefix998' as a real detected prefix. A fresh
+     * process is the only way to let this test's own fake class disappear
+     * with it, the same isolation
+     * testDetectRectorPrefixReturnsNullWithNoPrefixedClassDeclaredThenFindsOneOnceDeclared()
+     * above already needs for the same reason.
+     */
+    #[\PHPUnit\Framework\Attributes\RunInSeparateProcess]
     public function testResolvePrefixedCombinesPrefixAndAutoloadsRealClassAndThrowsForMissingOne(): void
     {
         $fqn = $this->declareFakePrefixedProbeClass('998');
