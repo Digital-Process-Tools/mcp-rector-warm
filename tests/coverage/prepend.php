@@ -65,9 +65,13 @@ declare(strict_types=1);
  * measured: a throwaway two-line-probe script (one statement reachable only
  * in the parent, one reachable only in the child) registered a shutdown
  * dump BEFORE calling pcntl_fork(), with no explicit in-child dump call.
- * Result -- parent and child each wrote their own `<pid>-*.json` pcov
- * snapshot, and each snapshot showed only its own process's line as hit (the
- * other process's unique line stayed unhit), confirming the two buffers are
+ * Result -- parent and child each wrote their own `<pid>-*.json` dump (that
+ * probe's own ad hoc bookkeeping format, unrelated to the `.cov`/PHP-report
+ * format this file's real `register_shutdown_function()` callback writes
+ * below -- the probe needed no more than `json_encode()` for its own
+ * throwaway purpose), and each dump showed only its own process's line as
+ * hit (the other process's unique line stayed unhit), confirming the two
+ * buffers are
  * genuinely separate per-process and both survive to a normal exit()'s
  * shutdown sequence. A child killed by a raw signal (SIGKILL, bypassing
  * PHP's shutdown sequence entirely) produced no dump for itself at all --

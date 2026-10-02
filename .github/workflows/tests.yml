@@ -528,8 +528,16 @@ jobs:
         shell: bash
         run: |
           php -r '
-            $xml = simplexml_load_file("coverage.xml");
+            // Self-review finding (#245): the two early-exit branches below
+            // used to both be a bare exit(0) with no output, which rendered
+            // identically to "both watched files are accounted for, nothing
+            // to flag" -- reintroducing, in this very note, the exact
+            // ambiguity #245 was opened to resolve. Each now prints a
+            // one-line "could not evaluate" instead, so a reader can tell
+            // "checked, no gap" apart from "could not check" at a glance.
+            $xml = @simplexml_load_file("coverage.xml");
             if ($xml === false) {
+                echo "### ${{ matrix.os }}: could not evaluate known coverage gaps (#245) -- coverage.xml missing or failed to parse\n";
                 exit(0);
             }
             $watched = [
@@ -537,12 +545,14 @@ jobs:
                 "bin/mcp-rector-warm" => "spawned as a real subprocess by tests/Integration/ServerStdioTest.php inside this job, so a 0% here WOULD be a regression",
             ];
             $lines = [];
+            $seen = [];
             foreach ($xml->project->file as $file) {
                 $name = (string) $file["name"];
                 foreach ($watched as $needle => $explanation) {
                     if (!str_ends_with($name, "/" . $needle)) {
                         continue;
                     }
+                    $seen[$needle] = true;
                     $m = $file->metrics;
                     $statements = (int) $m["statements"];
                     $covered = (int) $m["coveredstatements"];
@@ -554,6 +564,10 @@ jobs:
                         $explanation,
                     );
                 }
+            }
+            $missing = array_diff(array_keys($watched), array_keys($seen));
+            if ($missing !== []) {
+                echo "### ${{ matrix.os }}: could not evaluate known coverage gaps (#245) -- not found in coverage.xml: " . implode(", ", $missing) . "\n";
             }
             if ($lines === []) {
                 exit(0);
