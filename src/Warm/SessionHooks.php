@@ -314,6 +314,7 @@ final class SessionHooks implements SymbolResolver
     private function locate(SourceLocator $locator, string $kind, string $name): ?string
     {
         $this->reflector ??= $this->phpstan->getService('betterReflectionReflector');
+        \assert($this->reflector !== null);
         $type = match ($kind) {
             self::FUNCTION => IdentifierType::IDENTIFIER_FUNCTION,
             self::CONSTANT => IdentifierType::IDENTIFIER_CONSTANT,

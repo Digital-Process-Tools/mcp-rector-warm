@@ -118,7 +118,9 @@ final class LspLoopTest extends TestCase
         self::assertTrue($transport->waitForInput(1.0));
         $transport->read();
         self::assertTrue($transport->waitForInput(0.0));
-        self::assertSame(2, $transport->read()['params']['textDocument']['version']);
+        $second = $transport->read();
+        self::assertNotNull($second, 'the second already-buffered frame must still be readable');
+        self::assertSame(2, $second['params']['textDocument']['version']);
         self::assertFalse($transport->waitForInput(0.0));
         fclose($client);
     }
