@@ -91,6 +91,12 @@ final class OrphanWatchdogTest extends TestCase
             self::markTestSkipped('this forces `ps` off PATH, which is POSIX-specific -- ProcessTree::parentOf() is POSIX-only');
         }
 
+        // Audit finding: the try/finally below used to start only after
+        // $worker and $watchdog were both already spawned and asserted --
+        // an assertion failure on either resource check (e.g. a CI box
+        // where proc_open() genuinely cannot spawn) would then skip
+        // cleanup entirely, leaking a 20s-self-terminating sleep process.
+        // $worker is wrapped from the moment it exists.
         $null = '/dev/null';
         $worker = \proc_open(
             [\PHP_BINARY, '-r', 'sleep(20);'],
@@ -98,24 +104,27 @@ final class OrphanWatchdogTest extends TestCase
             $workerPipes,
         );
         self::assertIsResource($worker, 'must be able to spawn a disposable worker process');
-        $workerStatus = \proc_get_status($worker);
-        $workerPid = (int) $workerStatus['pid'];
-        self::assertGreaterThan(0, $workerPid, 'proc_get_status() must report a real worker pid');
 
-        $env = \getenv();
-        $env['PATH'] = \sys_get_temp_dir() . '/nonexistent-path-for-269-test';
-
-        $stderrFile = (string) \tempnam(\sys_get_temp_dir(), 'orphan-watchdog-269-stderr-');
-        $watchdog = \proc_open(
-            [\PHP_BINARY, self::$bin, '1', (string) $workerPid, '1'],
-            [0 => ['file', $null, 'r'], 1 => ['file', $null, 'w'], 2 => ['file', $stderrFile, 'w']],
-            $watchdogPipes,
-            null,
-            $env,
-        );
-        self::assertIsResource($watchdog, 'must be able to spawn the watchdog with PATH broken');
-
+        $watchdog = null;
+        $stderrFile = null;
         try {
+            $workerStatus = \proc_get_status($worker);
+            $workerPid = (int) $workerStatus['pid'];
+            self::assertGreaterThan(0, $workerPid, 'proc_get_status() must report a real worker pid');
+
+            $env = \getenv();
+            $env['PATH'] = \sys_get_temp_dir() . '/nonexistent-path-for-269-test';
+
+            $stderrFile = (string) \tempnam(\sys_get_temp_dir(), 'orphan-watchdog-269-stderr-');
+            $watchdog = \proc_open(
+                [\PHP_BINARY, self::$bin, '1', (string) $workerPid, '1'],
+                [0 => ['file', $null, 'r'], 1 => ['file', $null, 'w'], 2 => ['file', $stderrFile, 'w']],
+                $watchdogPipes,
+                null,
+                $env,
+            );
+            self::assertIsResource($watchdog, 'must be able to spawn the watchdog with PATH broken');
+
             $deadline = \microtime(true) + 10.0;
             $stderr = '';
             while (\microtime(true) < $deadline) {
@@ -131,10 +140,22 @@ final class OrphanWatchdogTest extends TestCase
                 $stderr,
                 "must fire: with PATH broken, the watchdog must log the ps-probe-failure message; stderr so far: {$stderr}",
             );
+
+            // Audit finding: asserting substr_count() === 1 immediately
+            // after the FIRST sighting proves nothing about the log-once
+            // guard -- the watchdog polls every 1s (pollSeconds argv above),
+            // so a guard that was completely removed (logging on every
+            // poll) would not have had time to write a second line yet
+            // either. Wait past at least one more poll interval before
+            // reading stderr again, so a regressed guard has had the
+            // chance to prove this assertion wrong.
+            \usleep(1_500_000);
+            $stderrAfterASecondPollWindow = (string) \file_get_contents($stderrFile);
             self::assertSame(
                 1,
-                \substr_count($stderr, 'could not run `ps`'),
-                'the #159 log-once guard must suppress every poll after the first -- more than one means it logged on every loop',
+                \substr_count($stderrAfterASecondPollWindow, 'could not run `ps`'),
+                'the #159 log-once guard must suppress every poll after the first -- more than one means it logged on every loop; '
+                . "checked after waiting past a second poll interval so a removed guard would have had the chance to fail this: {$stderrAfterASecondPollWindow}",
             );
 
             // Positive control for the $orphaned = false branch (line 100):
@@ -149,11 +170,17 @@ final class OrphanWatchdogTest extends TestCase
                 'must fire: an unresolvable parent must not be treated as orphaned -- the worker must still be alive',
             );
         } finally {
-            @\proc_terminate($watchdog, 9);
-            \proc_close($watchdog);
-            @\proc_terminate($worker, 9);
-            \proc_close($worker);
-            @\unlink($stderrFile);
+            if ($watchdog !== null && \is_resource($watchdog)) {
+                @\proc_terminate($watchdog, 9);
+                \proc_close($watchdog);
+            }
+            if (\is_resource($worker)) {
+                @\proc_terminate($worker, 9);
+                \proc_close($worker);
+            }
+            if ($stderrFile !== null) {
+                @\unlink($stderrFile);
+            }
         }
     }
 
