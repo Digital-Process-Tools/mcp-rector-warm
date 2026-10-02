@@ -3048,7 +3048,7 @@ class RectorRunner implements RunnerInterface
                     continue; // skipped everywhere, the copy included
                 }
                 if (self::ruleSkippedFor($skipper, $class, $originalPath) && !self::ruleSkippedFor($skipper, $class, $copyPath)) {
-                    $classes[$class] = \array_merge($files, $copyPaths);
+                    $classes[$class] = \array_merge(self::skippedFilesOf($class, $files), $copyPaths);
                     $changed = true;
                 }
             }
@@ -3286,11 +3286,13 @@ class RectorRunner implements RunnerInterface
     }
 
     /**
-     * SkippedClassResolver::resolve()'s rule => files map (null = skipped
-     * everywhere), checked: applySkipsOfOriginalPath() catches the throw and
-     * fails open, same as any other Rector API drift.
+     * SkippedClassResolver::resolve()'s rule => files map, keyed by class
+     * name. The values are kept exactly as Rector stored them (it copies
+     * each `withSkip()` value verbatim): only the entry this call extends is
+     * read, through skippedFilesOf(), so an entry of a shape this code does
+     * not know never stops the other rules' skips from reaching the copy.
      *
-     * @return array<string, list<string>|null>
+     * @return array<string, mixed>
      */
     private static function resolvedSkippedClasses(object $resolver): array
     {
@@ -3303,28 +3305,41 @@ class RectorRunner implements RunnerInterface
             if (!\is_string($class)) {
                 throw new \UnexpectedValueException(\sprintf('%s::resolve() has key %s, expected a class name', $resolver::class, \get_debug_type($class)));
             }
-            if ($files === null) {
-                $checked[$class] = null;
-
-                continue;
-            }
-            if (!\is_array($files) || !\array_is_list($files)) {
-                throw new \UnexpectedValueException(\sprintf('%s::resolve()["%s"] is not a list of paths', $resolver::class, $class));
-            }
-            $paths = [];
-            foreach ($files as $file) {
-                if (!\is_string($file)) {
-                    throw new \UnexpectedValueException(\sprintf('%s::resolve()["%s"] holds %s, expected paths', $resolver::class, $class, \get_debug_type($file)));
-                }
-                $paths[] = $file;
-            }
-            $checked[$class] = $paths;
+            $checked[$class] = $files;
         }
 
         return $checked;
     }
 
-    /** @param list<string>|array<string, list<string>|null> $value */
+    /**
+     * One rule's skipped paths as an array. `Rule::class => 'src/Foo.php'`
+     * is valid config, which Rector reads as the one-element list it means,
+     * so a single string becomes [that string]; an array is kept as is. Any
+     * other shape, or an array holding a non-string, throws -- caught by
+     * applySkipsOfOriginalPath()'s fail-open.
+     *
+     * @return array<string>
+     */
+    private static function skippedFilesOf(string $class, mixed $files): array
+    {
+        if (\is_string($files)) {
+            return [$files];
+        }
+        if (!\is_array($files)) {
+            throw new \UnexpectedValueException(\sprintf('skip for %s is %s, expected a path or a list of paths', $class, \get_debug_type($files)));
+        }
+        $paths = [];
+        foreach ($files as $key => $file) {
+            if (!\is_string($file)) {
+                throw new \UnexpectedValueException(\sprintf('skip for %s holds %s, expected paths', $class, \get_debug_type($file)));
+            }
+            $paths[$key] = $file;
+        }
+
+        return $paths;
+    }
+
+    /** @param list<string>|array<string, mixed> $value */
     private static function overwriteResolved(object $resolver, string $property, array $value): void
     {
         $reflection = new \ReflectionProperty($resolver, $property);
