@@ -1,8 +1,16 @@
+# Extensions (type-coverage, deprecation-rules, phpunit) are loaded by
+# phpstan/extension-installer, not listed here.
 includes:
-    - vendor/tomasvotruba/type-coverage/config/extension.neon
+    - phar://phpstan.phar/conf/bleedingEdge.neon
 
 parameters:
     level: 10
+    checkImplicitMixed: true
+    checkTooWideReturnTypesInProtectedAndPublicMethods: true
+    checkBenevolentUnionTypes: true
+    checkMissingCallableSignature: true
+    reportAnyTypeWideningInVarTag: true
+    checkUninitializedProperties: true
     paths:
         - src
         - bin
@@ -36,6 +44,13 @@ parameters:
         -
             identifier: phpstanApi.method
             path: src/Warm/SessionHooks.php
+        # #185 / #286: the same deliberate reach into Rector's own internals, as
+        # bleedingEdge reports it -- Rector\Configuration\Option's container keys
+        # are @internal, and SessionHooks has to set exactly those keys to
+        # reproduce what Rector's own bootstrap does for a warm session.
+        -
+            identifier: classConstant.internal
+            path: src/Warm/SessionHooks.php
         # #268: SessionHooksTest reaches the same non-BC-covered PHPStan/BetterReflection
         # API as SessionHooks.php itself (see above) to build fakes of the real,
         # final/interface types SessionHooks consumes -- the whole point of these tests,
@@ -49,6 +64,23 @@ parameters:
         -
             identifier: phpstanApi.interface
             path: tests/Unit/Warm/SessionHooksTest.php
+        # #286: the bleedingEdge view of the same internal API use in
+        # SessionHooksTest -- Rector's @internal Option keys SessionHooks sets,
+        # and the @internal BetterReflection Reflection interface its fake
+        # source locator has to return.
+        -
+            identifier: classConstant.internal
+            path: tests/Unit/Warm/SessionHooksTest.php
+        -
+            identifier: return.internalInterface
+            path: tests/Unit/Warm/SessionHooksTest.php
+        # #286: the coverage prepend hands pcov's raw data to php-code-coverage,
+        # and CodeCoverage::append() only takes RawCodeCoverageData, which is
+        # @internal. There is no public constructor for it.
+        -
+            identifier: staticMethod.internalClass
+            path: tests/coverage/prepend.php
+            count: 1
         # #286: PHP has no native `resource` type, so a parameter or return value that
         # carries a stream, socket, process or lock handle cannot be typed natively.
         # Each one below carries a precise `@param resource` / `@return resource`

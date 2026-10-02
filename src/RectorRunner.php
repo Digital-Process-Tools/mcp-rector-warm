@@ -2492,7 +2492,11 @@ class RectorRunner implements RunnerInterface
      */
     public function __destruct()
     {
-        $deadlineNs = \hrtime(true) + 1_200_000_000;
+        // hrtime(true) is int|float by signature (float only where a native int
+        // cannot hold nanoseconds, i.e. a 32-bit build); the (int) cast is the
+        // same one callDeadlineNs() and the session hello deadline use, and is
+        // a no-op on every 64-bit build, so the 1.2s budget is unchanged.
+        $deadlineNs = (int) (\hrtime(true) + 1_200_000_000);
         $this->discardProcWorker(false, $deadlineNs);
         $this->stopRetiredProcWorkers($deadlineNs);
     }
@@ -2767,6 +2771,7 @@ class RectorRunner implements RunnerInterface
      * before any bytes of a new frame arrived (the other end closed the connection).
      *
      * @param resource $socket
+     * @param (\Closure(): void)|null $onIdle
      */
     private function readFrame($socket, ?int $deadlineNs = null, ?\Closure $onIdle = null): ?string
     {
@@ -2798,6 +2803,7 @@ class RectorRunner implements RunnerInterface
      *   a worker legitimately blocks indefinitely waiting for its NEXT request
      *   from the daemon, which is not a call in progress and has no
      *   --call-timeout budget to spend while idle.
+     * @param (\Closure(): void)|null $onIdle
      */
     private function readExactly($socket, int $length, ?int $deadlineNs = null, ?\Closure $onIdle = null): ?string
     {

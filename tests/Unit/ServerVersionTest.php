@@ -20,7 +20,9 @@ final class ServerVersionTest extends TestCase
 
     protected function setUp(): void
     {
-        $this->changelog = tempnam(sys_get_temp_dir(), 'server-version-changelog-');
+        $changelog = tempnam(sys_get_temp_dir(), 'server-version-changelog-');
+        self::assertNotFalse($changelog);
+        $this->changelog = $changelog;
     }
 
     protected function tearDown(): void

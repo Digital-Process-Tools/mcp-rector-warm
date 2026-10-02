@@ -338,7 +338,7 @@ final class RectorDiffParser
     }
 
     /**
-     * @param array{oldStart: int, oldCount: int, newLines: list<string>} $hunk
+     * @param array{oldStart: int, oldCount: int, newLines: list<string>, hasChange: bool, changeFrom: int|null, changeToExclusive: int|null} $hunk
      */
     private static function hunkNewText(array $hunk): string
     {

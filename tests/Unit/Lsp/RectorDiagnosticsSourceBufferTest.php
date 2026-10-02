@@ -242,9 +242,9 @@ final class RectorDiagnosticsSourceBufferTest extends TestCase
 
         self::assertSame([], $result['fixes']);
         self::assertCount(1, ($result['errors'] ?? []));
-        self::assertSame(3, ($result['errors'] ?? [])[0]['line']);
-        self::assertStringNotContainsString('.rector-warm-', ($result['errors'] ?? [])[0]['message']);
-        self::assertStringContainsString('Sample.php', ($result['errors'] ?? [])[0]['message']);
+        self::assertSame(3, $result['errors'][0]['line']);
+        self::assertStringNotContainsString('.rector-warm-', $result['errors'][0]['message']);
+        self::assertStringContainsString('Sample.php', $result['errors'][0]['message']);
         self::assertSame(['src', 'src/Sample.php'], $this->projectEntries());
     }
 
@@ -256,7 +256,7 @@ final class RectorDiagnosticsSourceBufferTest extends TestCase
 
         self::assertSame([], $result['fixes']);
         self::assertNotSame([], ($result['errors'] ?? []));
-        self::assertStringNotContainsString('.rector-warm-', ($result['errors'] ?? [])[0]['message']);
+        self::assertStringNotContainsString('.rector-warm-', $result['errors'][0]['message']);
         self::assertSame(['src', 'src/Sample.php'], $this->projectEntries());
     }
 
@@ -297,7 +297,7 @@ final class RectorDiagnosticsSourceBufferTest extends TestCase
 
             self::assertFalse($called, 'Rector must never be invoked when the temp directory could not be created.');
             self::assertCount(1, ($result['errors'] ?? []));
-            self::assertStringContainsString('could not create a temp directory', ($result['errors'] ?? [])[0]['message']);
+            self::assertStringContainsString('could not create a temp directory', $result['errors'][0]['message']);
         } finally {
             chmod($directory, 0o700);
         }
@@ -621,8 +621,11 @@ final class RectorDiagnosticsSourceBufferTest extends TestCase
             // directory already removed is not itself an assertion
             // failure. Either way, nothing of the buffer's ever landed in
             // it, which is the property this test guards.
-            self::assertTrue(
-                !is_dir($realTempDirectory) || array_diff(scandir($realTempDirectory), ['.', '..']) === [],
+            $entries = is_dir($realTempDirectory) ? scandir($realTempDirectory) : [];
+            self::assertNotFalse($entries, 'the pre-existing directory must stay readable');
+            self::assertSame(
+                [],
+                array_values(array_diff($entries, ['.', '..'])),
                 'the refusal must not write anything into the pre-existing directory',
             );
         } finally {

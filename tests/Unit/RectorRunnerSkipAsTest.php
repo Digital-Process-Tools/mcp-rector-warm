@@ -246,6 +246,7 @@ final class RectorRunnerSkipAsTest extends TestCase
         (new \ReflectionMethod($runner, 'applySkipsOfOriginalPath'))->invoke($runner, $original, $copy);
     }
 
+    /** @param callable(): mixed $body */
     private function inChildWithStderrClosed(callable $body): string
     {
         $pair = stream_socket_pair(STREAM_PF_UNIX, STREAM_SOCK_STREAM, STREAM_IPPROTO_IP);

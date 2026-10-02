@@ -43,7 +43,7 @@ final readonly class RectorDiagnosticsSource implements BufferDiagnosticsSource,
     /**
      * @return array{
      *   fixes: list<array{range: array{start: array{line:int,character:int}, end: array{line:int,character:int}}, newText: string, rectors: list<string>}>,
-     *   errors?: list<array{message: string, line: int}>,
+     *   errors?: list<array{message: string, line: int, file?: string}>,
      * }
      */
     public function diagnoseForEdit(string $absolutePath): array
@@ -161,7 +161,7 @@ final readonly class RectorDiagnosticsSource implements BufferDiagnosticsSource,
 
     /**
      * @param array<string, mixed>|CallToolResult $result
-     * @return array{fixes: list<array{range: array{start: array{line:int,character:int}, end: array{line:int,character:int}}, newText: string, rectors: list<string>}>, errors: list<array{message: string, line: int}>}
+     * @return array{fixes: list<array{range: array{start: array{line:int,character:int}, end: array{line:int,character:int}}, newText: string, rectors: list<string>}>, errors: list<array{message: string, line: int, file?: string}>}
      */
     private function interpret(array|CallToolResult $result, string $absolutePath): array
     {
@@ -342,7 +342,7 @@ final readonly class RectorDiagnosticsSource implements BufferDiagnosticsSource,
     /**
      * @return array{
      *   fixes: list<array{range: array{start: array{line:int,character:int}, end: array{line:int,character:int}}, newText: string, rectors: list<string>}>,
-     *   errors?: list<array{message: string, line: int}>,
+     *   errors?: list<array{message: string, line: int, file?: string}>,
      * }
      */
     public function diagnoseBufferForEdit(string $absolutePath, string $content): array
@@ -353,7 +353,7 @@ final readonly class RectorDiagnosticsSource implements BufferDiagnosticsSource,
     /**
      * @return array{
      *   fixes: list<array{range: array{start: array{line:int,character:int}, end: array{line:int,character:int}}, newText: string, rectors: list<string>}>,
-     *   errors?: list<array{message: string, line: int}>,
+     *   errors?: list<array{message: string, line: int, file?: string}>,
      * }
      */
     private function diagnoseBufferImpl(string $absolutePath, string $content, bool $noSession): array

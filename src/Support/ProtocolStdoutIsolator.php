@@ -110,10 +110,12 @@ final class ProtocolStdoutIsolator
      * Never returns on success (it calls exit()). Returns false if isolation
      * could not even be launched, so the caller falls through to running
      * unisolated -- see the class docblock on why that is the required
-     * fallback, never a thrown error.
+     * fallback, never a thrown error. So `false` is the only value it can
+     * return, and the native return type says so.
+     *
+     * @param list<string> $argv
      */
-    /** @param list<string> $argv */
-    public static function reexecIsolated(string $scriptPath, array $argv): bool
+    public static function reexecIsolated(string $scriptPath, array $argv): false
     {
         if (!\is_resource(\STDOUT) || !\is_resource(\STDIN) || !\is_resource(\STDERR)) {
             return false;

@@ -336,7 +336,8 @@ final class RectorRunnerStandbyWorkerTest extends TestCase
             // worker on a timeout -- guard against double-closing an already
             // invalid resource here.
             @fclose($accepted);
-            if (is_resource($proc)) {
+            // 'Unknown' once proc_close() has already run on it.
+            if (get_resource_type($proc) === 'process') {
                 proc_terminate($proc, 9);
                 proc_close($proc);
             }
@@ -1071,7 +1072,8 @@ final class RectorRunnerStandbyWorkerTest extends TestCase
             // here (not 1.2) leaves slack for this test's own overhead.
             self::assertLessThan(1.5, $elapsed, "__destruct() must clear the E2E harness's own 1.5s EXIT_GRACE (took {$elapsed}s)");
         } finally {
-            if (is_resource($proc)) {
+            // 'Unknown' once proc_close() has already run on it.
+            if (get_resource_type($proc) === 'process') {
                 proc_terminate($proc, 9);
                 proc_close($proc);
             }
@@ -1113,7 +1115,7 @@ final class RectorRunnerStandbyWorkerTest extends TestCase
         return ['rector', 'process', '--output-format=json', '--debug', '--no-progress-bar', '--dry-run', '--', $file];
     }
 
-    /** @param array{output: string} $result */
+    /** @param array{output: string, ...} $result */
     private static function diff(array $result): string
     {
         $decoded = json_decode($result['output'], true);

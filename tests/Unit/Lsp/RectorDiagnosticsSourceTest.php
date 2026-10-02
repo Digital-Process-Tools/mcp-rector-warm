@@ -159,8 +159,8 @@ final class RectorDiagnosticsSourceTest extends TestCase
 
             self::assertSame([], $result['fixes']);
             self::assertCount(1, ($result['errors'] ?? []));
-            self::assertSame(0, ($result['errors'] ?? [])[0]['line']);
-            self::assertStringContainsString('outside the configured working directory', ($result['errors'] ?? [])[0]['message']);
+            self::assertSame(0, $result['errors'][0]['line']);
+            self::assertStringContainsString('outside the configured working directory', $result['errors'][0]['message']);
         } finally {
             @unlink($outside);
         }

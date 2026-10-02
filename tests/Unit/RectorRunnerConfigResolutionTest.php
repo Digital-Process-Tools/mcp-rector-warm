@@ -166,10 +166,9 @@ final class RectorRunnerConfigResolutionTest extends TestCase
 
         // Negative case: an empty dir has neither preload.php nor vendor/, so
         // this must return without throwing. "Did not throw" is the actual
-        // assertion here (an exception would fail the test on its own); the
-        // counted assertion just records that this line was reached.
-        $this->method('preloadLikeCold')->invoke($runner, $this->tmp);
-        $this->addToAssertionCount(1);
+        // assertion here (an exception would fail the test on its own);
+        // preloadLikeCold() is void, so a normal return hands back null.
+        self::assertNull($this->method('preloadLikeCold')->invoke($runner, $this->tmp));
     }
 
     public function testPreloadLikeColdRunsAgainstTheRealBundledRectorPackage(): void
@@ -188,8 +187,7 @@ final class RectorRunnerConfigResolutionTest extends TestCase
         // Must not throw even though ensureRectorAutoloaded() already ran it
         // once this process (preload.php's own requires are themselves
         // idempotent via PHP's require_once).
-        $this->method('preloadLikeCold')->invoke($runner, $rectorPkgDir);
-        $this->addToAssertionCount(1);
+        self::assertNull($this->method('preloadLikeCold')->invoke($runner, $rectorPkgDir));
     }
 
     public function testFindRectorBinResolvesARealExistingBinary(): void

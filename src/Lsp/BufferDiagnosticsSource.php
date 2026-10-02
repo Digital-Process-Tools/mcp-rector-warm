@@ -21,7 +21,7 @@ interface BufferDiagnosticsSource extends DiagnosticsSource
      *
      * @return array{
      *   fixes: list<array{range: array{start: array{line:int,character:int}, end: array{line:int,character:int}}, newText: string, rectors: list<string>}>,
-     *   errors?: list<array{message: string, line: int}>,
+     *   errors?: list<array{message: string, line: int, file?: string}>,
      * }
      */
     public function diagnoseBuffer(string $absolutePath, string $content): array;
