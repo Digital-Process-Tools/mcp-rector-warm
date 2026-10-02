@@ -139,4 +139,45 @@ final class RectorRunnerSessionTest extends TestCase
         self::assertNotNull(RectorRunner::sessionRetireReason(1, 200 * $mb, '256M', 512, 250));
         self::assertNull(RectorRunner::sessionRetireReason(1, 100 * $mb, '256M', 512, 250));
     }
+
+    private function positiveIntEnv(string $name, int $default): int
+    {
+        $method = new \ReflectionMethod(RectorRunner::class, 'positiveIntEnv');
+
+        return $method->invoke(null, $name, $default);
+    }
+
+    /**
+     * #185: sessionRetireReason()'s two caps (SESSION_MAX_MB_ENV,
+     * SESSION_MAX_CALLS_ENV) are read through this one parser -- an unset,
+     * blank, non-digit or negative value must fall back to the caller's
+     * default rather than crash or silently become 0; only a genuine
+     * non-negative digit string overrides it.
+     */
+    public function testPositiveIntEnvFallsBackToTheDefaultOnAnythingButDigits(): void
+    {
+        $name = 'MCP_RECTOR_WARM_TEST_POSITIVE_INT_ENV_' . \bin2hex(\random_bytes(4));
+        $previous = \getenv($name);
+        try {
+            \putenv($name);
+            self::assertSame(42, $this->positiveIntEnv($name, 42), 'unset must fall back to the default');
+
+            foreach (['', ' ', 'abc', '-5', '3.5', ' 7 '] as $value) {
+                \putenv($name . '=' . $value);
+                if (\ctype_digit(\trim($value))) {
+                    self::assertSame((int) \trim($value), $this->positiveIntEnv($name, 42), $value);
+                } else {
+                    self::assertSame(42, $this->positiveIntEnv($name, 42), "must fall back to the default for '{$value}'");
+                }
+            }
+
+            // Positive control: a genuine digit string IS actually read, not
+            // merely tolerated -- otherwise every branch above would pass
+            // for free by always returning the default regardless of input.
+            \putenv($name . '=123');
+            self::assertSame(123, $this->positiveIntEnv($name, 42), 'must fire: a genuine digit string overrides the default');
+        } finally {
+            \putenv($previous === false ? $name : $name . '=' . $previous);
+        }
+    }
 }
