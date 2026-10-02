@@ -21,8 +21,18 @@ final class LspLoopTest extends TestCase
     private static function frame(array $message): string
     {
         $body = json_encode($message, JSON_UNESCAPED_SLASHES);
+        self::assertNotFalse($body);
 
         return 'Content-Length: ' . strlen($body) . "\r\n\r\n" . $body;
+    }
+
+    /** @return resource */
+    private static function memoryStream(string $mode = 'r+')
+    {
+        $stream = fopen('php://memory', $mode);
+        self::assertNotFalse($stream, "fopen('php://memory', '{$mode}') unexpectedly failed");
+
+        return $stream;
     }
 
     private static function didChange(int $version, string $text): string
@@ -49,7 +59,9 @@ final class LspLoopTest extends TestCase
         if (function_exists('stream_socket_pair')) {
             $pair = @stream_socket_pair(STREAM_PF_UNIX, STREAM_SOCK_STREAM, STREAM_IPPROTO_IP);
             if ($pair !== false) {
-                return $pair;
+                [$a, $b] = $pair;
+
+                return [$a, $b];
             }
         }
 
@@ -85,7 +97,7 @@ final class LspLoopTest extends TestCase
     public function testWaitForInputTimesOutWhenNothingWasSent(): void
     {
         [$server, $client] = self::pair();
-        $transport = new StdioLspTransport($server, fopen('php://memory', 'w'));
+        $transport = new StdioLspTransport($server, self::memoryStream('w'));
 
         $started = microtime(true);
         self::assertFalse($transport->waitForInput(0.05));
@@ -100,7 +112,7 @@ final class LspLoopTest extends TestCase
         // first, and the second is already in PHP's own buffer, not in the
         // kernel's -- it still has to count as pending input.
         [$server, $client] = self::pair();
-        $transport = new StdioLspTransport($server, fopen('php://memory', 'w'));
+        $transport = new StdioLspTransport($server, self::memoryStream('w'));
         fwrite($client, self::didChange(1, 'a') . self::didChange(2, 'b'));
 
         self::assertTrue($transport->waitForInput(1.0));
@@ -118,7 +130,7 @@ final class LspLoopTest extends TestCase
         // version 1's result never goes out. Positive control in the same
         // run: version 2 is then diagnosed and published.
         [$serverEnd, $client] = self::pair();
-        $out = fopen('php://memory', 'w+');
+        $out = self::memoryStream('w+');
 
         $source = new class ($client, $serverEnd) implements BufferDiagnosticsSource {
             /** @var list<string> */
@@ -182,7 +194,7 @@ final class LspLoopTest extends TestCase
         // Must fire, through the real loop: one change, nothing else sent,
         // the debounce elapses and the diagnostic goes out.
         [$serverEnd, $client] = self::pair();
-        $out = fopen('php://memory', 'w+');
+        $out = self::memoryStream('w+');
         $source = new class ($client) implements BufferDiagnosticsSource {
             /** @param resource $client */
             public function __construct(private $client) {}
@@ -216,7 +228,7 @@ final class LspLoopTest extends TestCase
     public function testShutdownThenExitStillExitsZero(): void
     {
         [$serverEnd, $client] = self::pair();
-        $out = fopen('php://memory', 'w+');
+        $out = self::memoryStream('w+');
         fwrite($client, self::frame(['jsonrpc' => '2.0', 'id' => 1, 'method' => 'shutdown']) . self::frame(['jsonrpc' => '2.0', 'method' => 'exit']));
 
         $exit = (new LspLoop(new StdioLspTransport($serverEnd, $out), new LspServer('1.0.0')))->run();

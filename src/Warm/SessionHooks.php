@@ -365,6 +365,7 @@ final class SessionHooks implements SymbolResolver
     }
 
     /**
+     * @param 'autoload_paths'|'file_extensions' $name
      * @return list<mixed>
      */
     private static function rectorArrayParameter(string $name): array

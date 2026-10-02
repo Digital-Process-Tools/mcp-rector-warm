@@ -67,7 +67,11 @@ final class StdioLspTransport
 
         $body = '';
         while (strlen($body) < $contentLength) {
-            $chunk = fread($this->in, $contentLength - strlen($body));
+            $remaining = $contentLength - strlen($body);
+            if ($remaining < 1) {
+                break;
+            }
+            $chunk = fread($this->in, $remaining);
             if ($chunk === false || $chunk === '') {
                 throw new RuntimeException(sprintf(
                     'LSP frame truncated: expected %d bytes, got %d',

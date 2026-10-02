@@ -176,7 +176,9 @@ final class RectorRunnerConfigResolutionTest extends TestCase
         // actually called on in production, rather than only the early-return
         // guard above.
         $this->method('ensureRectorAutoloaded')->invoke($runner);
-        $rectorPkgDir = dirname((new \ReflectionClass(\Rector\Bootstrap\RectorConfigsResolver::class))->getFileName(), 3);
+        $rectorConfigsResolverFile = (new \ReflectionClass(\Rector\Bootstrap\RectorConfigsResolver::class))->getFileName();
+        self::assertNotFalse($rectorConfigsResolverFile);
+        $rectorPkgDir = dirname($rectorConfigsResolverFile, 3);
 
         // Must not throw even though ensureRectorAutoloaded() already ran it
         // once this process (preload.php's own requires are themselves
@@ -215,6 +217,7 @@ final class RectorRunnerConfigResolutionTest extends TestCase
         if (!class_exists($fqn, false)) {
             eval('namespace ' . $prefix . '; class Probe {}');
         }
+        self::assertTrue(class_exists($fqn, false), "eval() must have declared {$fqn}");
 
         return $fqn;
     }

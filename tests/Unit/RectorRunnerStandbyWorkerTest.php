@@ -205,7 +205,9 @@ final class RectorRunnerStandbyWorkerTest extends TestCase
         self::assertIsResource($proc);
         $strangers = [];
         for ($i = 0; $i < 4; $i++) {
-            $strangers[] = stream_socket_client('tcp://' . $address);
+            $stranger = stream_socket_client('tcp://' . $address);
+            self::assertIsResource($stranger);
+            $strangers[] = $stranger;
         }
 
         $property = new \ReflectionProperty(RectorRunner::class, 'procWorker');

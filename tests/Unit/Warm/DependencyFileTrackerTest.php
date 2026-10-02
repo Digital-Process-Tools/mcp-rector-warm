@@ -32,6 +32,14 @@ final class DependencyFileTrackerTest extends TestCase
         return $path;
     }
 
+    private function sha1File(string $path): string
+    {
+        $sha = \sha1_file($path);
+        self::assertNotFalse($sha, "sha1_file() unexpectedly failed for {$path}");
+
+        return $sha;
+    }
+
     /**
      * The positive control for every "must not fire" case below: an
      * unmodified tracked file must report no staleness at all, so a
@@ -43,7 +51,7 @@ final class DependencyFileTrackerTest extends TestCase
         $tracker = new DependencyFileTracker();
         $path = $this->write('a.php', '<?php // v1');
 
-        $tracker->record($path, \sha1_file($path));
+        $tracker->record($path, $this->sha1File($path));
 
         self::assertNull($tracker->checkStale());
         self::assertSame(1, $tracker->count());
@@ -74,7 +82,7 @@ final class DependencyFileTrackerTest extends TestCase
         // that timing dependency entirely).
         \touch($path, \time() - 10);
         \clearstatcache();
-        $tracker->record($path, \sha1_file($path));
+        $tracker->record($path, $this->sha1File($path));
 
         \file_put_contents($path, '<?php // v2'); // same length as v1 -- only mtime, not size, differs now
         \clearstatcache();
@@ -96,7 +104,7 @@ final class DependencyFileTrackerTest extends TestCase
         $now = \time();
         \touch($path, $now);
         \clearstatcache();
-        $tracker->record($path, \sha1_file($path));
+        $tracker->record($path, $this->sha1File($path));
 
         // Same second, same mtime, and -- unlike
         // testContentChangeSameLengthIsDetectedAsStale, which changes mtime
@@ -159,7 +167,7 @@ final class DependencyFileTrackerTest extends TestCase
         $tracker = new DependencyFileTracker();
         $tracked = $this->write('tracked.php', '<?php // tracked');
         $untracked = $this->write('untracked.php', '<?php // untracked');
-        $tracker->record($tracked, \sha1_file($tracked));
+        $tracker->record($tracked, $this->sha1File($tracked));
 
         \file_put_contents($untracked, '<?php // changed');
 
@@ -195,7 +203,7 @@ final class DependencyFileTrackerTest extends TestCase
     {
         $tracker = new DependencyFileTracker();
         $path = $this->write('a.php', '<?php // v1');
-        $tracker->record($path, \sha1_file($path));
+        $tracker->record($path, $this->sha1File($path));
 
         $tracker->record($path, \sha1('<?php // a completely different sha'));
 
@@ -212,7 +220,7 @@ final class DependencyFileTrackerTest extends TestCase
     {
         $tracker = new DependencyFileTracker();
         $path = $this->write('a.php', '<?php // v1');
-        $tracker->record($path, \sha1_file($path));
+        $tracker->record($path, $this->sha1File($path));
 
         \unlink($path);
         \clearstatcache();
@@ -226,7 +234,7 @@ final class DependencyFileTrackerTest extends TestCase
         $path = $this->write('a.php', '<?php // v1');
 
         self::assertFalse($tracker->isTracked($path));
-        $tracker->record($path, \sha1_file($path));
+        $tracker->record($path, $this->sha1File($path));
         self::assertTrue($tracker->isTracked($path));
     }
 

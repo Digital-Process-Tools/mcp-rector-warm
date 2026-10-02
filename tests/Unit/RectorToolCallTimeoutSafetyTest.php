@@ -48,7 +48,8 @@ final class RectorToolCallTimeoutSafetyTest extends TestCase
         return $inside;
     }
 
-    private function fakeRunner(int $callTimeoutSeconds): object
+    /** @return RunnerInterface&object{runs: int, lastDryRunSeen: list<bool>} */
+    private function fakeRunner(int $callTimeoutSeconds): RunnerInterface
     {
         return new class ($callTimeoutSeconds) implements RunnerInterface {
             public int $runs = 0;
@@ -94,7 +95,8 @@ final class RectorToolCallTimeoutSafetyTest extends TestCase
         $result = $tool->process($this->insideFile(), false);
 
         self::assertSame(1, $fake->runs, 'the runner must be invoked -- a write call is never refused (#72 correction)');
-        self::assertSame(0, $result['exit_code'] ?? null);
+        self::assertIsArray($result);
+        self::assertSame(0, $result['exit_code']);
     }
 
     /**
@@ -123,7 +125,8 @@ final class RectorToolCallTimeoutSafetyTest extends TestCase
         $result = $tool->process($this->insideFile(), false);
 
         self::assertSame(1, $fake->runs, 'the runner must be invoked once the deadline is disabled');
-        self::assertSame(0, $result['exit_code'] ?? null);
+        self::assertIsArray($result);
+        self::assertSame(0, $result['exit_code']);
     }
 
     /** A dry-run call must stay allowed while a call-timeout deadline is
@@ -137,6 +140,7 @@ final class RectorToolCallTimeoutSafetyTest extends TestCase
         $result = $tool->process($this->insideFile(), true);
 
         self::assertSame(1, $fake->runs, 'a dry-run call must still be allowed to run');
-        self::assertSame(0, $result['exit_code'] ?? null);
+        self::assertIsArray($result);
+        self::assertSame(0, $result['exit_code']);
     }
 }

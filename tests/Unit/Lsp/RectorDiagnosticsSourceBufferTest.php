@@ -198,6 +198,7 @@ final class RectorDiagnosticsSourceBufferTest extends TestCase
     public function testABufferRunCleansUpADeadServersLeftoverBesideIt(): void
     {
         $process = proc_open([PHP_BINARY, '-r', ''], [], $pipes);
+        self::assertNotFalse($process);
         $deadPid = proc_get_status($process)['pid'];
         proc_close($process);
         $leftover = $this->workDir . '/src/.rector-warm-' . $deadPid;
@@ -221,17 +222,22 @@ final class RectorDiagnosticsSourceBufferTest extends TestCase
 
     public function testASyntaxErrorBufferReportsTheErrorAgainstTheOriginalAndLeavesNothingBehind(): void
     {
-        $result = $this->source(fn(string $path): string => json_encode([
-            'totals' => ['changed_files' => 0, 'errors' => 1],
-            'errors' => [['message' => 'Syntax error in ' . $path . ', unexpected EOF', 'file' => $path, 'line' => 3]],
-            'file_diffs' => [],
-        ], JSON_UNESCAPED_SLASHES))->diagnoseBuffer($this->original, "<?php\n\nclass Sample {\n");
+        $result = $this->source(function (string $path): string {
+            $encoded = json_encode([
+                'totals' => ['changed_files' => 0, 'errors' => 1],
+                'errors' => [['message' => 'Syntax error in ' . $path . ', unexpected EOF', 'file' => $path, 'line' => 3]],
+                'file_diffs' => [],
+            ], JSON_UNESCAPED_SLASHES);
+            self::assertNotFalse($encoded);
+
+            return $encoded;
+        })->diagnoseBuffer($this->original, "<?php\n\nclass Sample {\n");
 
         self::assertSame([], $result['fixes']);
-        self::assertCount(1, $result['errors']);
-        self::assertSame(3, $result['errors'][0]['line']);
-        self::assertStringNotContainsString('.rector-warm-', $result['errors'][0]['message']);
-        self::assertStringContainsString('Sample.php', $result['errors'][0]['message']);
+        self::assertCount(1, ($result['errors'] ?? []));
+        self::assertSame(3, ($result['errors'] ?? [])[0]['line']);
+        self::assertStringNotContainsString('.rector-warm-', ($result['errors'] ?? [])[0]['message']);
+        self::assertStringContainsString('Sample.php', ($result['errors'] ?? [])[0]['message']);
         self::assertSame(['src', 'src/Sample.php'], $this->projectEntries());
     }
 
@@ -242,8 +248,8 @@ final class RectorDiagnosticsSourceBufferTest extends TestCase
         })->diagnoseBuffer($this->original, "<?php\n");
 
         self::assertSame([], $result['fixes']);
-        self::assertNotSame([], $result['errors']);
-        self::assertStringNotContainsString('.rector-warm-', $result['errors'][0]['message']);
+        self::assertNotSame([], ($result['errors'] ?? []));
+        self::assertStringNotContainsString('.rector-warm-', ($result['errors'] ?? [])[0]['message']);
         self::assertSame(['src', 'src/Sample.php'], $this->projectEntries());
     }
 
@@ -261,7 +267,7 @@ final class RectorDiagnosticsSourceBufferTest extends TestCase
             })->diagnoseBuffer($outsideDir . '/Evil.php', "<?php\n");
 
             self::assertFalse($called);
-            self::assertStringContainsString('outside the configured working directory', $result['errors'][0]['message']);
+            self::assertStringContainsString('outside the configured working directory', ($result['errors'] ?? [])[0]['message']);
             self::assertSame(['.', '..'], scandir($outsideDir));
         } finally {
             @rmdir($outsideDir);
@@ -295,7 +301,7 @@ final class RectorDiagnosticsSourceBufferTest extends TestCase
             })->diagnoseBuffer($this->original, "<?php\n\nclass Sample\n{\n    // unsaved\n}\n");
 
             self::assertFalse($called, 'a symlinked temp directory must be refused before Rector is asked to run');
-            self::assertStringContainsString('symlinked or junctioned temp directory', $result['errors'][0]['message']);
+            self::assertStringContainsString('symlinked or junctioned temp directory', ($result['errors'] ?? [])[0]['message']);
             self::assertSame("<?php\n\nclass NotYours\n{\n}\n", file_get_contents($externalFile), 'the finally block must not unlink through the symlink');
             self::assertFileExists($externalFile);
             // The symlink itself is refused, not removed -- it is left in
@@ -366,13 +372,13 @@ final class RectorDiagnosticsSourceBufferTest extends TestCase
         })->diagnoseBuffer($this->workDir . '/src/.lock', "<?php\n");
 
         self::assertFalse($called, 'a buffer named like the sweeper\'s own lock file must be refused before Rector is asked to run');
-        self::assertStringContainsString('the sweeper\'s own lock file', $result['errors'][0]['message']);
+        self::assertStringContainsString('the sweeper\'s own lock file', ($result['errors'] ?? [])[0]['message']);
         self::assertSame(['src', 'src/Sample.php'], $this->projectEntries(), 'control: nothing written for the colliding name, and the original buffer is untouched');
 
         // Must-fire control: an ordinary basename, same run, is unaffected.
         $ordinary = $this->source(fn(): string => '{"totals":{"changed_files":0,"errors":0}}')
             ->diagnoseBuffer($this->original, "<?php\n");
-        self::assertSame([], $ordinary['errors']);
+        self::assertSame([], ($ordinary['errors'] ?? []));
     }
 
     public function testTheLockFileIsNotUnlinkedThroughATempDirectorySwappedForASymlinkMidRun(): void
@@ -457,7 +463,7 @@ final class RectorDiagnosticsSourceBufferTest extends TestCase
             })->diagnoseBuffer($this->original, "<?php\n\nclass Sample\n{\n    // unsaved\n}\n");
 
             self::assertFalse($called, 'a symlinked temp file inside a pre-existing temp directory must be refused before Rector is asked to run');
-            self::assertStringContainsString('pre-existing temp directory', $result['errors'][0]['message']);
+            self::assertStringContainsString('pre-existing temp directory', ($result['errors'] ?? [])[0]['message']);
             self::assertSame("<?php\n\nclass NotYours\n{\n}\n", file_get_contents($externalFile), 'the write must not follow the symlink');
             self::assertFileExists($externalFile);
             // The symlink itself is refused, not removed -- the finally
@@ -507,7 +513,7 @@ final class RectorDiagnosticsSourceBufferTest extends TestCase
             // see that test's docblock. What matters still holds: the write
             // never happens and the hard link is never followed.
             self::assertFalse($called, 'a hard-linked temp file inside a pre-existing temp directory must be refused before Rector is asked to run');
-            self::assertStringContainsString('pre-existing temp directory', $result['errors'][0]['message']);
+            self::assertStringContainsString('pre-existing temp directory', ($result['errors'] ?? [])[0]['message']);
             self::assertSame("<?php\n\nclass NotYours\n{\n}\n", file_get_contents($externalFile), 'the write must not follow the hard link');
             self::assertFileExists($externalFile);
             self::assertSame("<?php\n\nclass Sample\n{\n}\n", file_get_contents($this->original));
@@ -556,7 +562,7 @@ final class RectorDiagnosticsSourceBufferTest extends TestCase
             })->diagnoseBuffer($this->original, "<?php\n\nclass Sample\n{\n    // unsaved\n}\n");
 
             self::assertFalse($called, 'a pre-existing temp directory must be refused before Rector is asked to run');
-            self::assertStringContainsString('pre-existing temp directory', $result['errors'][0]['message']);
+            self::assertStringContainsString('pre-existing temp directory', ($result['errors'] ?? [])[0]['message']);
             self::assertSame("<?php\n\nclass Sample\n{\n}\n", file_get_contents($this->original), 'the original file must be untouched');
             // The `finally` block below removes $tempDirectory on every
             // exit from `try`, including this refusal's early return, so
@@ -597,7 +603,7 @@ final class RectorDiagnosticsSourceBufferTest extends TestCase
             })->diagnoseBuffer($this->original, $buffer);
 
             self::assertSame($buffer, $seenContent, $marker . ': the temp file must carry this pass\'s own content');
-            self::assertSame([], $result['errors'], $marker . ': must not fail');
+            self::assertSame([], ($result['errors'] ?? []), $marker . ': must not fail');
             self::assertSame(['src', 'src/Sample.php'], $this->projectEntries(), $marker . ': nothing left behind');
         }
     }
@@ -637,7 +643,7 @@ final class RectorDiagnosticsSourceBufferTest extends TestCase
                 return '{"totals":{"changed_files":0,"errors":0}}';
             })->diagnoseBuffer($this->original, "<?php\n\nclass Sample\n{\n    // unsaved\n}\n");
 
-            self::assertSame([], $result['errors']);
+            self::assertSame([], ($result['errors'] ?? []));
             self::assertSame(0o600, $seenMode, 'the temp file must be 0600, even under a loose ambient umask');
         } finally {
             umask($previousUmask);
@@ -678,7 +684,7 @@ final class RectorDiagnosticsSourceBufferTest extends TestCase
             })->diagnoseBuffer($this->original, "<?php\n\nclass Sample\n{\n    // unsaved\n}\n");
 
             self::assertFalse($called, 'a junctioned temp directory must be refused before Rector is asked to run');
-            self::assertStringContainsString('symlinked or junctioned temp directory', $result['errors'][0]['message']);
+            self::assertStringContainsString('symlinked or junctioned temp directory', ($result['errors'] ?? [])[0]['message']);
             self::assertSame("<?php\n\nclass NotYours\n{\n}\n", file_get_contents($externalFile), 'the finally block must not unlink through the junction');
             self::assertFileExists($externalFile);
             self::assertSame("<?php\n\nclass Sample\n{\n}\n", file_get_contents($this->original));
@@ -709,13 +715,14 @@ final class RectorDiagnosticsSourceBufferTest extends TestCase
             fn(): string => '{"totals":{"changed_files":0,"errors":0}}',
             function ($handle) use (&$tempDirectory): bool {
                 $meta = stream_get_meta_data($handle);
+                self::assertIsString($meta['uri'] ?? null);
                 $tempDirectory = dirname($meta['uri']);
 
                 return false;
             },
         )->diagnoseBuffer($this->original, "<?php\n");
 
-        self::assertStringContainsString('could not lock a temp directory', $failed['errors'][0]['message']);
+        self::assertStringContainsString('could not lock a temp directory', ($failed['errors'] ?? [])[0]['message']);
         self::assertNotNull($tempDirectory);
         self::assertDirectoryDoesNotExist(
             $tempDirectory,
@@ -726,7 +733,7 @@ final class RectorDiagnosticsSourceBufferTest extends TestCase
             ->diagnoseBuffer($this->original, "<?php\n");
         self::assertSame(
             [],
-            $succeeded['errors'],
+            ($succeeded['errors'] ?? []),
             'a buffer run after the race must still publish diagnostics, not refuse a leftover directory',
         );
     }
@@ -749,7 +756,7 @@ final class RectorDiagnosticsSourceBufferTest extends TestCase
 
         self::assertSame(
             [],
-            $result['errors'],
+            ($result['errors'] ?? []),
             'an own directory holding only an empty, free .lock must be reclaimed rather than refused',
         );
     }
@@ -781,7 +788,7 @@ final class RectorDiagnosticsSourceBufferTest extends TestCase
             })->diagnoseBuffer($this->original, "<?php\n");
 
             self::assertFalse($called, 'a directory whose lock is genuinely held must still be refused, not reclaimed');
-            self::assertStringContainsString('pre-existing temp directory', $result['errors'][0]['message']);
+            self::assertStringContainsString('pre-existing temp directory', ($result['errors'] ?? [])[0]['message']);
         } finally {
             flock($handle, LOCK_UN);
             fclose($handle);

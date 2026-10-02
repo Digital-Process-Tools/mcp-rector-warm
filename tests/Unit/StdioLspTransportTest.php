@@ -15,10 +15,25 @@ use PHPUnit\Framework\TestCase;
  */
 final class StdioLspTransportTest extends TestCase
 {
+    /**
+     * fopen('php://memory', ...) is false|resource by signature, but never
+     * actually fails for this always-available in-memory wrapper -- asserted
+     * here once so every call site below stays a plain `resource`.
+     *
+     * @return resource
+     */
+    private function memoryStream(string $mode = 'r+')
+    {
+        $stream = fopen('php://memory', $mode);
+        self::assertNotFalse($stream, "fopen('php://memory', '{$mode}') unexpectedly failed");
+
+        return $stream;
+    }
+
     /** @return resource */
     private function streamWith(string $contents)
     {
-        $stream = fopen('php://memory', 'r+');
+        $stream = $this->memoryStream('r+');
         fwrite($stream, $contents);
         rewind($stream);
 
@@ -29,7 +44,7 @@ final class StdioLspTransportTest extends TestCase
     {
         $body = '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}';
         $frame = "Content-Length: " . strlen($body) . "\r\n\r\n" . $body;
-        $transport = new StdioLspTransport($this->streamWith($frame), fopen('php://memory', 'w'));
+        $transport = new StdioLspTransport($this->streamWith($frame), $this->memoryStream('w'));
 
         $message = $transport->read();
 
@@ -44,7 +59,7 @@ final class StdioLspTransportTest extends TestCase
         // Positive control for the case below: an EMPTY stream (nothing ever
         // sent) must read as null -- the same answer a stream that dies
         // mid-header must NOT give, or the two become indistinguishable.
-        $transport = new StdioLspTransport($this->streamWith(''), fopen('php://memory', 'w'));
+        $transport = new StdioLspTransport($this->streamWith(''), $this->memoryStream('w'));
 
         self::assertNull($transport->read());
     }
@@ -56,7 +71,7 @@ final class StdioLspTransportTest extends TestCase
         // and would drop a real body silently.
         $body = 'only-ten!!';
         $frame = "Content-Length: 500\r\n\r\n" . $body;
-        $transport = new StdioLspTransport($this->streamWith($frame), fopen('php://memory', 'w'));
+        $transport = new StdioLspTransport($this->streamWith($frame), $this->memoryStream('w'));
 
         $this->expectException(\RuntimeException::class);
         $transport->read();
@@ -65,7 +80,7 @@ final class StdioLspTransportTest extends TestCase
     public function testReadThrowsWhenContentLengthHeaderIsMissing(): void
     {
         $frame = "X-Something-Else: yes\r\n\r\n{}";
-        $transport = new StdioLspTransport($this->streamWith($frame), fopen('php://memory', 'w'));
+        $transport = new StdioLspTransport($this->streamWith($frame), $this->memoryStream('w'));
 
         $this->expectException(\RuntimeException::class);
         $transport->read();
@@ -73,8 +88,8 @@ final class StdioLspTransportTest extends TestCase
 
     public function testWriteFramesTheMessageWithAMatchingContentLength(): void
     {
-        $out = fopen('php://memory', 'w+');
-        $transport = new StdioLspTransport(fopen('php://memory', 'r'), $out);
+        $out = $this->memoryStream('w+');
+        $transport = new StdioLspTransport($this->memoryStream('r'), $out);
 
         $transport->write(['jsonrpc' => '2.0', 'id' => 1, 'result' => ['ok' => true]]);
 
@@ -82,14 +97,15 @@ final class StdioLspTransportTest extends TestCase
         $written = stream_get_contents($out);
         [$header, $body] = explode("\r\n\r\n", $written, 2);
         self::assertMatchesRegularExpression('/^Content-Length: (\d+)$/', $header, $header);
-        preg_match('/^Content-Length: (\d+)$/', $header, $m);
+        $matched = preg_match('/^Content-Length: (\d+)$/', $header, $m);
+        self::assertSame(1, $matched, $header);
         self::assertSame((int) $m[1], strlen($body));
         self::assertSame(['jsonrpc' => '2.0', 'id' => 1, 'result' => ['ok' => true]], json_decode($body, true));
     }
 
     public function testWriteThenReadRoundTrips(): void
     {
-        $stream = fopen('php://memory', 'r+');
+        $stream = $this->memoryStream('r+');
         $transport = new StdioLspTransport($stream, $stream);
 
         $transport->write(['jsonrpc' => '2.0', 'method' => 'initialized']);
@@ -109,9 +125,9 @@ final class StdioLspTransportTest extends TestCase
         // message was dropped on its way out. A read-only stream makes
         // fwrite() return false cleanly (no warning, no TypeError), which is
         // exactly the silent-failure shape this guards against.
-        $out = fopen('php://memory', 'r');
+        $out = $this->memoryStream('r');
 
-        $transport = new StdioLspTransport(fopen('php://memory', 'r'), $out);
+        $transport = new StdioLspTransport($this->memoryStream('r'), $out);
 
         $this->expectException(\RuntimeException::class);
         $transport->write(['jsonrpc' => '2.0', 'method' => 'initialized']);
@@ -134,11 +150,11 @@ final class StdioLspTransportTest extends TestCase
     public function testTryReadReturnsAMessageThatIsAlreadyWaiting(): void
     {
         $body = '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}';
-        $in = fopen('php://memory', 'r+');
+        $in = $this->memoryStream('r+');
         fwrite($in, "Content-Length: " . strlen($body) . "\r\n\r\n" . $body);
         rewind($in);
 
-        $transport = new StdioLspTransport($in, fopen('php://memory', 'w'));
+        $transport = new StdioLspTransport($in, $this->memoryStream('w'));
 
         self::assertSame(
             ['jsonrpc' => '2.0', 'id' => 1, 'method' => 'initialize', 'params' => []],
@@ -155,7 +171,7 @@ final class StdioLspTransportTest extends TestCase
      */
     public function testTryReadReturnsNullWhenNothingIsWaiting(): void
     {
-        $transport = new StdioLspTransport(fopen('php://memory', 'r'), fopen('php://memory', 'w'));
+        $transport = new StdioLspTransport($this->memoryStream('r'), $this->memoryStream('w'));
 
         self::assertNull($transport->tryRead());
     }
@@ -168,11 +184,11 @@ final class StdioLspTransportTest extends TestCase
     public function testPushBackIsReadBeforeTheUnderlyingStream(): void
     {
         $body = '{"jsonrpc":"2.0","method":"textDocument/didSave","params":{}}';
-        $in = fopen('php://memory', 'r+');
+        $in = $this->memoryStream('r+');
         fwrite($in, "Content-Length: " . strlen($body) . "\r\n\r\n" . $body);
         rewind($in);
 
-        $transport = new StdioLspTransport($in, fopen('php://memory', 'w'));
+        $transport = new StdioLspTransport($in, $this->memoryStream('w'));
         $transport->pushBack(['jsonrpc' => '2.0', 'method' => 'pushedBack']);
 
         self::assertSame(['jsonrpc' => '2.0', 'method' => 'pushedBack'], $transport->read());

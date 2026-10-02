@@ -102,6 +102,7 @@ final class RectorRunnerTest extends TestCase
         $tmp = sys_get_temp_dir() . '/rector-runner-test-' . bin2hex(random_bytes(8));
         mkdir($tmp);
         $previousCwd = getcwd();
+        self::assertNotFalse($previousCwd);
         $previousArgv = $_SERVER['argv'] ?? ['rector'];
 
         try {
@@ -252,6 +253,7 @@ final class RectorRunnerTest extends TestCase
             "<?php\n\ndeclare(strict_types=1);\n\nuse Rector\\Config\\RectorConfig;\n\nreturn RectorConfig::configure();\n",
         );
         $previousCwd = getcwd();
+        self::assertNotFalse($previousCwd);
         $previousArgv = $_SERVER['argv'] ?? ['rector'];
         $canFork = \function_exists('pcntl_fork')
             && \function_exists('pcntl_waitpid')
@@ -331,6 +333,7 @@ final class RectorRunnerTest extends TestCase
             "<?php\n\ndeclare(strict_types=1);\n\nuse Rector\\Config\\RectorConfig;\n\nreturn RectorConfig::configure();\n",
         );
         $previousCwd = getcwd();
+        self::assertNotFalse($previousCwd);
         $previousArgv = $_SERVER['argv'] ?? ['rector'];
 
         try {
@@ -505,6 +508,7 @@ final class RectorRunnerTest extends TestCase
             "<?php\n\ndeclare(strict_types=1);\n\nuse Rector\\Config\\RectorConfig;\n\nreturn RectorConfig::configure();\n",
         );
         $previousCwd = getcwd();
+        self::assertNotFalse($previousCwd);
         $previousArgv = $_SERVER['argv'] ?? ['rector'];
 
         try {
@@ -737,6 +741,7 @@ final class RectorRunnerTest extends TestCase
             "<?php\n\ndeclare(strict_types=1);\n\nuse Rector\\Config\\RectorConfig;\n\nreturn RectorConfig::configure();\n",
         );
         $previousCwd = getcwd();
+        self::assertNotFalse($previousCwd);
         $previousArgv = $_SERVER['argv'] ?? ['rector'];
         $originalSocket = null;
 
@@ -856,6 +861,7 @@ final class RectorRunnerTest extends TestCase
             "<?php\n\ndeclare(strict_types=1);\n\nuse Rector\\Config\\RectorConfig;\n\nreturn RectorConfig::configure();\n",
         );
         $previousCwd = getcwd();
+        self::assertNotFalse($previousCwd);
         $previousArgv = $_SERVER['argv'] ?? ['rector'];
 
         try {
@@ -1053,6 +1059,7 @@ final class RectorRunnerTest extends TestCase
             . "return RectorConfig::configure();\n";
         file_put_contents($tmp . '/rector.php', $wedgedConfig);
         $previousCwd = getcwd();
+        self::assertNotFalse($previousCwd);
         $previousArgv = $_SERVER['argv'] ?? ['rector'];
 
         try {
@@ -1146,6 +1153,7 @@ final class RectorRunnerTest extends TestCase
             . "usleep(2_500_000);\n\nreturn RectorConfig::configure();\n",
         );
         $previousCwd = getcwd();
+        self::assertNotFalse($previousCwd);
         $previousArgv = $_SERVER['argv'] ?? ['rector'];
 
         try {
@@ -1245,6 +1253,7 @@ final class RectorRunnerTest extends TestCase
             . "return RectorConfig::configure()->withRules([WedgedColdRector::class]);\n",
         );
         $previousCwd = getcwd();
+        self::assertNotFalse($previousCwd);
         $previousArgv = $_SERVER['argv'] ?? ['rector'];
 
         try {
@@ -1337,6 +1346,7 @@ final class RectorRunnerTest extends TestCase
             . "return RectorConfig::configure()->withRules([ExitingColdRector::class]);\n",
         );
         $previousCwd = getcwd();
+        self::assertNotFalse($previousCwd);
         $previousArgv = $_SERVER['argv'] ?? ['rector'];
 
         try {
@@ -1919,6 +1929,7 @@ final class RectorRunnerTest extends TestCase
             "<?php\n\ndeclare(strict_types=1);\n\nuse Rector\\Config\\RectorConfig;\n\nreturn RectorConfig::configure();\n",
         );
         $previousCwd = getcwd();
+        self::assertNotFalse($previousCwd);
         $previousArgv = $_SERVER['argv'] ?? ['rector'];
         $markerFile = $tmp . '/serveworker-escaped.marker';
 

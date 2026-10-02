@@ -13,6 +13,21 @@ use PHPUnit\Framework\TestCase;
  */
 final class RectorRunnerSkipAsTest extends TestCase
 {
+    /**
+     * Calls resolve() on a fake resolver typed only as `object` in this test
+     * (its real methods are only known to the fake itself) -- a direct
+     * `$resolver->resolve()` is correctly flagged method.notFound for a
+     * plain `object`; going through a `string $method` parameter crosses a
+     * boundary PHPStan does not look through, so this is the honest way to
+     * say "resolved at runtime, not a typo".
+     *
+     * @return array<string, mixed>
+     */
+    private static function callResolve(object $resolver, string $method = 'resolve'): array
+    {
+        return $resolver->$method();
+    }
+
     public function testARenamedResolverPropertyFailsOpenInAChildWhoseStderrIsClosed(): void
     {
         // The forked grandchild closes fd 2 before running (runForked()).
@@ -77,7 +92,7 @@ final class RectorRunnerSkipAsTest extends TestCase
 
         $this->apply($this->runnerWith($skipper, $this->pathsResolver(), $classes), '/p/src/Foo.php', '/p/src/.rector-warm-1/Foo.php');
 
-        $resolved = $classes->resolve();
+        $resolved = self::callResolve($classes);
         self::assertContains('/p/src/.rector-warm-1/Foo.php', $resolved['App\\SomeRule']);
         self::assertSame(['/p/src/Bar.php'], $resolved['App\\Other']);
     }
@@ -110,7 +125,7 @@ final class RectorRunnerSkipAsTest extends TestCase
 
         $this->apply($this->runnerWith($skipper, $this->pathsResolver(), $classes), '/p/src/Foo.php', '/p/src/.rector-warm-1/Foo.php');
 
-        self::assertContains('/p/src/.rector-warm-1/Foo.php', $classes->resolve()['App\\SomeRule']);
+        self::assertContains('/p/src/.rector-warm-1/Foo.php', self::callResolve($classes)['App\\SomeRule']);
         self::assertFalse($skipper->marked);
     }
 
@@ -192,7 +207,9 @@ final class RectorRunnerSkipAsTest extends TestCase
 
     private function inChildWithStderrClosed(callable $body): string
     {
-        [$parent, $child] = stream_socket_pair(STREAM_PF_UNIX, STREAM_SOCK_STREAM, STREAM_IPPROTO_IP);
+        $pair = stream_socket_pair(STREAM_PF_UNIX, STREAM_SOCK_STREAM, STREAM_IPPROTO_IP);
+        self::assertNotFalse($pair);
+        [$parent, $child] = $pair;
         $pid = pcntl_fork();
         if ($pid === 0) {
             fclose($parent);
@@ -205,7 +222,8 @@ final class RectorRunnerSkipAsTest extends TestCase
             }
             fclose($child);
             // Skip PHPUnit's shutdown handlers in the child.
-            posix_kill(getmypid(), SIGKILL);
+            $selfPid = getmypid();
+            posix_kill($selfPid !== false ? $selfPid : 0, SIGKILL);
         }
 
         fclose($child);

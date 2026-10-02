@@ -70,7 +70,7 @@ final class RectorDiagnosticsSourceTest extends TestCase
         self::assertSame([], $result['fixes']);
         // Negative control for #90's must-fire test below: a clean report
         // must not surface a spurious error either.
-        self::assertSame([], $result['errors']);
+        self::assertSame([], ($result['errors'] ?? []));
     }
 
     public function testASyntaxErrorProducesAnErrorDiagnosticInsteadOfSilentlyClearing(): void
@@ -88,7 +88,7 @@ final class RectorDiagnosticsSourceTest extends TestCase
         $result = $this->fakeSource($output)->diagnose($this->workDir . '/Sample.php');
 
         self::assertSame([], $result['fixes']);
-        self::assertSame([['message' => 'Syntax error, unexpected token', 'line' => 7]], $result['errors']);
+        self::assertSame([['message' => 'Syntax error, unexpected token', 'line' => 7]], ($result['errors'] ?? []));
     }
 
     public function testAPathOutsideTheWorkingDirectoryBecomesAnErrorRatherThanSilence(): void
@@ -103,9 +103,9 @@ final class RectorDiagnosticsSourceTest extends TestCase
             $result = $this->fakeSource('{"totals":{"changed_files":0,"errors":0}}')->diagnose($outside);
 
             self::assertSame([], $result['fixes']);
-            self::assertCount(1, $result['errors']);
-            self::assertSame(0, $result['errors'][0]['line']);
-            self::assertStringContainsString('outside the configured working directory', $result['errors'][0]['message']);
+            self::assertCount(1, ($result['errors'] ?? []));
+            self::assertSame(0, ($result['errors'] ?? [])[0]['line']);
+            self::assertStringContainsString('outside the configured working directory', ($result['errors'] ?? [])[0]['message']);
         } finally {
             @unlink($outside);
         }
@@ -166,7 +166,7 @@ final class RectorDiagnosticsSourceTest extends TestCase
         $result = $this->fakeSource('not json at all')->diagnose($this->workDir . '/Sample.php');
 
         self::assertSame([], $result['fixes']);
-        self::assertNotSame([], $result['errors']);
+        self::assertNotSame([], ($result['errors'] ?? []));
     }
 
     /**

@@ -77,6 +77,7 @@ final class RectorToolRecoveryTest extends TestCase
         $tool = RectorTool::withRunner($fake);
         $result = $tool->process($this->insideFile(), true);
 
+        self::assertIsArray($result);
         self::assertSame(0, $result['exit_code'], 'recovered run should succeed');
         self::assertSame(2, $fake->runs, 'should retry exactly once');
         self::assertSame(1, $fake->reboots, 'should reboot before retry');

@@ -33,6 +33,7 @@ final class RectorRunnerProcessTreeKillTest extends TestCase
     {
         [$tmp, $pidFile] = self::makeWedgedProject('cold');
         $previousCwd = getcwd();
+        self::assertNotFalse($previousCwd);
         $previousArgv = $_SERVER['argv'] ?? ['rector'];
 
         try {
@@ -83,6 +84,7 @@ final class RectorRunnerProcessTreeKillTest extends TestCase
 
         [$tmp, $pidFile] = self::makeWedgedProject('forked');
         $previousCwd = getcwd();
+        self::assertNotFalse($previousCwd);
         $previousArgv = $_SERVER['argv'] ?? ['rector'];
         $runner = null;
 
@@ -149,6 +151,7 @@ final class RectorRunnerProcessTreeKillTest extends TestCase
         // No class, so the wedged rule (Class_ nodes only) never fires on it.
         file_put_contents($tmp . '/src/plain.php', "<?php\n\ndeclare(strict_types=1);\n\n\$x = 1;\n");
         $previousCwd = getcwd();
+        self::assertNotFalse($previousCwd);
         $previousArgv = $_SERVER['argv'] ?? ['rector'];
         $runner = null;
 
