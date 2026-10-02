@@ -58,6 +58,59 @@ declare(strict_types=1);
  * recording is process-wide, and fork duplicates that state); the resulting
  * duplicate "this line ran" entries are harmless under merge, which is a
  * union over processes, not a sum.
+ *
+ * #245 verified, not reasoned: the paragraph above (forked child inherits an
+ * already-registered shutdown function, and the parent/child's pcov buffers
+ * stay independent after fork) used to be read from source only. It is now
+ * measured: a throwaway two-line-probe script (one statement reachable only
+ * in the parent, one reachable only in the child) registered a shutdown
+ * dump BEFORE calling pcntl_fork(), with no explicit in-child dump call.
+ * Result -- parent and child each wrote their own `<pid>-*.json` dump (that
+ * probe's own ad hoc bookkeeping format, unrelated to the `.cov`/PHP-report
+ * format this file's real `register_shutdown_function()` callback writes
+ * below -- the probe needed no more than `json_encode()` for its own
+ * throwaway purpose), and each dump showed only its own process's line as
+ * hit (the other process's unique line stayed unhit), confirming the two
+ * buffers are
+ * genuinely separate per-process and both survive to a normal exit()'s
+ * shutdown sequence. A child killed by a raw signal (SIGKILL, bypassing
+ * PHP's shutdown sequence entirely) produced no dump for itself at all --
+ * its coverage would be silently lost -- which is why it matters that none
+ * of RectorRunner.php's three `pcntl_fork()` sites (boot()'s worker fork,
+ * the standby-worker fork, and the session-retire fork) ever calls anything
+ * but a normal `exit()` in the child. So: the fork/merge mechanism this file
+ * implements is not the source of any of the three #245 coverage-undercount
+ * reports. The real, also-measured cause behind one of them (bin/rector-warm-lsp
+ * staying at 0% even after dedicated tests were added) is that nothing this
+ * repository runs under coverage instrumentation ever executes that file as
+ * its own process: tests/Unit/WorkingDirectoryArgumentTest.php (#254) only
+ * exercises the extracted WorkingDirectoryArgument::parse() helper, and the
+ * only real invocations of the bin/rector-warm-lsp script -- the Python LSP
+ * E2E suite and the headless-nvim/headless-helix smoke jobs -- run in CI
+ * jobs that never set PHP_INI_SCAN_DIR/pcov at all (that setup lives only in
+ * the `coverage` job's own shell session, via $GITHUB_ENV, which does not
+ * cross job boundaries). bin/mcp-rector-warm, by contrast, reads real
+ * coverage because tests/Integration/ServerStdioTest.php spawns it as a
+ * subprocess from inside the instrumented `coverage` job itself -- the same
+ * mechanism this file exists to support. A 0% file-level number for
+ * bin/rector-warm-lsp is therefore not evidence of a broken merge; it is an
+ * accurate report of "never run under an instrumented process", and closing
+ * it for real needs either a subprocess-spawning integration test for this
+ * one entrypoint (a product-test decision, not a tooling one) or coverage
+ * instrumentation wired into the E2E/headless jobs that already exercise it
+ * for real -- both out of scope for this file. The third #245 report (PR
+ * #256's new direct-Reflection tests for 9 RectorRunner methods moving the
+ * project's total line count by only 3) is also not a pipeline defect: a
+ * local instrumented run of the *existing* suite (minus that PR's own new
+ * test file) already showed those 9 methods between 80% and 100%
+ * line-covered via the full unit+integration run's merge, because other
+ * tests already exercise them indirectly through RectorRunner's real
+ * warm/cold flow. "0%-covered" in that PR's own commit message meant "no
+ * dedicated direct test", not "never executed" -- a real and legitimate
+ * reason to add the tests (precision, speed, determinism of a Reflection
+ * call vs. an end-to-end flow), but not one that was ever going to move the
+ * merged file-level number by much, because the lines were already being
+ * hit.
  */
 
 $coverageDir = getenv('MCP_RECTOR_WARM_COVERAGE_DIR');

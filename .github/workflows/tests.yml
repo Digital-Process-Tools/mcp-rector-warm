@@ -512,6 +512,70 @@ jobs:
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
+      # #245: bin/rector-warm-lsp reads 0% here even once every unit and
+      # integration test has run, and that is an accurate measurement, not a
+      # pipeline defect -- see tests/coverage/prepend.php's own #245 comment
+      # for the measured experiment this relies on. Nothing this job runs
+      # ever executes that file as its own process (unlike bin/mcp-rector-warm,
+      # which tests/Integration/ServerStdioTest.php spawns as a subprocess
+      # from inside this very job): its only real invocations are the E2E
+      # Python LSP suite and the headless-nvim/headless-helix jobs, none of
+      # which carry this job's PHP_INI_SCAN_DIR/pcov setup. Without this note
+      # a reader has no way to tell that 0% apart from an actually-broken
+      # merge, which is exactly the question #245 was opened to answer.
+      - name: Known coverage gaps (#245)
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: |
+          php -r '
+            // Self-review finding (#245): the two early-exit branches below
+            // used to both be a bare exit(0) with no output, which rendered
+            // identically to "both watched files are accounted for, nothing
+            // to flag" -- reintroducing, in this very note, the exact
+            // ambiguity #245 was opened to resolve. Each now prints a
+            // one-line "could not evaluate" instead, so a reader can tell
+            // "checked, no gap" apart from "could not check" at a glance.
+            $xml = @simplexml_load_file("coverage.xml");
+            if ($xml === false) {
+                echo "### ${{ matrix.os }}: could not evaluate known coverage gaps (#245) -- coverage.xml missing or failed to parse\n";
+                exit(0);
+            }
+            $watched = [
+                "bin/rector-warm-lsp" => "only ever run as a real process by the E2E LSP suite / headless-nvim / headless-helix jobs, none of which run under coverage instrumentation",
+                "bin/mcp-rector-warm" => "spawned as a real subprocess by tests/Integration/ServerStdioTest.php inside this job, so a 0% here WOULD be a regression",
+            ];
+            $lines = [];
+            $seen = [];
+            foreach ($xml->project->file as $file) {
+                $name = (string) $file["name"];
+                foreach ($watched as $needle => $explanation) {
+                    if (!str_ends_with($name, "/" . $needle)) {
+                        continue;
+                    }
+                    $seen[$needle] = true;
+                    $m = $file->metrics;
+                    $statements = (int) $m["statements"];
+                    $covered = (int) $m["coveredstatements"];
+                    $lines[] = sprintf(
+                        "- `%s`: %d/%d lines covered -- %s",
+                        $needle,
+                        $covered,
+                        $statements,
+                        $explanation,
+                    );
+                }
+            }
+            $missing = array_diff(array_keys($watched), array_keys($seen));
+            if ($missing !== []) {
+                echo "### ${{ matrix.os }}: could not evaluate known coverage gaps (#245) -- not found in coverage.xml: " . implode(", ", $missing) . "\n";
+            }
+            if ($lines === []) {
+                exit(0);
+            }
+            echo "### ${{ matrix.os }}: known coverage gaps (#245)\n";
+            echo implode("\n", $lines) . "\n";
+          ' >> "$GITHUB_STEP_SUMMARY"
+
       - name: Slowest tests summary
         if: ${{ !cancelled() }}
         shell: bash
