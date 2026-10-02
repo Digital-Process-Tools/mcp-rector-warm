@@ -770,6 +770,7 @@ class RectorRunner implements RunnerInterface
         }
         try {
             $this->writeFrame($this->workerSocket, $payload);
+            \assert($this->workerSocket !== null);
             $raw = $this->readFrame($this->workerSocket, $deadline);
         } catch (RectorCallTimeoutException $e) {
             // Defense in depth: forkAndExecute()'s OWN deadline (same budget,
@@ -1280,6 +1281,7 @@ class RectorRunner implements RunnerInterface
     private function spawnSession(?int $deadline): bool
     {
         try {
+            \assert($this->container !== null);
             $this->sessionDirectories ??= (new SessionHooks($this->container))->directorySnapshot(
                 (string) \getcwd(),
                 self::sessionWatchPaths((string) \getcwd()),
@@ -1374,6 +1376,7 @@ class RectorRunner implements RunnerInterface
             $nextOrphanCheckNs = \hrtime(true) + self::ORPHAN_POLL_SECONDS * 1_000_000_000;
         };
         try {
+            \assert($this->sessionSocket !== null);
             $raw = $this->readFrame($this->sessionSocket, $deadline, $onIdle);
         } catch (RectorCallTimeoutException) {
             $this->killSession();
@@ -1436,6 +1439,7 @@ class RectorRunner implements RunnerInterface
             $this->workerDaemonSocket = null;
             self::silenceChildOutput(4096);
             try {
+                \assert($this->container !== null);
                 $hooks = new SessionHooks($this->container);
                 $session = new WarmSession(
                     $hooks,
@@ -2218,7 +2222,10 @@ class RectorRunner implements RunnerInterface
         }
         $timedOut = fn(): bool => $deadlineNs !== null && \hrtime(true) >= $deadlineNs;
 
-        while ($this->procWorker['socket'] === null) {
+        while (true) {
+            if ($this->procWorker['socket'] !== null) {
+                break;
+            }
             // Checked on EVERY pass, not only when nobody connected: a local process
             // that keeps connecting must not keep this wait alive past the deadline.
             if ($timedOut()) {
@@ -2227,6 +2234,7 @@ class RectorRunner implements RunnerInterface
                     . 'warm worker finished booting; the worker was killed',
                 );
             }
+            \assert($this->procWorker !== null);
             $server = $this->procWorker['server'];
             \assert($server !== null);
             $connection = @\stream_socket_accept($server, 1);
@@ -2250,10 +2258,6 @@ class RectorRunner implements RunnerInterface
                     $hello = null;
                 }
                 if ($hello !== null && \hash_equals($expected, $hello)) {
-                    // Re-asserted right at the write: an offset-write re-checks
-                    // against the property's full declared (nullable) type, so
-                    // the method-entry assert above does not carry forward.
-                    \assert($this->procWorker !== null);
                     $this->procWorker['socket'] = $connection;
                     \fclose($server);
                     $this->procWorker['server'] = null;
@@ -2286,7 +2290,6 @@ class RectorRunner implements RunnerInterface
             );
         }
 
-        \assert($this->procWorker !== null);
         $this->procWorker['ready'] = true;
         $this->configFile = \is_string($decoded['config_file'] ?? null) ? $decoded['config_file'] : null;
         $this->configFileHash = \is_string($decoded['config_file_hash'] ?? null) ? $decoded['config_file_hash'] : null;
@@ -2924,6 +2927,7 @@ class RectorRunner implements RunnerInterface
         // leaking into our MCP stdio transport.
         ob_start();
         try {
+            \assert($this->application !== null);
             $exit = self::callDynamic($this->application, 'run', [$input, $output]);
         } finally {
             $echoed = ob_get_clean();

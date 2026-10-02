@@ -142,6 +142,7 @@ final class TempCopySweeperTest extends TestCase
             self::assertDirectoryDoesNotExist($free);
             self::assertDirectoryExists($this->root . '/src/.rector-warm-2', 'a directory whose lock is held by a live process must be kept');
         } finally {
+            \assert(\is_resource($held));
             flock($held, LOCK_UN);
             fclose($held);
         }
@@ -165,6 +166,7 @@ final class TempCopySweeperTest extends TestCase
         // Simulates the process dying: the OS releases every lock it held,
         // including on a kill -9, without this test calling flock(LOCK_UN)
         // itself.
+        \assert(\is_resource($handle));
         fclose($handle);
 
         TempCopySweeper::sweepDirectory($this->root . '/src');
@@ -222,6 +224,7 @@ final class TempCopySweeperTest extends TestCase
         $handle = $this->plantLocked('src/.rector-warm-12', held: true);
         $dir = $this->root . '/src/.rector-warm-12';
         file_put_contents($dir . '/Extra.txt', "not expected here\n");
+        \assert(\is_resource($handle));
         fclose($handle);
 
         TempCopySweeper::sweepDirectory($this->root . '/src');
@@ -252,6 +255,7 @@ final class TempCopySweeperTest extends TestCase
             self::assertDirectoryExists($elsewhere, 'a stale directory outside the swept directory must be left for its own sweep');
             self::assertDirectoryExists($this->root . '/vendor/pkg/.rector-warm-8');
         } finally {
+            \assert(\is_resource($held));
             flock($held, LOCK_UN);
             fclose($held);
         }
