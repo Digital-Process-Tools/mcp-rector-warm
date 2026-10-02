@@ -82,6 +82,21 @@ final class CallRequestFrameTest extends TestCase
         self::assertFalse($frame->bool('warm_boot', false));
     }
 
+    public function testBoolFieldPresentButNullFallsBackToTheDefaultLikeAMissingKey(): void
+    {
+        // `??`, not `array_key_exists`: `($request['dry_run'] ?? true) === true`
+        // reads a present-but-null value exactly like a missing one, which
+        // matters only for dry_run (serveWorker()'s one bool field whose
+        // default is true, not false, per #72's "never silently unkillable").
+        // A naive array_key_exists()-based implementation would instead
+        // evaluate `null === true` and return false here -- flipping #72's
+        // safety direction for this one malformed-but-present shape.
+        $frame = CallRequestFrame::decode((string) json_encode(['dry_run' => null]));
+
+        self::assertTrue($frame->bool('dry_run', true));
+        self::assertFalse($frame->bool('warm_boot', false));
+    }
+
     public function testDeadlineNsNotAnIntIsNull(): void
     {
         $frame = CallRequestFrame::decode((string) json_encode(['deadline_ns' => '123']));

@@ -49,12 +49,14 @@ final readonly class CallRequestFrame
     }
 
     /**
-     * Matches `($request[$key] ?? $default) === true` exactly: a present but
-     * not-literally-boolean-true value reads as false, never as $default.
+     * Matches `($request[$key] ?? $default) === true` exactly, including its
+     * one surprising case: a present-but-null value reads as $default too
+     * (`??`, not `array_key_exists`), while any other present-but-not-true
+     * value reads as false, never as $default.
      */
     public function bool(string $key, bool $default): bool
     {
-        return \array_key_exists($key, $this->fields) ? ($this->fields[$key] === true) : $default;
+        return ($this->fields[$key] ?? $default) === true;
     }
 
     public function string(string $key, string $default = ''): string
