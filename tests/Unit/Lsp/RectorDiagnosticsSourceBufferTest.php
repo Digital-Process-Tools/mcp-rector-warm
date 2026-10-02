@@ -253,6 +253,49 @@ final class RectorDiagnosticsSourceBufferTest extends TestCase
         self::assertSame(['src', 'src/Sample.php'], $this->projectEntries());
     }
 
+    /**
+     * #263: the `!@mkdir($tempDirectory, 0o700)` guard's own failure branch
+     * was untested -- only the "already exists" refusal above it was
+     * covered. A parent directory this process cannot write into makes
+     * mkdir() fail for a reason that has nothing to do with a pre-existing
+     * temp directory, per the self-review comment at that call site. Probed
+     * first: root (and some CI containers running as root) ignores
+     * permission bits entirely, so the restriction this test relies on may
+     * not hold everywhere -- skip rather than false-fail there.
+     */
+    public function testAnUnwritableParentDirectoryBecomesAnErrorRatherThanSilence(): void
+    {
+        if (PHP_OS_FAMILY === 'Windows') {
+            self::markTestSkipped('POSIX file mode bits are not meaningful on Windows.');
+        }
+
+        $directory = dirname($this->original);
+        self::assertTrue(chmod($directory, 0o500));
+
+        $probe = $directory . '/permission-probe-' . bin2hex(random_bytes(4));
+        $canStillWrite = @mkdir($probe);
+        if ($canStillWrite) {
+            @rmdir($probe);
+            chmod($directory, 0o700);
+            self::markTestSkipped('This process can still write into a read-only directory (likely running as root); the restriction this test relies on does not hold here.');
+        }
+
+        try {
+            $called = false;
+            $result = $this->source(function () use (&$called): string {
+                $called = true;
+
+                return '{"totals":{"changed_files":0,"errors":0}}';
+            })->diagnoseBuffer($this->original, "<?php\n");
+
+            self::assertFalse($called, 'Rector must never be invoked when the temp directory could not be created.');
+            self::assertCount(1, ($result['errors'] ?? []));
+            self::assertStringContainsString('could not create a temp directory', ($result['errors'] ?? [])[0]['message']);
+        } finally {
+            chmod($directory, 0o700);
+        }
+    }
+
     public function testABufferForAFileOutsideTheProjectIsRefusedWithoutWritingAnything(): void
     {
         $outsideDir = sys_get_temp_dir() . '/mcp-rector-lsp-outside-' . bin2hex(random_bytes(4));
