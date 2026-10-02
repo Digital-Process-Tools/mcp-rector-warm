@@ -379,8 +379,10 @@ jobs:
   # already-registered shutdown function along with the rest of the
   # process). "Merge forked/subprocess coverage" folds every one of those
   # processes' own `.cov` file into the one the top-level phpunit run
-  # already produced. No coverage threshold enforced here (out of scope:
-  # measure first, gate later).
+  # already produced. The last step, "Coverage gate (#275)", fails each leg
+  # whose merged coverage.xml is below 90% total line coverage. It is the
+  # blocking coverage check: Codecov's own codecov/project status is not
+  # posted on this repo (see codecov.yml).
   #
   # Windows is NOT in this matrix: RectorRunner::canFork() is always false
   # there (#31), so there is no forked-child gap on that platform to begin
@@ -604,6 +606,21 @@ jobs:
           flags: ${{ matrix.flag }}
           token: ${{ secrets.CODECOV_TOKEN }}
           fail_ci_if_error: false
+
+      # #275: the blocking coverage gate. Codecov never posts a
+      # codecov/project status on this repo, so codecov.yml's target cannot
+      # block anything; this step does. Total line coverage is
+      # coveredstatements / statements from the merged (post-#218) clover
+      # file's project-level <metrics>, the same counts Codecov shows per
+      # flag. Each leg is gated on its own report, which runs a little below
+      # the Codecov total that merges all three OS uploads (on 79228666:
+      # linux 90.94%, macOS 90.91%, merged 91.61%). Last in the job so every
+      # summary and the Codecov upload still run when it fails.
+      # coverage-windows is deliberately not gated: it measures the main
+      # process only (about 69%), so a threshold there would gate nothing real.
+      - name: Coverage gate (#275)
+        shell: bash
+        run: python3 tools/coverage-gate.py coverage.xml --min 90.0 --label "${{ matrix.os }}"
 
   # #218 scope item 4: pcov on a Windows leg too, so its own platform-only
   # branches (ProcessTree, TempCopySweeper's junction handling) are reported

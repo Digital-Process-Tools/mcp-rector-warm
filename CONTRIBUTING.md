@@ -30,8 +30,12 @@ Coverage and per-test timing are measured in CI, not locally by default: the
 `coverage` job in `.github/workflows/tests.yml` (ubuntu and macOS) runs the
 suite once with pcov and posts the coverage summary and the 10 slowest tests
 to that job's GitHub Actions summary page (plus a `junit-log` artifact and,
-when the repo is activated on Codecov, the README badge). No coverage
-threshold is enforced (#209).
+when the repo is activated on Codecov, the README badge). Each of those two
+legs ends with a "Coverage gate (#275)" step that fails the job when the
+leg's merged report is below 90% total line coverage; that step, not Codecov,
+is the blocking check. To see the number locally, write a clover file and run
+`python3 tools/coverage-gate.py coverage.xml` on it (a plain local pcov run
+lacks the forked/subprocess merge below, so it reads lower than CI).
 
 pcov only instruments the one process phpunit runs in, so a `pcntl_fork()`
 child or a `proc_open()` subprocess (every `bin/*` script) does not count on
