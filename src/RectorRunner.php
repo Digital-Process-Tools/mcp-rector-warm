@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Dpt\McpRectorWarm;
 
+use Dpt\McpRectorWarm\Support\HandshakeFrame;
 use Dpt\McpRectorWarm\Support\ProcessTree;
 use Dpt\McpRectorWarm\Warm\DependencyFileTracker;
 use Dpt\McpRectorWarm\Warm\DirectorySnapshot;
@@ -587,14 +588,12 @@ class RectorRunner implements RunnerInterface
                 . 'warm worker finished booting; the worker was killed',
             );
         }
-        $decoded = $handshake === null ? null : \json_decode($handshake, true);
-        if (!\is_array($decoded) || ($decoded['ok'] ?? false) !== true) {
+        $frame = HandshakeFrame::decode($handshake);
+        if (!$frame->ok) {
             \fclose($parentSocket);
             $status = 0;
             \pcntl_waitpid($pid, $status);
-            $message = \is_array($decoded) && isset($decoded['error'])
-                ? (string) $decoded['error']
-                : "the warm worker failed to boot (exit status {$status})";
+            $message = $frame->error ?? "the warm worker failed to boot (exit status {$status})";
             throw new \RuntimeException($message);
         }
 
@@ -605,9 +604,7 @@ class RectorRunner implements RunnerInterface
         // built the container -- the worker, never THIS instance -- so, unlike
         // $configFile/$configFileHash, they cannot be independently re-resolved here;
         // take the worker's own bootInPlace()-computed hashes verbatim off the handshake.
-        $this->bootstrapFileHashes = \is_array($decoded['bootstrap_files'] ?? null)
-            ? $decoded['bootstrap_files']
-            : [];
+        $this->bootstrapFileHashes = $frame->array('bootstrap_files');
     }
 
     /**
@@ -1322,11 +1319,11 @@ class RectorRunner implements RunnerInterface
                 "rector call exceeded {$this->callTimeoutSeconds}s (--call-timeout); the analysis was killed",
             );
         }
-        $decoded = $handshake === null ? null : \json_decode($handshake, true);
-        if (!\is_array($decoded) || ($decoded['ok'] ?? false) !== true) {
+        $frame = HandshakeFrame::decode($handshake);
+        if (!$frame->ok) {
             \fclose($workerEnd);
             $this->killAndReap($pid);
-            $this->disableSession(\is_array($decoded) ? (string) ($decoded['error'] ?? 'unknown error') : 'no handshake');
+            $this->disableSession($frame->decodedToArray() ? ($frame->error ?? 'unknown error') : 'no handshake');
 
             return false;
         }
@@ -1335,8 +1332,8 @@ class RectorRunner implements RunnerInterface
         $this->sessionLog('spawn', \sprintf(
             'pid %d, %d files and %d directories tracked',
             $pid,
-            (int) ($decoded['tracked'] ?? 0),
-            (int) ($decoded['directories'] ?? 0),
+            $frame->int('tracked'),
+            $frame->int('directories'),
         ));
 
         return true;
@@ -2281,21 +2278,19 @@ class RectorRunner implements RunnerInterface
                 . 'warm worker finished booting; the worker was killed',
             );
         }
-        $decoded = $handshake === null ? null : \json_decode($handshake, true);
-        if (!\is_array($decoded) || ($decoded['ok'] ?? false) !== true) {
+        $frame = HandshakeFrame::decode($handshake);
+        if (!$frame->ok) {
             throw new \RuntimeException(
-                \is_array($decoded) && isset($decoded['error'])
-                    ? (string) $decoded['error']
-                    : 'the warm worker process failed to boot: ' . $this->procWorkerStderrTail(),
+                $frame->error ?? 'the warm worker process failed to boot: ' . $this->procWorkerStderrTail(),
             );
         }
 
         $this->procWorker['ready'] = true;
-        $this->configFile = \is_string($decoded['config_file'] ?? null) ? $decoded['config_file'] : null;
-        $this->configFileHash = \is_string($decoded['config_file_hash'] ?? null) ? $decoded['config_file_hash'] : null;
-        $this->composerFile = \is_string($decoded['composer_file'] ?? null) ? $decoded['composer_file'] : null;
-        $this->composerFileHash = \is_string($decoded['composer_file_hash'] ?? null) ? $decoded['composer_file_hash'] : null;
-        $this->bootstrapFileHashes = \is_array($decoded['bootstrap_files'] ?? null) ? $decoded['bootstrap_files'] : [];
+        $this->configFile = $frame->string('config_file');
+        $this->configFileHash = $frame->string('config_file_hash');
+        $this->composerFile = $frame->string('composer_file');
+        $this->composerFileHash = $frame->string('composer_file_hash');
+        $this->bootstrapFileHashes = $frame->array('bootstrap_files');
     }
 
     /**
