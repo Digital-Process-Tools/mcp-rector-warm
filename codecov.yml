@@ -1,15 +1,19 @@
-# Project coverage is gated at 90% (#275), reached in #279. A PR fails the
-# codecov/project check if it takes total line coverage below 90%, with 0.5%
-# slack for upload noise across the three OS legs. Patch coverage stays
-# informational: a small PR touching hard-to-test fork/kill paths should not
-# be blocked on its own diff's percentage. No PR comment is posted.
+# Codecov does not post a codecov/project status or check on this repo (only
+# codecov/patch shows up), so nothing here can block a merge. The blocking
+# 90% line-coverage gate (#275) is the "Coverage gate (#275)" step at the end
+# of each `coverage` leg in .github/workflows/tests.yml, computed from that
+# leg's own merged clover report. The project status below is informational:
+# the 90% target is kept so Codecov shows the same goal if it ever does post
+# the status, but it is not the gate. Patch coverage stays informational too:
+# a small PR touching hard-to-test fork/kill paths should not be blocked on
+# its own diff's percentage. No PR comment is posted.
 comment: false
 coverage:
   status:
     project:
       default:
         target: 90%
-        threshold: 0.5%
+        informational: true
     patch:
       default:
         informational: true

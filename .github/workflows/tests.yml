@@ -379,8 +379,11 @@ jobs:
   # already-registered shutdown function along with the rest of the
   # process). "Merge forked/subprocess coverage" folds every one of those
   # processes' own `.cov` file into the one the top-level phpunit run
-  # already produced. No coverage threshold enforced here (out of scope:
-  # measure first, gate later).
+  # already produced. The last step, "Coverage gate (#275)", fails each leg
+  # whose merged coverage.xml is below 90% line coverage, counted the way
+  # Codecov counts it (statements + method lines). It is the
+  # blocking coverage check: Codecov's own codecov/project status is not
+  # posted on this repo (see codecov.yml).
   #
   # Windows is NOT in this matrix: RectorRunner::canFork() is always false
   # there (#31), so there is no forked-child gap on that platform to begin
@@ -604,6 +607,30 @@ jobs:
           flags: ${{ matrix.flag }}
           token: ${{ secrets.CODECOV_TOKEN }}
           fail_ci_if_error: false
+
+      # #275: the blocking coverage gate. Codecov never posts a
+      # codecov/project status on this repo, so codecov.yml's target cannot
+      # block anything; this step does, on this leg's merged (post-#218)
+      # clover file.
+      #
+      # Two metrics can be read from that file, and they differ by about a
+      # point. The gated one is Codecov-equivalent: distinct <line> entries
+      # of type "stmt" or "method", hit when count > 0. That is how Codecov
+      # counts "lines" for a PHP clover upload, so it is the number on the
+      # badge and the one the 90% goal was set against (on 79228666 Codecov
+      # showed linux 90.94%, macOS 90.91%, all three OS merged 91.61%). The
+      # other, coveredstatements / statements from the project-level
+      # <metrics>, leaves out the method-declaration lines, which are nearly
+      # all hit, so it reads lower (locally 90.45% vs 91.14% on one file).
+      # The script prints it for information only.
+      #
+      # Last in the job so every summary and the Codecov upload still run
+      # when it fails. coverage-windows is deliberately not gated: it
+      # measures the main process only (about 69%), so a threshold there
+      # would gate nothing real.
+      - name: Coverage gate (#275)
+        shell: bash
+        run: python3 tools/coverage-gate.py coverage.xml --min 90.0 --label "${{ matrix.os }}"
 
   # #218 scope item 4: pcov on a Windows leg too, so its own platform-only
   # branches (ProcessTree, TempCopySweeper's junction handling) are reported
