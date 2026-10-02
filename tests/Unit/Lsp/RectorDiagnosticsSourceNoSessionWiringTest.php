@@ -77,6 +77,25 @@ final class RectorDiagnosticsSourceNoSessionWiringTest extends TestCase
     }
 
     /**
+     * #263: diagnoseBufferForEdit() -- the buffer-over-an-unsaved-edit
+     * sibling of diagnoseForEdit() -- was never called by any test in this
+     * suite at all. Same codeAction-recompute contract as
+     * testCodeActionRecomputeForcesNoSessionTrue above, over a buffer
+     * instead of a saved file. $workDir/Sample.php sits directly in the
+     * chdir'd cwd (not a subdirectory), so this also exercises
+     * isWithinRoot()'s exact-match branch rather than only its prefix-match
+     * one.
+     */
+    public function testBufferCodeActionRecomputeForcesNoSessionTrue(): void
+    {
+        $source = $this->sourceWithSpy();
+        $result = $source->diagnoseBufferForEdit($this->workDir . '/Sample.php', "<?php\n");
+
+        self::assertSame([], ($result['errors'] ?? []));
+        self::assertSame([true], $this->spyOf($source)->recorded);
+    }
+
+    /**
      * Must-fire positive control (CLAUDE.md: a must-not-fire assertion needs
      * a must-fire sibling): plain diagnostics, with nothing about to turn the
      * result into a WorkspaceEdit, keeps using the session -- noSession must

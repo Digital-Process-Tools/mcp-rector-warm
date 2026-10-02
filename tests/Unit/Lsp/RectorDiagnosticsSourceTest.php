@@ -313,6 +313,135 @@ final class RectorDiagnosticsSourceTest extends TestCase
     }
 
     /**
+     * #263: interpretWorkspace()'s own "no parseable report" branch was
+     * untested on its own -- diagnose()'s equivalent is pinned by
+     * testNoParsableJsonAtAllBecomesAnErrorRatherThanSilentlyClean above,
+     * but nothing called diagnoseWorkspace() with unparseable output.
+     */
+    public function testDiagnoseWorkspaceWithNoParsableReportBecomesAnErrorRatherThanSilence(): void
+    {
+        $result = $this->fakeSource('not json at all')->diagnoseWorkspace($this->workDir);
+
+        self::assertSame([], $result['files']);
+        self::assertNotSame([], $result['errors']);
+        self::assertSame(
+            'rector_process succeeded but produced no parseable report.',
+            $result['errors'][0]['message'],
+        );
+    }
+
+    /**
+     * #263: interpretWorkspace()'s file_diffs loop skips any entry that is
+     * not itself an array, and any entry whose `file` is missing, non-
+     * string, or empty -- rather than letting either crash or silently
+     * corrupt the keyed `files` map. One valid entry alongside each invalid
+     * shape proves the valid one still survives.
+     */
+    public function testDiagnoseWorkspaceSkipsUnusableFileDiffsEntriesButKeepsAUsableOne(): void
+    {
+        // Each invalid-shape entry below also carries a real diff and a
+        // rector name of its own -- if the guard that is meant to skip it
+        // were missing, it would produce a non-empty `fixes` array and
+        // either surface as an extra `files` entry or crash resolving an
+        // absolute path from a non-string/empty `file`, rather than
+        // silently matching the expected outcome by coincidence (an empty
+        // diff would mask the guard's absence either way).
+        $output = '{"totals":{"changed_files":1,"errors":0},"file_diffs":['
+            . '"not an array",'
+            . '{"diff":"--- Original\n+++ New\n@@ -1,1 +1,1 @@\n-old\n+new\n",'
+            . '"applied_rectors":["NoFileKeyRector"],"changes":[]},'
+            . '{"file":"","diff":"--- Original\n+++ New\n@@ -1,1 +1,1 @@\n-old\n+new\n",'
+            . '"applied_rectors":["EmptyFileRector"],"changes":[]},'
+            . '{"file":"A.php","diff":"--- Original\n+++ New\n@@ -1,1 +1,1 @@\n-old\n+new\n",'
+            . '"applied_rectors":["SomeRector"],"changes":[]}'
+            . ']}';
+
+        $result = $this->fakeSource($output)->diagnoseWorkspace($this->workDir);
+
+        self::assertSame([], $result['errors']);
+        self::assertCount(1, $result['files']);
+        self::assertArrayHasKey($this->workDir . DIRECTORY_SEPARATOR . 'A.php', $result['files']);
+        self::assertSame(['SomeRector'], $result['files'][$this->workDir . DIRECTORY_SEPARATOR . 'A.php'][0]['rectors']);
+    }
+
+    /**
+     * #263: buildErrors() treats a non-array `errors` value the same as it
+     * already treats an absent one -- no errors, rather than a TypeError
+     * from iterating a string.
+     */
+    public function testDiagnoseWorkspaceTreatsANonArrayErrorsValueAsNoErrors(): void
+    {
+        $result = $this->fakeSource('{"totals":{"changed_files":0,"errors":0},"errors":"not an array","file_diffs":[]}')
+            ->diagnoseWorkspace($this->workDir);
+
+        self::assertSame([], $result['errors']);
+    }
+
+    /**
+     * #263: buildErrors() also tolerates a bare string error entry, not
+     * just the documented {"message":...,"line":...} shape.
+     */
+    public function testDiagnoseWorkspaceAcceptsABareStringErrorEntry(): void
+    {
+        $output = '{"totals":{"changed_files":0,"errors":1},'
+            . '"errors":["a plain string error"],'
+            . '"file_diffs":[]}';
+
+        $result = $this->fakeSource($output)->diagnoseWorkspace($this->workDir);
+
+        self::assertSame([['message' => 'a plain string error', 'line' => 0]], $result['errors']);
+    }
+
+    /**
+     * #263 negative control: an error entry that is neither an array nor a
+     * string is skipped outright, alongside a usable entry that must still
+     * survive.
+     */
+    public function testDiagnoseWorkspaceSkipsAnErrorEntryThatIsNeitherArrayNorString(): void
+    {
+        $output = '{"totals":{"changed_files":0,"errors":2},'
+            . '"errors":[null,"a plain string error"],'
+            . '"file_diffs":[]}';
+
+        $result = $this->fakeSource($output)->diagnoseWorkspace($this->workDir);
+
+        self::assertSame([['message' => 'a plain string error', 'line' => 0]], $result['errors']);
+    }
+
+    /**
+     * #263: extractReport()'s scan `continue`s past a `{` that never closes
+     * rather than stopping there -- an unbalanced opening brace ahead of the
+     * real report must not hide it. Confirmed by direct simulation: the
+     * first `{` (right after "broken") never reaches depth 0 before the
+     * string ends; the scan resumes at the next `{` and decodes the real,
+     * separate report that follows.
+     */
+    public function testExtractReportSkipsAnUnclosedBraceThatPrecedesTheRealReport(): void
+    {
+        $result = $this->fakeSource('{broken{"totals":{"changed_files":0,"errors":0}}')
+            ->diagnose($this->workDir . '/Sample.php');
+
+        self::assertSame([], $result['fixes']);
+        self::assertSame([], ($result['errors'] ?? []));
+    }
+
+    /**
+     * #263: matchingBraceEnd() falls through its loop to a final `return
+     * null` when $output ends before the brace it started at ever closes --
+     * distinct from "no `{` at all"
+     * (testNoParsableJsonAtAllBecomesAnErrorRatherThanSilentlyClean above),
+     * which never calls matchingBraceEnd() to begin with.
+     */
+    public function testTruncatedJsonWithAnUnclosedBraceStillBecomesAnErrorRatherThanSilence(): void
+    {
+        $result = $this->fakeSource('{"totals": truncated without closing')
+            ->diagnose($this->workDir . '/Sample.php');
+
+        self::assertSame([], $result['fixes']);
+        self::assertNotSame([], ($result['errors'] ?? []));
+    }
+
+    /**
      * CI fix (PR #137, windows-latest legs): isAbsolutePath()'s character
      * class only ever matched a drive letter followed by a forward slash
      * (`C:/...`), never the real Windows form (`C:\...`) -- a real Windows
