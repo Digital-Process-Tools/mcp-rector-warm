@@ -27,6 +27,26 @@ better for someone using it? If not, do not do it. That rules out doc-citation d
 docblock wording, tooling and plugin plumbing, and rare-platform edge cases that break no
 real use. Close such issues as not planned rather than carrying them.
 
+## The code quality bar
+
+This repo's users are PHP developers who care about static analysis -- that is why they run
+Rector. They judge the tool by its own code, so the code has to be beyond reproach. Agreed with
+the maintainer on 2026-10-02:
+
+- **PHPStan at the strictest setting available,** with no baseline and no new
+  `@phpstan-ignore`. Level 10 is reached. Stricter options (bleedingEdge, strict-rules,
+  deprecation-rules and the opt-in strict parameters) are adopted as they become clean, not
+  skipped.
+- **Rector's own quality sets run on this repo and stay clean**, not only the PHP-version set.
+  A set that would change runtime behaviour on a write path is adopted with the write-path
+  E2E check, never silently.
+- **Line coverage stays at or above 90%,** measured the way Codecov counts it. The
+  `Coverage gate (#275)` step in the `coverage` job fails a pull request that drops below.
+
+This work is the one exception to "tooling is noise" above: it is in scope, and a lane doing it
+is not declined on that ground. A numeric target is reached with one focused change carrying
+the whole gap list, not a string of small lanes.
+
 ## Running the tests
 
 ```
