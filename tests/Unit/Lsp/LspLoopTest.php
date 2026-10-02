@@ -85,6 +85,7 @@ final class LspLoopTest extends TestCase
     {
         rewind($stream);
         $raw = stream_get_contents($stream);
+        self::assertIsString($raw);
         $frames = [];
         while (preg_match('/^Content-Length: (\d+)\r\n\r\n/', $raw, $m) === 1) {
             $start = strlen($m[0]);

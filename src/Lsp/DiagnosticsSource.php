@@ -14,7 +14,7 @@ interface DiagnosticsSource
     /**
      * @return array{
      *   fixes: list<array{range: array{start: array{line:int,character:int}, end: array{line:int,character:int}}, newText: string, rectors: list<string>}>,
-     *   errors?: list<array{message: string, line: int}>,
+     *   errors?: list<array{message: string, line: int, file?: string}>,
      * }
      *   An empty `fixes` list means "no fixable hunks for this file" -- true
      *   both for a file Rector does not change AND for a failed Rector call.

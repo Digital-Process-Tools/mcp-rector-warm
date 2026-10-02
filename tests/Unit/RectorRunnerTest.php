@@ -1460,6 +1460,8 @@ final class RectorRunnerTest extends TestCase
      * Same stderr-capture technique as testBootstrapFileHashResolutionFailureIsLoggedNotSilent()
      * above, generalised so the #156/#157 tests below do not each need their own
      * named filter class.
+     *
+     * @param callable(): mixed $body
      */
     private static function captureStderr(callable $body): string
     {
@@ -2160,7 +2162,7 @@ final class RectorRunnerTest extends TestCase
         foreach ([
             'application' => $application,
             'container' => new class {
-                public function get(string $id): object
+                public function get(string $id): \stdClass
                 {
                     // Deliberately has no areSomeRectorsLoaded() method, so execute()'s
                     // onboarding check (is_object() && method_exists()) is false and the

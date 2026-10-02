@@ -106,7 +106,7 @@ final class RectorRunnerComposerRemapTest extends TestCase
     }
 
     /**
-     * @param list<callable> $before spl_autoload_functions() captured before
+     * @param list<callable(string): void> $before spl_autoload_functions() captured before
      *     the method under test ran
      */
     private function unregisterLeakedAutoloaders(array $before): void

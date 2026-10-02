@@ -95,6 +95,7 @@ final class StdioLspTransportTest extends TestCase
 
         rewind($out);
         $written = stream_get_contents($out);
+        self::assertIsString($written);
         [$header, $body] = explode("\r\n\r\n", $written, 2);
         self::assertMatchesRegularExpression('/^Content-Length: (\d+)$/', $header, $header);
         $matched = preg_match('/^Content-Length: (\d+)$/', $header, $m);

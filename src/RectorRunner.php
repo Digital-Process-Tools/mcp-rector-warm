@@ -90,7 +90,7 @@ class RectorRunner implements RunnerInterface
     private ?int $sessionPid = null;
 
     /** @var resource|null #185, worker side: the worker's end of its session child's socket. */
-    private $sessionSocket = null;
+    private $sessionSocket;
 
     /** #185, worker side: set once a session child could not start; fork per call from then on. */
     private bool $sessionUnavailable = false;
@@ -103,7 +103,7 @@ class RectorRunner implements RunnerInterface
      * daemon<->worker socket. A session child closes its inherited copy, or the
      * daemon would never read EOF from a worker that died while the child lived.
      */
-    private $workerDaemonSocket = null;
+    private $workerDaemonSocket;
 
     private ?object $application = null;
     private ?object $container = null;
@@ -118,7 +118,7 @@ class RectorRunner implements RunnerInterface
     private ?int $workerPid = null;
 
     /** @var resource|null Persistent duplex socket to the warm-worker child. */
-    private $workerSocket = null;
+    private $workerSocket;
 
     /** Whether the call most recently ATTEMPTED (not necessarily completed) was
      *  served by an already-warm container/worker, captured at the moment $warmBoot
@@ -676,9 +676,8 @@ class RectorRunner implements RunnerInterface
                     'error' => $e->getMessage(),
                     'error_class' => $e::class,
                 ]));
-                $exitCode = 1;
 
-                return $exitCode;
+                return 1;
             }
             $this->writeFrame($socket, $this->encodeHandshakeFrame([
                 'ok' => true,
@@ -1464,9 +1463,8 @@ class RectorRunner implements RunnerInterface
                 }
             } catch (\Throwable $e) {
                 $this->writeFrame($socket, $this->encodeHandshakeFrame(['ok' => false, 'error' => $e->getMessage()]));
-                $exitCode = 1;
 
-                return $exitCode;
+                return 1;
             }
             $this->writeFrame($socket, $this->encodeHandshakeFrame([
                 'ok' => true,
@@ -2065,7 +2063,7 @@ class RectorRunner implements RunnerInterface
      * @param array<mixed>|false $iniAll
      * @return list<string>
      */
-    private static function collectIniOverrideArgsFrom($iniAll): array
+    private static function collectIniOverrideArgsFrom(array|false $iniAll): array
     {
         if ($iniAll === false) {
             // Fail open (still forward nothing): a worker that boots with no
@@ -2492,7 +2490,11 @@ class RectorRunner implements RunnerInterface
      */
     public function __destruct()
     {
-        $deadlineNs = \hrtime(true) + 1_200_000_000;
+        // hrtime(true) is int|float by signature (float only where a native int
+        // cannot hold nanoseconds, i.e. a 32-bit build); the (int) cast is the
+        // same one callDeadlineNs() and the session hello deadline use, and is
+        // a no-op on every 64-bit build, so the 1.2s budget is unchanged.
+        $deadlineNs = (int) (\hrtime(true) + 1_200_000_000);
         $this->discardProcWorker(false, $deadlineNs);
         $this->stopRetiredProcWorkers($deadlineNs);
     }
@@ -2767,6 +2769,7 @@ class RectorRunner implements RunnerInterface
      * before any bytes of a new frame arrived (the other end closed the connection).
      *
      * @param resource $socket
+     * @param (\Closure(): void)|null $onIdle
      */
     private function readFrame($socket, ?int $deadlineNs = null, ?\Closure $onIdle = null): ?string
     {
@@ -2798,6 +2801,7 @@ class RectorRunner implements RunnerInterface
      *   a worker legitimately blocks indefinitely waiting for its NEXT request
      *   from the daemon, which is not a call in progress and has no
      *   --call-timeout budget to spend while idle.
+     * @param (\Closure(): void)|null $onIdle
      */
     private function readExactly($socket, int $length, ?int $deadlineNs = null, ?\Closure $onIdle = null): ?string
     {

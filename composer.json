@@ -23,14 +23,21 @@
     },
     "bin": ["bin/mcp-rector-warm", "bin/rector-warm-lsp"],
     "config": {
-        "sort-packages": true
+        "sort-packages": true,
+        "allow-plugins": {
+            "phpstan/extension-installer": true
+        }
     },
     "require-dev": {
         "dpt/mcp-phpstan-warm": "^0.7.1",
         "dpt/mcp-phpunit-warm": "^0.4.1",
         "friendsofphp/php-cs-fixer": "^3.95",
+        "phpstan/extension-installer": "^1.4",
         "phpstan/phpstan": "^2.2",
+        "phpstan/phpstan-deprecation-rules": "^2.0",
+        "phpstan/phpstan-phpunit": "^2.0",
         "phpunit/phpcov": "^9.0",
-        "phpunit/phpunit": "^10"
+        "phpunit/phpunit": "^10",
+        "tomasvotruba/type-coverage": "^2.2"
     }
 }

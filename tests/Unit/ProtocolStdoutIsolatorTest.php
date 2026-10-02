@@ -81,9 +81,7 @@ final class ProtocolStdoutIsolatorTest extends TestCase
         yield 'no posix_kill' => [true, true, false];
     }
 
-    /**
-     * @dataProvider missingCapabilityProvider
-     */
+    #[\PHPUnit\Framework\Attributes\DataProvider('missingCapabilityProvider')]
     public function testNeverIsolatesWithoutEveryRequiredCapability(
         bool $hasPcntl,
         bool $hasProcOpen,
@@ -216,6 +214,8 @@ final class ProtocolStdoutIsolatorTest extends TestCase
      * Runs $callback with every "php://..." open (including "php://fd/3")
      * failing, as if the resource did not exist, then restores the real
      * built-in wrapper -- even if $callback throws.
+     *
+     * @param callable(): mixed $callback
      */
     private static function withFd3UnavailableDuring(callable $callback): mixed
     {
@@ -249,6 +249,8 @@ final class ProtocolStdoutIsolatorTest extends TestCase
      * Runs $callback with a filter attached to the real \STDERR constant
      * that records every byte written through it (passing them through
      * unchanged), and returns what was captured.
+     *
+     * @param callable(): mixed $callback
      */
     private static function captureStderrDuring(callable $callback): string
     {

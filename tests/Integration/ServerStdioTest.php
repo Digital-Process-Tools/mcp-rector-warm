@@ -137,7 +137,7 @@ final class ServerStdioTest extends TestCase
         ];
         $responses = $this->invoke($messages, withProject: true);
 
-        $call = array_values(array_filter($responses, fn($r) => ($r['id'] ?? null) === 2))[0] ?? null;
+        $call = array_values(array_filter($responses, fn(array $r): bool => ($r['id'] ?? null) === 2))[0] ?? null;
         self::assertNotNull($call, 'no response for id=2');
         self::assertArrayHasKey('result', $call, 'expected result, got: ' . json_encode($call));
 
@@ -168,7 +168,7 @@ final class ServerStdioTest extends TestCase
         ];
         $responses = $this->invoke($messages, withProject: true);
 
-        $third = array_values(array_filter($responses, fn($r) => ($r['id'] ?? null) === 3))[0] ?? null;
+        $third = array_values(array_filter($responses, fn(array $r): bool => ($r['id'] ?? null) === 3))[0] ?? null;
         self::assertNotNull($third, 'no response for id=3');
         $structured = Json::array($third, 'result', 'structuredContent');
         self::assertSame(

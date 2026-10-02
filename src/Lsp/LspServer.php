@@ -21,7 +21,7 @@ namespace Dpt\McpRectorWarm\Lsp;
  */
 /**
  * @phpstan-type Fix array{range: array{start: array{line:int,character:int}, end: array{line:int,character:int}}, newText: string, rectors: list<string>}
- * @phpstan-type DiagnosticsResult array{fixes: list<Fix>, errors?: list<array{message: string, line: int}>}
+ * @phpstan-type DiagnosticsResult array{fixes: list<Fix>, errors?: list<array{message: string, line: int, file?: string}>}
  */
 final class LspServer
 {
@@ -113,6 +113,8 @@ final class LspServer
      * wire before diagnose() runs. Left null (every existing unit test),
      * emit() falls back to the original buffer-and-return-at-the-end
      * behaviour, so nothing already covered changes shape.
+     *
+     * @param (\Closure(array<string, mixed>): void)|null $frameWriter
      */
     public function __construct(
         private readonly string $serverVersion,
@@ -999,7 +1001,7 @@ final class LspServer
             }
 
             $isOurCreateReply = array_key_exists('id', $message)
-                && ($message['id'] ?? null) === 'rector-warm-lsp/progress-create'
+                && $message['id'] === 'rector-warm-lsp/progress-create'
                 && ($message['method'] ?? null) === null;
 
             if ($isOurCreateReply) {

@@ -184,8 +184,9 @@ if (!class_exists(\SebastianBergmann\CodeCoverage\CodeCoverage::class)) {
 }
 
 $filter = new \SebastianBergmann\CodeCoverage\Filter();
-$filter->includeDirectory($root . '/src');
-$filter->includeDirectory($root . '/bin');
+// The same '.php' file list the deprecated includeDirectory() builds
+// internally, through the same public php-file-iterator facade.
+$filter->includeFiles((new \SebastianBergmann\FileIterator\Facade())->getFilesAsArray([$root . '/src', $root . '/bin'], '.php'));
 // includeDirectory() only matches a '.php' suffix by default (same reason
 // phpunit.xml's own <source><include> lists these two explicitly): the two
 // installed binaries have no extension at all.

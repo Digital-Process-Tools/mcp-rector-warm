@@ -26,6 +26,18 @@ final class LspServerBufferTestFakeSource implements BufferDiagnosticsSource
     /** @var list<array{kind: string, path: string, content: ?string}> */
     public array $calls = [];
 
+    /**
+     * How many calls the server has made so far. Impure because the server,
+     * not this test, appends to $calls: a count read after more server work
+     * must not be taken from an earlier read of the same property.
+     *
+     * @phpstan-impure
+     */
+    public function callCount(): int
+    {
+        return count($this->calls);
+    }
+
     public function diagnose(string $absolutePath): array
     {
         $this->calls[] = ['kind' => 'disk', 'path' => $absolutePath, 'content' => null];
@@ -390,13 +402,13 @@ final class LspServerBufferTest extends TestCase
         self::assertSame([], self::watchedChange($server, 'file:///tmp/.rector-warm-4242/rector.php'));
         self::assertNull($server->nextDiagnosticsDeadline());
         $server->runDueDiagnostics(self::LATER);
-        self::assertCount(1, $source->calls);
+        self::assertSame(1, $source->callCount());
 
         // Positive control: the real rector.php re-queues the buffer.
         self::watchedChange($server, 'file:///tmp/rector.php');
         self::assertNotNull($server->nextDiagnosticsDeadline());
         $server->runDueDiagnostics(self::LATER);
-        self::assertCount(2, $source->calls);
+        self::assertSame(2, $source->callCount());
     }
 
     public function testAWatchedConfigChangeDoesNotDiagnoseADocumentThatOnlyEverHadAnIneligibleDidChange(): void

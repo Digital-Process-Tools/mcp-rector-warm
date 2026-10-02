@@ -1,5 +1,16 @@
+# Extensions (type-coverage, deprecation-rules, phpunit) are loaded by
+# phpstan/extension-installer, not listed here.
+includes:
+    - phar://phpstan.phar/conf/bleedingEdge.neon
+
 parameters:
     level: 10
+    checkImplicitMixed: true
+    checkTooWideReturnTypesInProtectedAndPublicMethods: true
+    checkBenevolentUnionTypes: true
+    checkMissingCallableSignature: true
+    reportAnyTypeWideningInVarTag: true
+    checkUninitializedProperties: true
     paths:
         - src
         - bin
@@ -13,6 +24,16 @@ parameters:
         - tests/Fixtures/*
     # Quoted so the file also parses as YAML: the README badge reads `level` from it.
     tmpDir: '%currentWorkingDirectory%/.phpstan-cache'
+    type_coverage:
+        property: 100
+        param: 100
+        return: 100
+        declare: 100
+        # Typed class constants (`const string FOO = ...`) need PHP 8.3, and this
+        # package supports PHP 8.2 (composer.json: "php": ">=8.2"). The extension
+        # only checks constants when PHPStan itself runs on 8.3+, so without this
+        # line the result would depend on the PHP version running PHPStan.
+        constant: 0
     ignoreErrors:
         # #185: SessionHooks deliberately reaches into PHPStan's (and
         # BetterReflection's) internal, non-BC-covered API to reuse the exact
@@ -28,6 +49,13 @@ parameters:
         -
             identifier: phpstanApi.method
             path: src/Warm/SessionHooks.php
+        # #185 / #286: the same deliberate reach into Rector's own internals, as
+        # bleedingEdge reports it -- Rector\Configuration\Option's container keys
+        # are @internal, and SessionHooks has to set exactly those keys to
+        # reproduce what Rector's own bootstrap does for a warm session.
+        -
+            identifier: classConstant.internal
+            path: src/Warm/SessionHooks.php
         # #268: SessionHooksTest reaches the same non-BC-covered PHPStan/BetterReflection
         # API as SessionHooks.php itself (see above) to build fakes of the real,
         # final/interface types SessionHooks consumes -- the whole point of these tests,
@@ -41,3 +69,71 @@ parameters:
         -
             identifier: phpstanApi.interface
             path: tests/Unit/Warm/SessionHooksTest.php
+        # #286: the bleedingEdge view of the same internal API use in
+        # SessionHooksTest -- Rector's @internal Option keys SessionHooks sets,
+        # and the @internal BetterReflection Reflection interface its fake
+        # source locator has to return.
+        -
+            identifier: classConstant.internal
+            path: tests/Unit/Warm/SessionHooksTest.php
+        -
+            identifier: return.internalInterface
+            path: tests/Unit/Warm/SessionHooksTest.php
+        # #286: the coverage prepend hands pcov's raw data to php-code-coverage,
+        # and CodeCoverage::append() only takes RawCodeCoverageData, which is
+        # @internal. There is no public constructor for it.
+        -
+            identifier: staticMethod.internalClass
+            path: tests/coverage/prepend.php
+            count: 1
+        # #286: PHP has no native `resource` type, so a parameter or return value that
+        # carries a stream, socket, process or lock handle cannot be typed natively.
+        # Each one below carries a precise `@param resource` / `@return resource`
+        # (or `resource|null`) PHPDoc instead. The type-coverage extension skips a
+        # PHPDoc `resource` only on properties, not on params or returns, and has no
+        # per-type exception, so these are listed by identifier, by file and by exact
+        # count: one more untyped param or return in any of these files fails the run.
+        -
+            identifier: typeCoverage.paramTypeCoverage
+            path: src/Lsp/RectorDiagnosticsSource.php
+            count: 1
+        -
+            identifier: typeCoverage.paramTypeCoverage
+            path: src/Lsp/StdioLspTransport.php
+            count: 2
+        -
+            identifier: typeCoverage.paramTypeCoverage
+            path: src/RectorRunner.php
+            count: 10
+        -
+            identifier: typeCoverage.returnTypeCoverage
+            path: src/RectorRunner.php
+            count: 1
+        -
+            identifier: typeCoverage.returnTypeCoverage
+            path: src/Support/ProtocolStdoutIsolator.php
+            count: 1
+        -
+            identifier: typeCoverage.paramTypeCoverage
+            path: tests/Integration/LspServerStdioTest.php
+            count: 2
+        -
+            identifier: typeCoverage.paramTypeCoverage
+            path: tests/Integration/ServerStdioTest.php
+            count: 2
+        -
+            identifier: typeCoverage.paramTypeCoverage
+            path: tests/Unit/Lsp/LspLoopTest.php
+            count: 4
+        -
+            identifier: typeCoverage.returnTypeCoverage
+            path: tests/Unit/Lsp/LspLoopTest.php
+            count: 1
+        -
+            identifier: typeCoverage.paramTypeCoverage
+            path: tests/Unit/Lsp/RectorDiagnosticsSourceBufferTest.php
+            count: 1
+        -
+            identifier: typeCoverage.returnTypeCoverage
+            path: tests/Unit/StdioLspTransportTest.php
+            count: 2

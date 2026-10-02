@@ -68,8 +68,7 @@ final class RectorToolWasLastCallWarmTest extends TestCase
 
         self::assertInstanceOf(\Mcp\Schema\Result\CallToolResult::class, $result);
         $details = $result->structuredContent ?? [];
-        self::assertSame(
-            true,
+        self::assertTrue(
             $details['warm_boot'] ?? null,
             'warm_boot must come from wasLastCallWarm(), not isWarm(), for a real RectorRunner',
         );

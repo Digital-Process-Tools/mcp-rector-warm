@@ -944,6 +944,21 @@ final class LspServerTest extends TestCase
 
                 return ['fixes' => []];
             }
+
+            /**
+             * The order recorded since the last call, then cleared -- a method
+             * rather than a property write, so the server's own calls into
+             * diagnose() in between are not hidden from static analysis.
+             *
+             * @return list<string>
+             */
+            public function takeOrder(): array
+            {
+                $order = $this->order;
+                $this->order = [];
+
+                return $order;
+            }
         };
 
         $server = new LspServer('1.0.0', $source);
@@ -957,7 +972,7 @@ final class LspServerTest extends TestCase
             'method' => 'textDocument/didOpen',
             'params' => ['textDocument' => ['uri' => 'file:///tmp/B.php', 'version' => 1]],
         ]);
-        $source->order = [];
+        $source->takeOrder();
 
         $configChange = [
             'jsonrpc' => '2.0',
@@ -965,13 +980,10 @@ final class LspServerTest extends TestCase
             'params' => ['changes' => [['uri' => 'file:///tmp/rector.php', 'type' => 2]]],
         ];
         $server->handle($configChange);
-        /** @var list<string> $firstOrder */
-        $firstOrder = $source->order;
-        $source->order = [];
+        $firstOrder = $source->takeOrder();
 
         $server->handle($configChange);
-        /** @var list<string> $secondOrder */
-        $secondOrder = $source->order;
+        $secondOrder = $source->takeOrder();
 
         self::assertSame(['/tmp/B.php', '/tmp/A.php'], $firstOrder);
         self::assertSame($firstOrder, $secondOrder);

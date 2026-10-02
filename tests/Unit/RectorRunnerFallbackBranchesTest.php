@@ -463,7 +463,7 @@ final class RectorRunnerFallbackBranchesTest extends TestCase
     // ---- remapCopyClassesInAutoloader() ---------------------------------
 
     /**
-     * @param list<callable> $before
+     * @param list<callable(string): void> $before
      */
     private function unregisterLeakedAutoloaders(array $before): void
     {
