@@ -12,14 +12,15 @@ use PHPUnit\Framework\TestCase;
  * #245: the session CHILD's own instance methods -- runInSession(),
  * spawnSession(), askSession(), serveSession()/runSessionBody(),
  * sessionExited(), reapSession() -- have no direct test anywhere.
- * RectorRunnerSessionTest.php only covers the three static pure helpers
+ * RectorRunnerSessionTest.php covers the static pure helpers
  * (sessionCandidate, sessionSwitchedOff, sessionWatchPaths,
- * sessionRetireReason). These drive the real thing end to end: a real
- * boot() (real pcntl_fork(), a real Rector container), a real dry run on
- * one file that routes to the session, and a real second pcntl_fork() for
- * the session child itself. execute() is overridden -- the same seam every
- * fork/worker test in RectorRunnerTest.php already uses -- so these pin the
- * session MACHINERY alone, never Rector's own analysis.
+ * sessionRetireReason, and -- as of this same commit -- positiveIntEnv).
+ * These drive the real thing end to end: a real boot() (real pcntl_fork(),
+ * a real Rector container), a real dry run on one file that routes to the
+ * session, and a real second pcntl_fork() for the session child itself.
+ * execute() is overridden -- the same seam every fork/worker test in
+ * RectorRunnerTest.php already uses -- so these pin the session MACHINERY
+ * alone, never Rector's own analysis.
  */
 final class RectorRunnerSessionWorkerTest extends TestCase
 {
@@ -141,34 +142,60 @@ final class RectorRunnerSessionWorkerTest extends TestCase
         $runner = $this->newRunner();
         $argv = ['rector', 'process', '--', $this->target];
 
-        $runner->run($argv);
-        $runner->run($argv);
-        $runner->run($argv);
+        try {
+            $runner->run($argv);
+            $runner->run($argv);
+            $runner->run($argv);
 
-        $pids = $this->loggedPids();
-        self::assertCount(3, $pids, 'execute() must have run exactly three times, once per call');
-        self::assertSame(
-            $pids[0],
-            $pids[1],
-            'the second call must be served by the SAME session child as the first -- spawnSession() must not run again',
-        );
-        self::assertSame($pids[1], $pids[2], 'the third call must still be served by the same session child');
+            $pids = $this->loggedPids();
+            self::assertCount(3, $pids, 'execute() must have run exactly three times, once per call');
+            self::assertSame(
+                $pids[0],
+                $pids[1],
+                'the second call must be served by the SAME session child as the first -- spawnSession() must not run again',
+            );
+            self::assertSame($pids[1], $pids[2], 'the third call must still be served by the same session child');
+        } finally {
+            // Every call above booted a real worker (and, with the session
+            // on, a real session child it never retired on its own) via real
+            // pcntl_fork() -- reboot() is this repo's own established
+            // cleanup for exactly that, matching the finally-block pattern
+            // RectorRunnerTest.php and RectorRunnerStandbyWorkerTest.php use
+            // in every test that boots a real worker. Without it the process
+            // is left running past this test, with its cwd still pointed at
+            // $this->tmp, which tearDown() then rmdir()s. This MUST happen
+            // before the positive control below boots a second, independent
+            // worker: a live worker's socket fd is inherited by every LATER
+            // pcntl_fork() from this same test process, so a second worker
+            // forked while this one is still up holds a duplicate copy of
+            // its socket open -- closing the original from here then never
+            // produces real EOF for it, and reboot() hangs waiting for a
+            // worker that cannot ever see its own socket close (found by
+            // self-review: this hung for real, 90s+, until reordered).
+            $runner->reboot();
+        }
 
         // Positive control: session switched off -> no reuse is even
-        // possible, a fresh fork every time, so the pid MUST change.
+        // possible, a fresh fork every time, so the pid MUST change. A
+        // SEPARATE runner/worker, started only after the first is fully
+        // rebooted above -- see the finally block's comment for why.
         \putenv(RectorRunner::SESSION_ENV . '=0');
         \unlink($this->callLog);
         $runner2 = $this->newRunner();
-        $runner2->run($argv);
-        $runner2->run($argv);
-        $controlPids = $this->loggedPids();
-        self::assertCount(2, $controlPids);
-        self::assertNotSame(
-            $controlPids[0],
-            $controlPids[1],
-            'must fire: with the session off, every call forks fresh from the worker -- two different '
-            . 'pids are the ONLY possible correct outcome, proving this harness can tell two calls apart',
-        );
+        try {
+            $runner2->run($argv);
+            $runner2->run($argv);
+            $controlPids = $this->loggedPids();
+            self::assertCount(2, $controlPids);
+            self::assertNotSame(
+                $controlPids[0],
+                $controlPids[1],
+                'must fire: with the session off, every call forks fresh from the worker -- two different '
+                . 'pids are the ONLY possible correct outcome, proving this harness can tell two calls apart',
+            );
+        } finally {
+            $runner2->reboot();
+        }
     }
 
     /**
@@ -183,35 +210,40 @@ final class RectorRunnerSessionWorkerTest extends TestCase
         $runner = $this->newRunner();
         $argv = ['rector', 'process', '--', $this->target];
 
-        self::assertSame(0, $runner->run($argv)['exit_code']);
-        $firstPid = $this->loggedPids()[0];
-        self::assertTrue(
-            \posix_kill($firstPid, 0),
-            'the session child must genuinely be alive right after serving the first call',
-        );
+        try {
+            self::assertSame(0, $runner->run($argv)['exit_code']);
+            $firstPid = $this->loggedPids()[0];
+            self::assertTrue(
+                \posix_kill($firstPid, 0),
+                'the session child must genuinely be alive right after serving the first call',
+            );
 
-        self::assertTrue(\posix_kill($firstPid, \SIGKILL), 'must be able to kill the session child directly');
-        // Give the kernel a moment to deliver the signal before the next
-        // call races pcntl_waitpid() against it.
-        \usleep(200_000);
+            self::assertTrue(\posix_kill($firstPid, \SIGKILL), 'must be able to kill the session child directly');
+            // Give the kernel a moment to deliver the signal before the next
+            // call races pcntl_waitpid() against it.
+            \usleep(200_000);
 
-        self::assertSame(
-            0,
-            $runner->run($argv)['exit_code'],
-            'the next call must self-heal into a fresh session, not hang or error',
-        );
-        $pids = $this->loggedPids();
-        self::assertCount(2, $pids);
-        self::assertNotSame(
-            $firstPid,
-            $pids[1],
-            'the replacement session child must be a NEW process, not the one just killed',
-        );
+            self::assertSame(
+                0,
+                $runner->run($argv)['exit_code'],
+                'the next call must self-heal into a fresh session, not hang or error',
+            );
+            $pids = $this->loggedPids();
+            self::assertCount(2, $pids);
+            self::assertNotSame(
+                $firstPid,
+                $pids[1],
+                'the replacement session child must be a NEW process, not the one just killed',
+            );
 
-        // And it is reused from here on, same as the happy path above.
-        self::assertSame(0, $runner->run($argv)['exit_code']);
-        $pids = $this->loggedPids();
-        self::assertSame($pids[1], $pids[2], 'once replaced, the new session child is reused exactly like any other');
+            // And it is reused from here on, same as the happy path above.
+            self::assertSame(0, $runner->run($argv)['exit_code']);
+            $pids = $this->loggedPids();
+            self::assertSame($pids[1], $pids[2], 'once replaced, the new session child is reused exactly like any other');
+        } finally {
+            // See the matching comment in testTheSessionChildIsReusedAcrossCallsThatChangeNothing().
+            $runner->reboot();
+        }
     }
 
     /**
@@ -221,20 +253,43 @@ final class RectorRunnerSessionWorkerTest extends TestCase
      * pcntl_waitpid() this time: the child is already exiting on its own, not
      * killed) and the very next call must spawn a fresh one, with no error
      * visible to the caller either way.
+     *
+     * A cap of exactly 1 would make every call look identical to a session
+     * that never worked at all (a brand-new pid every single call either
+     * way), so this uses a cap of 2: the first two calls must still be
+     * REUSE (the cap is not yet hit -- proving the count is actually read,
+     * not merely "always respawn"), and only the third call -- the one that
+     * pushes the session over its cap -- gets a fresh one.
      */
     public function testASessionRetiresAfterItsConfiguredCallCapAndIsReplaced(): void
     {
-        \putenv(RectorRunner::SESSION_MAX_CALLS_ENV . '=1');
+        \putenv(RectorRunner::SESSION_MAX_CALLS_ENV . '=2');
         $runner = $this->newRunner();
         $argv = ['rector', 'process', '--', $this->target];
 
-        $runner->run($argv);
-        $runner->run($argv);
-        $runner->run($argv);
+        try {
+            $runner->run($argv);
+            $runner->run($argv);
+            $runner->run($argv);
 
-        $pids = $this->loggedPids();
-        self::assertCount(3, $pids);
-        self::assertNotSame($pids[0], $pids[1], 'with a cap of 1 call, every session must retire right after serving it');
-        self::assertNotSame($pids[1], $pids[2], 'every call must get its own brand-new session child');
+            $pids = $this->loggedPids();
+            self::assertCount(3, $pids);
+            self::assertSame(
+                $pids[0],
+                $pids[1],
+                'under the cap of 2 calls, the second call must still reuse the first session child',
+            );
+            self::assertNotSame(
+                $pids[1],
+                $pids[2],
+                'the call that pushes the session past its cap must retire it -- the third call gets a brand-new session child',
+            );
+        } finally {
+            // See the matching comment in testTheSessionChildIsReusedAcrossCallsThatChangeNothing().
+            // The third session here already retired itself (reapSession()
+            // already ran inside runInSession()), but the worker itself is
+            // still live and must still be torn down.
+            $runner->reboot();
+        }
     }
 }
