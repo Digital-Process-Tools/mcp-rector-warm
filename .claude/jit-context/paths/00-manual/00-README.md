@@ -190,3 +190,13 @@ fragment whose claim is about the code).
   already stated in
   `.claude/jit-context/tools/00-manual/supertool-write-op-payload-pitfalls.md`. No new rule
   needed.
+- **`trap.d/190.spl-autoload-register-may-not-fire-if-class-already-declared.md`** (could not tell,
+  checked against HEAD by curate 2026-10-02) -- `RectorRunner::remapCopyClassesInAutoloader()`
+  (`src/RectorRunner.php`) is unchanged since #190; whether PHPStan's generic autoload-based
+  source locator ever resolves a class by actually `require`-ing it (rather than reading a file
+  path through the autoload callback without loading it) could not be confirmed from this
+  checkout -- BetterReflection's real source is not present (rector/rector ships PHPStan, and
+  BetterReflection inside it, as a phar). The Composer-loader half of the same fix was checked
+  clean against the real `vendor/composer/ClassLoader.php`. One-off finding about the code, not a
+  generalizable agent-facing lesson; no issue filed since the claim itself is unconfirmed, not
+  demonstrated to break a real user.
