@@ -29,6 +29,11 @@ parameters:
         param: 100
         return: 100
         declare: 100
+        # Typed class constants (`const string FOO = ...`) need PHP 8.3, and this
+        # package supports PHP 8.2 (composer.json: "php": ">=8.2"). The extension
+        # only checks constants when PHPStan itself runs on 8.3+, so without this
+        # line the result would depend on the PHP version running PHPStan.
+        constant: 0
     ignoreErrors:
         # #185: SessionHooks deliberately reaches into PHPStan's (and
         # BetterReflection's) internal, non-BC-covered API to reuse the exact
