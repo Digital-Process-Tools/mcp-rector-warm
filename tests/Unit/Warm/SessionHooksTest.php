@@ -87,7 +87,12 @@ final class SessionHooksTest extends TestCase
             $restored = \unserialize($this->previousAutoloadPaths);
             SimpleParameterProvider::setParameter(Option::AUTOLOAD_PATHS, $restored);
         } elseif (!$this->hadAutoloadPaths) {
-            SimpleParameterProvider::setParameter(Option::AUTOLOAD_PATHS, []);
+            // SimpleParameterProvider::setParameter(..., []) would leave hasParameter()
+            // true for the rest of this (single-process) PHPUnit run -- it has no public
+            // "unset" API, so restoring "never set" needs a reflection write on its own
+            // private static $parameters map, the same way the rest of this file reaches
+            // into otherwise-inaccessible state on purpose.
+            self::unsetAutoloadPathsParameter();
         }
         if ($this->tmpFile !== null) {
             @\unlink($this->tmpFile);
@@ -249,10 +254,15 @@ final class SessionHooksTest extends TestCase
             }
         };
         $repository = new class ($sourceLocator) {
+            /** @var list<string> */
+            public array $requestedFiles = [];
+
             public function __construct(private readonly SourceLocator $sourceLocator) {}
 
             public function getOrCreate(string $file): SourceLocator
             {
+                $this->requestedFiles[] = $file;
+
                 return $this->sourceLocator;
             }
         };
@@ -262,6 +272,9 @@ final class SessionHooksTest extends TestCase
         ));
 
         self::assertNull($hooks->resolveAutoloadPaths(SessionHooks::CLASS_LIKE, 'App\\Unknown'));
+        // The is_file() branch (line 136) really ran, not just "no locators at all":
+        // without it $repository->getOrCreate() would never be called.
+        self::assertSame([Path::real($this->tmpFile)], $repository->requestedFiles);
     }
 
     public function testComposerSourceDirectoriesReachesAPsr4FallbackDirectory(): void
@@ -340,6 +353,15 @@ final class SessionHooksTest extends TestCase
 
         return $value;
     }
+
+    private static function unsetAutoloadPathsParameter(): void
+    {
+        $property = new \ReflectionProperty(SimpleParameterProvider::class, 'parameters');
+        /** @var array<string, mixed> $parameters */
+        $parameters = $property->getValue();
+        unset($parameters[Option::AUTOLOAD_PATHS]);
+        $property->setValue(null, $parameters);
+    }
 }
 
 /**
@@ -372,6 +394,7 @@ final readonly class FakeContainer implements Container
 
     public function getByType(string $className): object
     {
+        // @phpstan-ignore return.type (a plain map of test doubles, not PHPStan's real DI resolution -- cannot prove the value is the generic T Container promises)
         return $this->byType[$className];
     }
 

@@ -26,15 +26,13 @@ parameters:
         # #268: SessionHooksTest reaches the same non-BC-covered PHPStan/BetterReflection
         # API as SessionHooks.php itself (see above) to build fakes of the real,
         # final/interface types SessionHooks consumes -- the whole point of these tests,
-        # not a bug to fix. FakeContainer's getByType() also cannot prove its return
-        # value is the generic T the real Container interface promises: it is a plain
-        # map of test doubles, not PHPStan's real DI resolution.
+        # not a bug to fix. FakeContainer's getByType() has its own narrow
+        # @phpstan-ignore return.type comment at the one call site, not a file-wide
+        # entry here: a file-wide one would hide an unrelated return-type mistake
+        # anywhere else in this file too.
         -
             identifier: phpstanApi.classConstant
             path: tests/Unit/Warm/SessionHooksTest.php
         -
             identifier: phpstanApi.interface
-            path: tests/Unit/Warm/SessionHooksTest.php
-        -
-            identifier: return.type
             path: tests/Unit/Warm/SessionHooksTest.php
