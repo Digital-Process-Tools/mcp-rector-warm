@@ -238,7 +238,7 @@ final class RectorRunnerStandbyWorkerTest extends TestCase
         $elapsed = microtime(true) - $start;
 
         self::assertNotNull($message, 'must fire: the wait must end in a timeout error');
-        self::assertStringContainsString('--call-timeout', (string) $message);
+        self::assertStringContainsString('--call-timeout', $message);
         self::assertLessThan(5.0, $elapsed, "4 silent connections must not stretch a 2s deadline (took {$elapsed}s)");
     }
 
@@ -398,7 +398,7 @@ final class RectorRunnerStandbyWorkerTest extends TestCase
      */
     public function testARealCliDFlagIsForwardedNotJustARuntimeIniSetCall(): void
     {
-        $currentDefault = (string) ini_get('precision');
+        $currentDefault = ini_get('precision');
         $changed = $currentDefault === '15' ? '17' : '15';
 
         $script = (string) tempnam(sys_get_temp_dir(), 'ini-override-probe-');

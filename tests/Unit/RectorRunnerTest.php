@@ -2162,7 +2162,7 @@ final class RectorRunnerTest extends TestCase
         foreach ([
             'application' => $application,
             'container' => new class {
-                public function get(string $id): object
+                public function get(string $id): \stdClass
                 {
                     // Deliberately has no areSomeRectorsLoaded() method, so execute()'s
                     // onboarding check (is_object() && method_exists()) is false and the

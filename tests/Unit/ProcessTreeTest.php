@@ -288,7 +288,7 @@ final class ProcessTreeTest extends TestCase
                 ProcessTree::isAlive($grandchildPid),
                 'a genuinely excluded descendant must survive killTree() on its ancestor',
             );
-            $stat = \trim((string) self::psOutput(['ps', '-o', 'stat=', '-p', (string) $grandchildPid]));
+            $stat = \trim(self::psOutput(['ps', '-o', 'stat=', '-p', (string) $grandchildPid]));
             self::assertStringNotContainsString(
                 'T',
                 $stat,

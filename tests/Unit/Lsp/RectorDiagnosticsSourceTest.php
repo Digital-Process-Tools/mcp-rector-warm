@@ -508,9 +508,8 @@ final class RectorDiagnosticsSourceTest extends TestCase
      * (RectorToolContainmentTest, isWithinRoot's $caseInsensitive param),
      * this needs no explicit force parameter to exercise the Windows
      * branch portably.
-     *
-     * @dataProvider absoluteAndRelativePaths
      */
+    #[\PHPUnit\Framework\Attributes\DataProvider('absoluteAndRelativePaths')]
     public function testIsAbsolutePathRecognisesBothWindowsAndPosixAbsoluteForms(string $path, bool $expected): void
     {
         $method = new \ReflectionMethod(RectorDiagnosticsSource::class, 'isAbsolutePath');

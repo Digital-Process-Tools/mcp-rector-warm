@@ -705,7 +705,6 @@ final readonly class RectorDiagnosticsSource implements BufferDiagnosticsSource,
      * own multi-file/workspace report does; a single-file report does not
      * need to and may not).
      *
-     * @param mixed $rawErrors
      * @return list<array{message: string, line: int, file?: string}>
      */
     private static function buildErrors(mixed $rawErrors): array

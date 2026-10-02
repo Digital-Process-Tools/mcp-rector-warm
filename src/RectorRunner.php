@@ -90,7 +90,7 @@ class RectorRunner implements RunnerInterface
     private ?int $sessionPid = null;
 
     /** @var resource|null #185, worker side: the worker's end of its session child's socket. */
-    private $sessionSocket = null;
+    private $sessionSocket;
 
     /** #185, worker side: set once a session child could not start; fork per call from then on. */
     private bool $sessionUnavailable = false;
@@ -103,7 +103,7 @@ class RectorRunner implements RunnerInterface
      * daemon<->worker socket. A session child closes its inherited copy, or the
      * daemon would never read EOF from a worker that died while the child lived.
      */
-    private $workerDaemonSocket = null;
+    private $workerDaemonSocket;
 
     private ?object $application = null;
     private ?object $container = null;
@@ -118,7 +118,7 @@ class RectorRunner implements RunnerInterface
     private ?int $workerPid = null;
 
     /** @var resource|null Persistent duplex socket to the warm-worker child. */
-    private $workerSocket = null;
+    private $workerSocket;
 
     /** Whether the call most recently ATTEMPTED (not necessarily completed) was
      *  served by an already-warm container/worker, captured at the moment $warmBoot
@@ -676,9 +676,8 @@ class RectorRunner implements RunnerInterface
                     'error' => $e->getMessage(),
                     'error_class' => $e::class,
                 ]));
-                $exitCode = 1;
 
-                return $exitCode;
+                return 1;
             }
             $this->writeFrame($socket, $this->encodeHandshakeFrame([
                 'ok' => true,
@@ -1464,9 +1463,8 @@ class RectorRunner implements RunnerInterface
                 }
             } catch (\Throwable $e) {
                 $this->writeFrame($socket, $this->encodeHandshakeFrame(['ok' => false, 'error' => $e->getMessage()]));
-                $exitCode = 1;
 
-                return $exitCode;
+                return 1;
             }
             $this->writeFrame($socket, $this->encodeHandshakeFrame([
                 'ok' => true,

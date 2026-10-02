@@ -81,9 +81,7 @@ final class ProtocolStdoutIsolatorTest extends TestCase
         yield 'no posix_kill' => [true, true, false];
     }
 
-    /**
-     * @dataProvider missingCapabilityProvider
-     */
+    #[\PHPUnit\Framework\Attributes\DataProvider('missingCapabilityProvider')]
     public function testNeverIsolatesWithoutEveryRequiredCapability(
         bool $hasPcntl,
         bool $hasProcOpen,
