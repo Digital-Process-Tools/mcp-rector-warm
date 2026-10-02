@@ -403,14 +403,14 @@ final class ServerStdioTest extends TestCase
     }
 
     /**
-     * @param array<string,mixed> $response
+     * @param array<mixed> $response
      */
     private function diffOf(array $response): string
     {
         $output = Json::find($response, 'result', 'structuredContent', 'output') ?? '';
         $decoded = is_string($output) && $output !== '' ? json_decode($output, true) : [];
 
-        return implode("\n", array_column(Json::array(Json::find($decoded, 'file_diffs') ?? []), 'diff'));
+        return implode("\n", array_map(static fn(mixed $file): string => Json::string($file, 'diff'), Json::array(Json::find($decoded, 'file_diffs') ?? [])));
     }
 
     private function makeDependencyProject(): string
@@ -444,7 +444,7 @@ final class ServerStdioTest extends TestCase
     }
 
     /**
-     * @param array<string,mixed> $response
+     * @param array<mixed> $response
      */
     private function changedFiles(array $response): int
     {
@@ -509,7 +509,7 @@ final class ServerStdioTest extends TestCase
      * Rector cold boot can take several seconds — allow a generous read timeout.
      *
      * @param resource $stdout
-     * @return array<string,mixed>
+     * @return array<mixed>
      */
     private function readResponse($stdout, int $id): array
     {

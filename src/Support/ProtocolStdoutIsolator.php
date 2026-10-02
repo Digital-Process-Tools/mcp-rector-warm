@@ -137,15 +137,17 @@ final class ProtocolStdoutIsolator
             3 => \STDOUT,
         ];
 
+        // (string) $key below is a no-op at runtime: PHP keys a numeric name
+        // as an int either way, and proc_open() reads it back as a string.
         $env = [];
         foreach ($_SERVER as $key => $value) {
             if (\is_string($value)) {
-                $env[$key] = $value;
+                $env[(string) $key] = $value;
             }
         }
         foreach ($_ENV as $key => $value) {
             if (\is_string($value)) {
-                $env[$key] = $value;
+                $env[(string) $key] = $value;
             }
         }
         $env[self::ENV_ISOLATED] = '1';
@@ -199,7 +201,7 @@ final class ProtocolStdoutIsolator
         }
         $procCloseStatus = \proc_close($process);
 
-        if (\is_int($exitStatus) && \pcntl_wifexited($exitStatus)) {
+        if (\pcntl_wifexited($exitStatus)) {
             $exitCode = \pcntl_wexitstatus($exitStatus);
         } elseif ($procCloseStatus >= 0) {
             $exitCode = $procCloseStatus;

@@ -6,6 +6,7 @@ namespace Dpt\McpRectorWarm\Tests\Unit;
 
 use Composer\Autoload\ClassLoader;
 use Dpt\McpRectorWarm\RectorRunner;
+use Dpt\McpRectorWarm\Tests\Support\Json;
 use Dpt\McpRectorWarm\Tests\Support\TempPath;
 use PHPUnit\Framework\TestCase;
 
@@ -113,7 +114,7 @@ final class RectorRunnerFallbackBranchesTest extends TestCase
         $args = $method->invoke(null, ['rector_runner_test.directive' => ['global_value' => 'x', 'local_value' => 'x']]);
         self::assertIsArray($args);
         self::assertSame('-d', $args[0] ?? null);
-        self::assertStringStartsWith('rector_runner_test.directive=', (string) ($args[1] ?? ''));
+        self::assertStringStartsWith('rector_runner_test.directive=', Json::string($args, 1));
     }
 
     public function testProcWorkerAliveIsFalseWithNoWorker(): void
@@ -162,7 +163,7 @@ final class RectorRunnerFallbackBranchesTest extends TestCase
         $decoded = \json_decode($encoded, true);
         self::assertIsArray($decoded);
         self::assertSame('JsonException', $decoded['error_class'] ?? null);
-        self::assertStringStartsWith('failed to encode the forked call result: ', (string) ($decoded['error'] ?? ''));
+        self::assertStringStartsWith('failed to encode the forked call result: ', Json::string($decoded, 'error'));
         self::assertArrayNotHasKey('exit_code', $decoded);
     }
 
@@ -178,7 +179,7 @@ final class RectorRunnerFallbackBranchesTest extends TestCase
         $decoded = \json_decode($encoded, true);
         self::assertIsArray($decoded);
         self::assertFalse($decoded['ok'] ?? null);
-        self::assertStringStartsWith('failed to encode the warm-worker handshake frame: ', (string) ($decoded['error'] ?? ''));
+        self::assertStringStartsWith('failed to encode the warm-worker handshake frame: ', Json::string($decoded, 'error'));
     }
 
     // ---- frame reads -----------------------------------------------------

@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Dpt\McpRectorWarm\Tests\Unit;
 
 use Dpt\McpRectorWarm\RectorRunner;
+use Dpt\McpRectorWarm\Support\Scalar;
 use PHPUnit\Framework\TestCase;
 
 /**
@@ -47,7 +48,7 @@ final class RectorRunnerNoSessionFrameTest extends TestCase
 
     /**
      * @param list<string> $argv
-     * @return array<string, mixed>
+     * @return array<mixed>
      */
     private function captureFrame(RectorRunner $runner, array $argv, bool $dryRun, bool $noSession): array
     {
@@ -290,8 +291,8 @@ final class RectorRunnerFrameCaptureFilter extends \php_user_filter
     public function filter($in, $out, &$consumed, bool $closing): int
     {
         while (($bucket = \stream_bucket_make_writeable($in)) !== null) {
-            self::$captured[] = $bucket->data;
-            $consumed += (int) $bucket->datalen;
+            self::$captured[] = Scalar::toString($bucket->data, 'stream bucket data');
+            $consumed += Scalar::toInt($bucket->datalen, 'stream bucket datalen');
             \stream_bucket_append($out, $bucket);
         }
 

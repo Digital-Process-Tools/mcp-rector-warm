@@ -1119,7 +1119,7 @@ final class RectorRunnerStandbyWorkerTest extends TestCase
         $decoded = json_decode($result['output'], true);
         self::assertIsArray($decoded, 'rector output must be JSON: ' . $result['output']);
 
-        return implode("\n", array_column($decoded['file_diffs'] ?? [], 'diff'));
+        return implode("\n", array_map(static fn(mixed $file): string => Json::string($file, 'diff'), Json::array(Json::find($decoded, 'file_diffs') ?? [])));
     }
 
     private function makeDependencyProject(): string

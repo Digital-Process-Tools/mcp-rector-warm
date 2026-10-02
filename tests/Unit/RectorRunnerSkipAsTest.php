@@ -22,11 +22,14 @@ final class RectorRunnerSkipAsTest extends TestCase
      * boundary PHPStan does not look through, so this is the honest way to
      * say "resolved at runtime, not a typo".
      *
-     * @return array<string, mixed>
+     * @return array<mixed>
      */
     private static function callResolve(object $resolver, string $method = 'resolve'): array
     {
-        return $resolver->$method();
+        $resolved = $resolver->$method();
+        self::assertIsArray($resolved);
+
+        return $resolved;
     }
 
     public function testARenamedResolverPropertyFailsOpenInAChildWhoseStderrIsClosed(): void

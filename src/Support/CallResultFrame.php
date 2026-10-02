@@ -27,7 +27,7 @@ namespace Dpt\McpRectorWarm\Support;
  */
 final readonly class CallResultFrame
 {
-    /** @param array<string, mixed> $fields empty when the payload did not decode to an array at all */
+    /** @param array<mixed> $fields empty when the payload did not decode to an array at all */
     private function __construct(
         private bool $decodedToArray,
         private array $fields,
@@ -72,7 +72,7 @@ final readonly class CallResultFrame
      * hands the same fields back unreshaped rather than rebuilding them key
      * by key.
      *
-     * @return array<string, mixed>
+     * @return array<mixed>
      */
     public function fields(): array
     {

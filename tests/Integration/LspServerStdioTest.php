@@ -186,7 +186,7 @@ final class LspServerStdioTest extends TestCase
      * src/Lsp/StdioLspTransport::read() produces on the server side.
      *
      * @param resource $stdout
-     * @return array<string, mixed>
+     * @return array<mixed>
      */
     private function readFrame($stdout, int $expectedId, string $stderrPath): array
     {

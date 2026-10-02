@@ -9,6 +9,7 @@ use Dpt\McpRectorWarm\Lsp\BufferDiagnosticsSource;
 use Dpt\McpRectorWarm\Lsp\DiagnosticsSource;
 use Dpt\McpRectorWarm\Lsp\EditDiagnosticsSource;
 use Dpt\McpRectorWarm\Lsp\LspServer;
+use Dpt\McpRectorWarm\Support\Scalar;
 use Dpt\McpRectorWarm\Lsp\WorkspaceDiagnosticsSource;
 use PHPUnit\Framework\TestCase;
 
@@ -1579,7 +1580,7 @@ final class LspServerTest extends TestCase
         };
 
         $frameWriter = function (array $frame) use ($addEntry): void {
-            $addEntry('wrote:' . ($frame['method'] ?? '?'));
+            $addEntry('wrote:' . Scalar::toString($frame['method'] ?? '?', 'frame method'));
         };
 
         $server = new LspServer('1.0.0', $diagnostics, frameWriter: $frameWriter);

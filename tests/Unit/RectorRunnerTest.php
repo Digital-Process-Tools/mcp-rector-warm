@@ -6,6 +6,7 @@ namespace Dpt\McpRectorWarm\Tests\Unit;
 
 use Dpt\McpRectorWarm\RectorCallTimeoutException;
 use Dpt\McpRectorWarm\RectorRunner;
+use Dpt\McpRectorWarm\Support\Scalar;
 use Dpt\McpRectorWarm\Tests\Support\TempPath;
 use PHPUnit\Framework\TestCase;
 
@@ -2333,11 +2334,11 @@ final class RectorRunnerTest63CaptureFilter extends \php_user_filter
     public function filter($in, $out, &$consumed, bool $closing): int
     {
         while ($bucket = stream_bucket_make_writeable($in)) {
-            self::$captured .= $bucket->data;
+            self::$captured .= Scalar::toString($bucket->data, 'stream bucket data');
             // php_user_filter::filter()'s &$consumed is declared int, but
             // StreamBucket::$datalen is int|float (it can exceed PHP_INT_MAX
             // on a 32-bit build) -- narrow explicitly to satisfy the by-ref type.
-            $consumed += (int) $bucket->datalen;
+            $consumed += Scalar::toInt($bucket->datalen, 'stream bucket datalen');
             stream_bucket_append($out, $bucket);
         }
 
@@ -2356,11 +2357,11 @@ final class RectorRunnerTestGenericCaptureFilter extends \php_user_filter
     public function filter($in, $out, &$consumed, bool $closing): int
     {
         while ($bucket = stream_bucket_make_writeable($in)) {
-            self::$captured .= $bucket->data;
+            self::$captured .= Scalar::toString($bucket->data, 'stream bucket data');
             // php_user_filter::filter()'s &$consumed is declared int, but
             // StreamBucket::$datalen is int|float (it can exceed PHP_INT_MAX
             // on a 32-bit build) -- narrow explicitly to satisfy the by-ref type.
-            $consumed += (int) $bucket->datalen;
+            $consumed += Scalar::toInt($bucket->datalen, 'stream bucket datalen');
             stream_bucket_append($out, $bucket);
         }
 

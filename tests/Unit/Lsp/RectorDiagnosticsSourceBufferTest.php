@@ -105,11 +105,17 @@ final class RectorDiagnosticsSourceBufferTest extends TestCase
     private function source(\Closure $behaviour, ?\Closure $lockAcquirer = null): RectorDiagnosticsSource
     {
         $runner = new class ($behaviour) implements RunnerInterface {
+            /** @param \Closure(string, list<string>): string $behaviour */
             public function __construct(private readonly \Closure $behaviour) {}
 
             public function run(array $argv, bool $dryRun = true, bool $noSession = false): array
             {
-                return ['exit_code' => 0, 'output' => ($this->behaviour)(end($argv), $argv), 'warm_boot' => false];
+                $path = end($argv);
+                if ($path === false) {
+                    throw new \LogicException('run() was called with an empty argv');
+                }
+
+                return ['exit_code' => 0, 'output' => ($this->behaviour)($path, $argv), 'warm_boot' => false];
             }
 
             public function isWarm(): bool

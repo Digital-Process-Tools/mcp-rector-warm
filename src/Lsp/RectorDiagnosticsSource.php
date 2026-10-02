@@ -753,7 +753,7 @@ final readonly class RectorDiagnosticsSource implements BufferDiagnosticsSource,
      * report reads identically to "0 changes"). This scans for the matching
      * closing brace instead, so only the JSON object itself is decoded.
      *
-     * @return array<string, mixed>|null
+     * @return array<mixed>|null
      */
     private static function extractReport(string $output): ?array
     {

@@ -28,7 +28,7 @@ namespace Dpt\McpRectorWarm\Support;
  */
 final readonly class CallRequestFrame
 {
-    /** @param array<string, mixed> $fields empty when the payload did not decode to an array at all */
+    /** @param array<mixed> $fields empty when the payload did not decode to an array at all */
     private function __construct(
         private array $fields,
     ) {}

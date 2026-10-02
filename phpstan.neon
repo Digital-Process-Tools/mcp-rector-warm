@@ -1,9 +1,14 @@
 parameters:
-    level: 9
+    level: 10
     paths:
         - src
         - bin
         - tests
+    stubFiles:
+        - stubs/pcov.stub
+        - stubs/pcntl.stub
+    scanFiles:
+        - stubs/symfony-console.stub
     excludePaths:
         - tests/Fixtures/*
     # Quoted so the file also parses as YAML: the README badge reads `level` from it.

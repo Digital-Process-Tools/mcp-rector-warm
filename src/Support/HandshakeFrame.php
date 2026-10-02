@@ -26,7 +26,7 @@ namespace Dpt\McpRectorWarm\Support;
  */
 final readonly class HandshakeFrame
 {
-    /** @param array<string, mixed> $fields empty when the payload did not decode to an array at all */
+    /** @param array<mixed> $fields empty when the payload did not decode to an array at all */
     private function __construct(
         public bool $ok,
         public ?string $error,
@@ -61,7 +61,7 @@ final readonly class HandshakeFrame
         return \is_string($this->fields[$key] ?? null) ? $this->fields[$key] : null;
     }
 
-    /** @return array<string, mixed> */
+    /** @return array<mixed> */
     public function array(string $key): array
     {
         return \is_array($this->fields[$key] ?? null) ? $this->fields[$key] : [];
@@ -84,7 +84,9 @@ final readonly class HandshakeFrame
             if ($hash !== null && !\is_string($hash)) {
                 throw new \UnexpectedValueException(\sprintf('handshake frame "%s": entry "%s" is %s, expected string or null', $key, $path, \get_debug_type($hash)));
             }
-            $map[$path] = $hash;
+            // A no-op at runtime (PHP turns a numeric-string key back into an
+            // int), here so the declared array<string, ...> holds statically.
+            $map[(string) $path] = $hash;
         }
 
         return $map;
