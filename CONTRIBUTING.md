@@ -32,7 +32,8 @@ suite once with pcov and posts the coverage summary and the 10 slowest tests
 to that job's GitHub Actions summary page (plus a `junit-log` artifact and,
 when the repo is activated on Codecov, the README badge). Each of those two
 legs ends with a "Coverage gate (#275)" step that fails the job when the
-leg's merged report is below 90% total line coverage; that step, not Codecov,
+leg's merged report is below 90% line coverage, counted the way Codecov
+counts it (statement plus method-declaration lines); that step, not Codecov,
 is the blocking check. To see the number locally, write a clover file and run
 `python3 tools/coverage-gate.py coverage.xml` on it (a plain local pcov run
 lacks the forked/subprocess merge below, so it reads lower than CI).
