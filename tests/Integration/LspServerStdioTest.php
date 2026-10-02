@@ -52,6 +52,16 @@ final class LspServerStdioTest extends TestCase
         self::assertContains('Apply all Rector fixes', array_column($actions, 'title'));
     }
 
+    /**
+     * Self-review finding: this negative assertion has no positive control
+     * of its own -- nothing here proves the harness can detect a codeAction
+     * call that WRONGLY returns []. The positive control is the sibling
+     * test above, through the identical runSession()/readFrame() plumbing
+     * against the paired Fixable.php fixture: if that mechanism silently
+     * degraded to always answering [], testInitializeDidOpen...OffersAFix
+     * fails loudly (assertNotEmpty) before this test's assertSame([], ...)
+     * could ever pass for the wrong reason.
+     */
     public function testCodeActionIsEmptyForACleanFile(): void
     {
         self::assertSame([], $this->runSession(self::$cleanFile), 'a clean file should offer no quick fixes');
