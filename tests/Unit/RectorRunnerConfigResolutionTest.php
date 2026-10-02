@@ -25,8 +25,8 @@ final class RectorRunnerConfigResolutionTest extends TestCase
 
     private string $previousCwd;
 
-    /** @var list<string> */
-    private array $previousArgv;
+    /** $_SERVER['argv'] exactly as found, restored verbatim in tearDown() */
+    private mixed $previousArgv;
 
     protected function setUp(): void
     {
@@ -117,7 +117,8 @@ final class RectorRunnerConfigResolutionTest extends TestCase
         );
 
         $resolved = $this->method('resolveMainConfigFile')->invoke($runner);
-        self::assertSame(realpath($this->tmp . '/rector.php'), realpath((string) $resolved));
+        self::assertIsString($resolved);
+        self::assertSame(realpath($this->tmp . '/rector.php'), realpath($resolved));
     }
 
     public function testRefreshConfigFileStateMirrorsResolvedPathsAndHashesOntoInstance(): void
@@ -137,9 +138,13 @@ final class RectorRunnerConfigResolutionTest extends TestCase
         $composerFile = new \ReflectionProperty(RectorRunner::class, 'composerFile');
         $composerFileHash = new \ReflectionProperty(RectorRunner::class, 'composerFileHash');
 
-        self::assertSame(realpath($this->tmp . '/rector.php'), realpath((string) $configFile->getValue($runner)));
+        $configPath = $configFile->getValue($runner);
+        self::assertIsString($configPath);
+        self::assertSame(realpath($this->tmp . '/rector.php'), realpath($configPath));
         self::assertSame(hash_file('sha256', $this->tmp . '/rector.php'), $configFileHash->getValue($runner));
-        self::assertSame(realpath($this->tmp . '/composer.json'), realpath((string) $composerFile->getValue($runner)));
+        $composerPath = $composerFile->getValue($runner);
+        self::assertIsString($composerPath);
+        self::assertSame(realpath($this->tmp . '/composer.json'), realpath($composerPath));
         self::assertSame(hash_file('sha256', $this->tmp . '/composer.json'), $composerFileHash->getValue($runner));
     }
 
@@ -192,7 +197,7 @@ final class RectorRunnerConfigResolutionTest extends TestCase
         $runner = new RectorRunner();
         $bin = $this->method('findRectorBin')->invoke($runner);
 
-        self::assertNotNull($bin, 'findRectorBin() must resolve the bundled rector/rector binary in this project');
+        self::assertIsString($bin, 'findRectorBin() must resolve the bundled rector/rector binary in this project');
         self::assertFileExists($bin);
     }
 

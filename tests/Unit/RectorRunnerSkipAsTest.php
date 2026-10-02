@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Dpt\McpRectorWarm\Tests\Unit;
 
+use Dpt\McpRectorWarm\Tests\Support\Json;
 use Dpt\McpRectorWarm\RectorRunner;
 use PHPUnit\Framework\TestCase;
 
@@ -93,7 +94,7 @@ final class RectorRunnerSkipAsTest extends TestCase
         $this->apply($this->runnerWith($skipper, $this->pathsResolver(), $classes), '/p/src/Foo.php', '/p/src/.rector-warm-1/Foo.php');
 
         $resolved = self::callResolve($classes);
-        self::assertContains('/p/src/.rector-warm-1/Foo.php', $resolved['App\\SomeRule']);
+        self::assertContains('/p/src/.rector-warm-1/Foo.php', Json::array($resolved, 'App\\SomeRule'));
         self::assertSame(['/p/src/Bar.php'], $resolved['App\\Other']);
     }
 
@@ -125,8 +126,45 @@ final class RectorRunnerSkipAsTest extends TestCase
 
         $this->apply($this->runnerWith($skipper, $this->pathsResolver(), $classes), '/p/src/Foo.php', '/p/src/.rector-warm-1/Foo.php');
 
-        self::assertContains('/p/src/.rector-warm-1/Foo.php', self::callResolve($classes)['App\\SomeRule']);
+        self::assertContains('/p/src/.rector-warm-1/Foo.php', Json::array(self::callResolve($classes), 'App\\SomeRule'));
         self::assertFalse($skipper->marked);
+    }
+
+    /**
+     * #213 E2E finding: `Rule::class => 'src/Foo.php'` (a plain string, not a
+     * list) is valid Rector config, and resolve() can hand it back as that
+     * string. Level-9 narrowing must read it as the one-element list Rector
+     * means, not throw -- a throw fails the whole applySkipsOfOriginalPath()
+     * open, so every OTHER rule-scoped skip stopped reaching the buffer copy.
+     * Both rules below are skipped for the original: the string-form one
+     * (must fire) and the list-form one (positive control, same call).
+     */
+    public function testAStringFormRuleSkipIsReadAsAOneElementListAndMapsToTheCopy(): void
+    {
+        $classes = $this->classResolver([
+            'App\\StringRule' => '/p/src/Foo.php',
+            'App\\ListRule' => ['/p/src/Foo.php'],
+            'App\\Elsewhere' => '/p/src/Bar.php',
+        ]);
+        $skipper = new class {
+            public function shouldSkipFilePath(string $path): bool
+            {
+                return false;
+            }
+
+            public function matchSkip(string|object $element, string $path): ?object
+            {
+                return $element !== 'App\\Elsewhere' && $path === '/p/src/Foo.php' ? new \stdClass() : null;
+            }
+        };
+
+        $this->apply($this->runnerWith($skipper, $this->pathsResolver(), $classes), '/p/src/Foo.php', '/p/src/.rector-warm-1/Foo.php');
+
+        $resolved = self::callResolve($classes);
+        self::assertSame(['/p/src/Foo.php', '/p/src/.rector-warm-1/Foo.php'], $resolved['App\\StringRule']);
+        self::assertSame(['/p/src/Foo.php', '/p/src/.rector-warm-1/Foo.php'], $resolved['App\\ListRule']);
+        // Untouched entries keep Rector's own shape, string form included.
+        self::assertSame('/p/src/Bar.php', $resolved['App\\Elsewhere']);
     }
 
     private function skipper(bool $pathSkipped): object
@@ -155,7 +193,7 @@ final class RectorRunnerSkipAsTest extends TestCase
         };
     }
 
-    /** @param array<string, list<string>|null> $classes */
+    /** @param array<string, list<string>|string|null> $classes */
     private function classResolver(array $classes): object
     {
         return new class ($classes) {
@@ -166,10 +204,10 @@ final class RectorRunnerSkipAsTest extends TestCase
             // readonly property here would make PHP throw on that write and
             // this stub would stop matching production shape (caught by
             // ReadOnlyPropertyRector wrongly proposing readonly here).
-            /** @param array<string, list<string>|null>|null $skippedClassesToFiles */
+            /** @param array<string, list<string>|string|null>|null $skippedClassesToFiles */
             public function __construct(private ?array $skippedClassesToFiles) {}
 
-            /** @return array<string, list<string>|null> */
+            /** @return array<string, list<string>|string|null> */
             public function resolve(): array
             {
                 return $this->skippedClassesToFiles ?? [];

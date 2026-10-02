@@ -46,7 +46,12 @@ final class RectorRunnerSessionTest extends TestCase
     {
         $method = new \ReflectionMethod(RectorRunner::class, 'sessionCandidate');
 
-        return $method->invoke(new RectorRunner(), $argv, $dryRun, $noSession);
+        $candidate = $method->invoke(new RectorRunner(), $argv, $dryRun, $noSession);
+        if ($candidate !== null) {
+            self::assertIsString($candidate);
+        }
+
+        return $candidate;
     }
 
     /** @return list<string> */
@@ -144,7 +149,10 @@ final class RectorRunnerSessionTest extends TestCase
     {
         $method = new \ReflectionMethod(RectorRunner::class, 'positiveIntEnv');
 
-        return $method->invoke(null, $name, $default);
+        $value = $method->invoke(null, $name, $default);
+        self::assertIsInt($value);
+
+        return $value;
     }
 
     /**

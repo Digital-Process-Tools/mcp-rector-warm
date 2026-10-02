@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Dpt\McpRectorWarm\Tests\Unit;
 
+use Dpt\McpRectorWarm\Tests\Support\Json;
 use Dpt\McpRectorWarm\RectorRunner;
 use PHPUnit\Framework\TestCase;
 
@@ -22,8 +23,8 @@ final class RectorRunnerStandbyWorkerTest extends TestCase
 {
     private ?string $tmp = null;
     private string|false $previousCwd = false;
-    /** @var list<string> */
-    private array $previousArgv = [];
+    /** $_SERVER['argv'] exactly as found, restored verbatim in tearDown() */
+    private mixed $previousArgv = null;
     private string|false $previousMode = false;
 
     protected function setUp(): void
@@ -262,8 +263,9 @@ final class RectorRunnerStandbyWorkerTest extends TestCase
             $retiredProperty = new \ReflectionProperty(RectorRunner::class, 'retiredProcWorkers');
             $retired = $retiredProperty->getValue($runner);
             self::assertNotEmpty($retired, 'control: the first call must have retired a worker');
-            $proc = $retired[0]['proc'];
-            $stderrFile = $retired[0]['stderr'];
+            $proc = Json::at($retired, 0, 'proc');
+            self::assertIsResource($proc);
+            $stderrFile = Json::string($retired, 0, 'stderr');
 
             $deadline = microtime(true) + 15.0;
             while (proc_get_status($proc)['running'] && microtime(true) < $deadline) {
@@ -366,8 +368,7 @@ final class RectorRunnerStandbyWorkerTest extends TestCase
         ini_set('precision', $changed);
 
         try {
-            $method = new \ReflectionMethod(RectorRunner::class, 'collectIniOverrideArgs');
-            $args = $method->invoke(null);
+            $args = self::iniOverrideArgs();
 
             self::assertContains('-d', $args);
             self::assertContains("precision='{$changed}'", $args, 'must fire: a directive changed on the daemon must be forwarded, single-quoted raw INI per #130 since a plain number has no single quote in it');
@@ -480,8 +481,7 @@ final class RectorRunnerStandbyWorkerTest extends TestCase
 
         $userAgentArg = null;
         try {
-            $method = new \ReflectionMethod(RectorRunner::class, 'collectIniOverrideArgs');
-            $args = $method->invoke(null);
+            $args = self::iniOverrideArgs();
 
             foreach ($args as $i => $arg) {
                 if ($arg === '-d' && isset($args[$i + 1]) && str_starts_with($args[$i + 1], 'user_agent=')) {
@@ -526,6 +526,26 @@ final class RectorRunnerStandbyWorkerTest extends TestCase
      * round trip exactly, factored out so each #130 case states only its own
      * value and assertion.
      */
+    /**
+     * RectorRunner::collectIniOverrideArgs(), checked to be the argv list it
+     * promises.
+     *
+     * @return list<string>
+     */
+    private static function iniOverrideArgs(): array
+    {
+        $args = (new \ReflectionMethod(RectorRunner::class, 'collectIniOverrideArgs'))->invoke(null);
+        self::assertIsArray($args);
+        self::assertIsList($args);
+        $checked = [];
+        foreach ($args as $arg) {
+            self::assertIsString($arg);
+            $checked[] = $arg;
+        }
+
+        return $checked;
+    }
+
     private static function roundTripUserAgentThroughARealChildProcess(string $raw): string
     {
         $previous = ini_get('user_agent');
@@ -533,8 +553,7 @@ final class RectorRunnerStandbyWorkerTest extends TestCase
 
         $userAgentArg = null;
         try {
-            $method = new \ReflectionMethod(RectorRunner::class, 'collectIniOverrideArgs');
-            $args = $method->invoke(null);
+            $args = self::iniOverrideArgs();
 
             foreach ($args as $i => $arg) {
                 if ($arg === '-d' && isset($args[$i + 1]) && str_starts_with($args[$i + 1], 'user_agent=')) {
@@ -1146,6 +1165,7 @@ final class RectorRunnerStandbyWorkerTest extends TestCase
             \RecursiveIteratorIterator::CHILD_FIRST,
         );
         foreach ($items as $item) {
+            self::assertInstanceOf(\SplFileInfo::class, $item);
             $item->isDir() ? @rmdir($item->getPathname()) : @unlink($item->getPathname());
         }
         @rmdir($dir);

@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Dpt\McpRectorWarm\Tests\Unit;
 
+use Dpt\McpRectorWarm\Tests\Support\Json;
 use Dpt\McpRectorWarm\RectorTool;
 use Dpt\McpRectorWarm\RunnerInterface;
 use Mcp\Schema\Result\CallToolResult;
@@ -163,6 +164,6 @@ final class RectorToolRecoveryTest extends TestCase
         self::assertSame(-1, $details['exit_code']);
         self::assertSame(2, $fake->runs, 'recoverable error retried once then gives up');
         self::assertSame(1, $fake->reboots);
-        self::assertStringContainsString('toMutatingScope', $details['error'] ?? '');
+        self::assertStringContainsString('toMutatingScope', Json::string($details, 'error'));
     }
 }

@@ -61,7 +61,7 @@ final readonly class CallRequestFrame
 
     public function string(string $key, string $default = ''): string
     {
-        return isset($this->fields[$key]) ? (string) $this->fields[$key] : $default;
+        return isset($this->fields[$key]) ? Scalar::toString($this->fields[$key], \sprintf('call request frame "%s"', $key)) : $default;
     }
 
     public function intOrNull(string $key): ?int

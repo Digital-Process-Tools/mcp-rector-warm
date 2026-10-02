@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Dpt\McpRectorWarm\Tests\Integration;
 
+use Dpt\McpRectorWarm\Tests\Support\Json;
 use Dpt\McpRectorWarm\RectorRunner;
 use PHPUnit\Framework\TestCase;
 
@@ -38,6 +39,7 @@ final class ServerStdioTest extends TestCase
             \RecursiveIteratorIterator::CHILD_FIRST,
         );
         foreach ($items as $item) {
+            self::assertInstanceOf(\SplFileInfo::class, $item);
             $item->isDir() ? rmdir($item->getPathname()) : unlink($item->getPathname());
         }
         rmdir($dir);
@@ -110,11 +112,11 @@ final class ServerStdioTest extends TestCase
         // Response 1: initialize
         self::assertSame(1, $responses[0]['id']);
         self::assertArrayHasKey('result', $responses[0]);
-        self::assertSame('mcp-rector-warm', $responses[0]['result']['serverInfo']['name']);
+        self::assertSame('mcp-rector-warm', Json::at($responses, 0, 'result', 'serverInfo', 'name'));
 
         // Response 2: tools/list
         self::assertSame(2, $responses[1]['id']);
-        $tools = $responses[1]['result']['tools'];
+        $tools = Json::array($responses, 1, 'result', 'tools');
         $names = array_column($tools, 'name');
         self::assertContains('rector_process', $names);
     }
@@ -139,7 +141,7 @@ final class ServerStdioTest extends TestCase
         self::assertNotNull($call, 'no response for id=2');
         self::assertArrayHasKey('result', $call, 'expected result, got: ' . json_encode($call));
 
-        $structured = $call['result']['structuredContent'] ?? null;
+        $structured = Json::find($call, 'result', 'structuredContent');
         self::assertIsArray($structured);
         self::assertArrayHasKey('exit_code', $structured);
         self::assertArrayHasKey('warm_boot', $structured);
@@ -168,7 +170,7 @@ final class ServerStdioTest extends TestCase
 
         $third = array_values(array_filter($responses, fn($r) => ($r['id'] ?? null) === 3))[0] ?? null;
         self::assertNotNull($third, 'no response for id=3');
-        $structured = $third['result']['structuredContent'];
+        $structured = Json::array($third, 'result', 'structuredContent');
         self::assertSame(
             self::expectsWarmth(),
             $structured['warm_boot'],
@@ -211,7 +213,7 @@ final class ServerStdioTest extends TestCase
             self::assertSame(
                 0,
                 $this->changedFiles($first),
-                'clean fixture should yield 0 changed files, got: ' . json_encode($first['result']['structuredContent'] ?? []) . $this->stderrTail($proc['stderr']),
+                'clean fixture should yield 0 changed files, got: ' . json_encode(Json::find($first, 'result', 'structuredContent') ?? []) . $this->stderrTail($proc['stderr']),
             );
 
             // Introduce a refactorable pattern on disk; bump mtime past 1s granularity.
@@ -226,7 +228,7 @@ final class ServerStdioTest extends TestCase
             $second = $this->readResponse($proc['stdout'], 3);
             self::assertSame(
                 self::expectsWarmth(),
-                $second['result']['structuredContent']['warm_boot'],
+                Json::at($second, 'result', 'structuredContent', 'warm_boot'),
                 'second call warm_boot mismatch' . $this->stderrTail($proc['stderr']),
             );
             self::assertNotSame(-1, $this->changedFiles($second), 'rector output was unparseable' . $this->stderrTail($proc['stderr']));
@@ -301,7 +303,7 @@ final class ServerStdioTest extends TestCase
                 $abs = $project . '/' . ltrim($rel, '/');
                 $this->send($proc['stdin'], $this->processCall($id, $abs));
                 $resp = $this->readResponse($proc['stdout'], $id);
-                $blob = (string) json_encode($resp['result']['structuredContent'] ?? []);
+                $blob = (string) json_encode(Json::find($resp, 'result', 'structuredContent') ?? []);
                 self::assertStringNotContainsString(
                     'System error',
                     $blob,
@@ -390,7 +392,7 @@ final class ServerStdioTest extends TestCase
             self::assertSame(
                 1,
                 $this->changedFiles($response),
-                'ReadOnlyClassRector from custom-rector.php should apply, got: ' . json_encode($response['result']['structuredContent'] ?? []) . $this->stderrTail($proc['stderr']),
+                'ReadOnlyClassRector from custom-rector.php should apply, got: ' . json_encode(Json::find($response, 'result', 'structuredContent') ?? []) . $this->stderrTail($proc['stderr']),
             );
         } finally {
             fclose($proc['stdin']);
@@ -405,10 +407,10 @@ final class ServerStdioTest extends TestCase
      */
     private function diffOf(array $response): string
     {
-        $output = $response['result']['structuredContent']['output'] ?? '';
+        $output = Json::find($response, 'result', 'structuredContent', 'output') ?? '';
         $decoded = is_string($output) && $output !== '' ? json_decode($output, true) : [];
 
-        return implode("\n", array_column($decoded['file_diffs'] ?? [], 'diff'));
+        return implode("\n", array_column(Json::array(Json::find($decoded, 'file_diffs') ?? []), 'diff'));
     }
 
     private function makeDependencyProject(): string
@@ -446,10 +448,12 @@ final class ServerStdioTest extends TestCase
      */
     private function changedFiles(array $response): int
     {
-        $output = $response['result']['structuredContent']['output'] ?? '';
+        $output = Json::find($response, 'result', 'structuredContent', 'output') ?? '';
         $decoded = is_string($output) && $output !== '' ? json_decode($output, true) : [];
 
-        return (int) ($decoded['totals']['changed_files'] ?? -1);
+        $changed = Json::find($decoded, 'totals', 'changed_files') ?? -1;
+
+        return is_int($changed) ? $changed : -1;
     }
 
     /**
@@ -575,7 +579,7 @@ final class ServerStdioTest extends TestCase
 
     /**
      * @param list<array<string,mixed>> $messages
-     * @return list<array<string,mixed>>
+     * @return list<array<mixed>>
      */
     private function invoke(array $messages, bool $withProject): array
     {

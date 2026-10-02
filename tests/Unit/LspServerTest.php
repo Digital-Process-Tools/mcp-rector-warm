@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Dpt\McpRectorWarm\Tests\Unit;
 
+use Dpt\McpRectorWarm\Tests\Support\Json;
 use Dpt\McpRectorWarm\Lsp\BufferDiagnosticsSource;
 use Dpt\McpRectorWarm\Lsp\DiagnosticsSource;
 use Dpt\McpRectorWarm\Lsp\EditDiagnosticsSource;
@@ -202,17 +203,17 @@ final class LspServerTest extends TestCase
         $response = $responses[0];
         self::assertSame(1, $response['id']);
         self::assertSame('2.0', $response['jsonrpc']);
-        self::assertTrue($response['result']['capabilities']['codeActionProvider']);
+        self::assertTrue(Json::at($response, 'result', 'capabilities', 'codeActionProvider'));
         self::assertSame(
             ['name' => 'rector-warm-lsp', 'version' => '0.1.0-prototype'],
-            $response['result']['serverInfo'],
+            Json::at($response, 'result', 'serverInfo'),
         );
         // #102: negative control for
         // testInitializeAdvertisesExecuteCommandProviderForAWorkspaceFixSource
         // below -- with no diagnostics source at all (this server), there
         // is nothing a fixWorkspace command could run, so it must not be
         // advertised.
-        self::assertArrayNotHasKey('executeCommandProvider', $response['result']['capabilities']);
+        self::assertArrayNotHasKey('executeCommandProvider', Json::array($response, 'result', 'capabilities'));
     }
 
     /**
@@ -241,7 +242,7 @@ final class LspServerTest extends TestCase
 
         self::assertSame(
             ['commands' => ['rector-warm.fixWorkspace']],
-            $responses[0]['result']['capabilities']['executeCommandProvider'],
+            Json::at($responses, 0, 'result', 'capabilities', 'executeCommandProvider'),
         );
     }
 
@@ -265,7 +266,7 @@ final class LspServerTest extends TestCase
             'params' => ['capabilities' => []],
         ]);
 
-        self::assertArrayNotHasKey('executeCommandProvider', $responses[0]['result']['capabilities']);
+        self::assertArrayNotHasKey('executeCommandProvider', Json::array($responses, 0, 'result', 'capabilities'));
     }
 
     /**
@@ -310,11 +311,11 @@ final class LspServerTest extends TestCase
         self::assertSame('client/registerCapability', $request['method']);
         self::assertArrayHasKey('id', $request);
 
-        $registrations = $request['params']['registrations'];
+        $registrations = Json::array($request, 'params', 'registrations');
         self::assertCount(1, $registrations);
-        self::assertSame('workspace/didChangeWatchedFiles', $registrations[0]['method']);
+        self::assertSame('workspace/didChangeWatchedFiles', Json::at($registrations, 0, 'method'));
 
-        $patterns = array_column($registrations[0]['registerOptions']['watchers'], 'globPattern');
+        $patterns = array_column(Json::array($registrations, 0, 'registerOptions', 'watchers'), 'globPattern');
         self::assertSame(['**/rector.php', '**/composer.lock'], $patterns);
     }
 
@@ -325,7 +326,7 @@ final class LspServerTest extends TestCase
         $responses = $server->handle(['jsonrpc' => '2.0', 'id' => 7, 'method' => 'textDocument/hover']);
 
         self::assertSame(7, $responses[0]['id']);
-        self::assertSame(-32601, $responses[0]['error']['code']);
+        self::assertSame(-32601, Json::at($responses, 0, 'error', 'code'));
     }
 
     /**
@@ -355,6 +356,46 @@ final class LspServerTest extends TestCase
         self::initialize($server, $capabilities);
 
         self::assertSame([], $server->handle(['jsonrpc' => '2.0', 'method' => 'initialized']));
+    }
+
+    /**
+     * #213: a `textDocument` that is not an object (a non-conforming
+     * client) used to reach diagnoseDocument(array) as-is -- a TypeError out
+     * of handle() that ended the server loop. It is now ignored, like every
+     * other params member the spec does not allow. The positive control is
+     * the well-formed didOpen right after it, on the same server.
+     */
+    public function testANonObjectTextDocumentIsIgnoredRatherThanCrashingTheServer(): void
+    {
+        $source = new class implements DiagnosticsSource {
+            public int $calls = 0;
+
+            public function diagnose(string $absolutePath): array
+            {
+                $this->calls++;
+
+                return ['fixes' => []];
+            }
+        };
+        $server = new LspServer('0.1.0-prototype', $source);
+        self::initialize($server, []);
+
+        foreach (['textDocument/didOpen', 'textDocument/didSave', 'textDocument/didClose'] as $method) {
+            self::assertSame([], $server->handle([
+                'jsonrpc' => '2.0',
+                'method' => $method,
+                'params' => ['textDocument' => 'file:///tmp/A.php'],
+            ]));
+        }
+        self::assertSame(0, $source->calls);
+
+        $opened = $server->handle([
+            'jsonrpc' => '2.0',
+            'method' => 'textDocument/didOpen',
+            'params' => ['textDocument' => ['uri' => 'file:///tmp/A.php', 'version' => 1, 'text' => '']],
+        ]);
+        self::assertSame(1, $source->calls);
+        self::assertSame('textDocument/publishDiagnostics', Json::string($opened, 0, 'method'));
     }
 
     /**
@@ -394,7 +435,7 @@ final class LspServerTest extends TestCase
             'method' => 'textDocument/didOpen',
             'params' => ['textDocument' => ['uri' => $uri, 'version' => 1, 'text' => '']],
         ]);
-        self::assertCount(1, $opened[0]['params']['diagnostics']);
+        self::assertCount(1, Json::array($opened, 0, 'params', 'diagnostics'));
 
         $saved = $server->handle([
             'jsonrpc' => '2.0',
@@ -404,7 +445,7 @@ final class LspServerTest extends TestCase
 
         self::assertSame(2, $source->calls);
         self::assertSame('textDocument/publishDiagnostics', $saved[0]['method']);
-        self::assertSame([], $saved[0]['params']['diagnostics']);
+        self::assertSame([], Json::at($saved, 0, 'params', 'diagnostics'));
     }
 
     /**
@@ -622,12 +663,12 @@ final class LspServerTest extends TestCase
         ]);
 
         self::assertCount(2, $responses);
-        $uris = array_map(static fn(array $r): string => $r['params']['uri'], $responses);
+        $uris = array_map(static fn(array $r): string => Json::string($r, 'params', 'uri'), $responses);
         sort($uris);
         self::assertSame(['file:///tmp/A.php', 'file:///tmp/B.php'], $uris);
         foreach ($responses as $notification) {
             self::assertSame('textDocument/publishDiagnostics', $notification['method']);
-            self::assertSame('RuleAfterConfigChange', $notification['params']['diagnostics'][0]['message']);
+            self::assertSame('RuleAfterConfigChange', Json::at($notification, 'params', 'diagnostics', 0, 'message'));
         }
     }
 
@@ -650,7 +691,7 @@ final class LspServerTest extends TestCase
         ]);
 
         self::assertCount(1, $responses);
-        self::assertSame('file:///tmp/A.php', $responses[0]['params']['uri']);
+        self::assertSame('file:///tmp/A.php', Json::at($responses, 0, 'params', 'uri'));
     }
 
     public function testWatchedRectorConfigChangeIsCaseInsensitiveInTheBasename(): void
@@ -678,7 +719,7 @@ final class LspServerTest extends TestCase
         ]);
 
         self::assertCount(1, $responses);
-        self::assertSame('file:///tmp/A.php', $responses[0]['params']['uri']);
+        self::assertSame('file:///tmp/A.php', Json::at($responses, 0, 'params', 'uri'));
     }
 
     public function testWatchedFileChangeToAnUnrelatedFileTriggersNoRediagnosis(): void
@@ -732,10 +773,10 @@ final class LspServerTest extends TestCase
         self::assertCount(1, $responses);
         $notification = $responses[0];
         self::assertSame('textDocument/publishDiagnostics', $notification['method']);
-        self::assertSame('file:///tmp/Sample.php', $notification['params']['uri']);
-        self::assertCount(1, $notification['params']['diagnostics']);
-        $diagnostic = $notification['params']['diagnostics'][0];
-        self::assertSame($fixes[0]['range'], $diagnostic['range']);
+        self::assertSame('file:///tmp/Sample.php', Json::at($notification, 'params', 'uri'));
+        self::assertCount(1, Json::array($notification, 'params', 'diagnostics'));
+        $diagnostic = Json::array($notification, 'params', 'diagnostics', 0);
+        self::assertSame(Json::at($fixes, 0, 'range'), $diagnostic['range']);
         self::assertSame('rector', $diagnostic['source']);
         self::assertSame(\Rector\CodeQuality\Rector\If_\SimplifyIfReturnBoolRector::class, $diagnostic['message']);
     }
@@ -762,12 +803,12 @@ final class LspServerTest extends TestCase
         ]);
 
         self::assertCount(1, $responses);
-        $diagnostics = $responses[0]['params']['diagnostics'];
+        $diagnostics = Json::array($responses, 0, 'params', 'diagnostics');
         self::assertCount(1, $diagnostics);
-        self::assertSame(1, $diagnostics[0]['severity']);
-        self::assertSame('Syntax error, unexpected token', $diagnostics[0]['message']);
-        self::assertSame(['line' => 6, 'character' => 0], $diagnostics[0]['range']['start']);
-        self::assertArrayNotHasKey('data', $diagnostics[0]);
+        self::assertSame(1, Json::at($diagnostics, 0, 'severity'));
+        self::assertSame('Syntax error, unexpected token', Json::at($diagnostics, 0, 'message'));
+        self::assertSame(['line' => 6, 'character' => 0], Json::at($diagnostics, 0, 'range', 'start'));
+        self::assertArrayNotHasKey('data', Json::array($diagnostics, 0));
 
         $codeActionResponses = $server->handle([
             'jsonrpc' => '2.0',
@@ -802,7 +843,7 @@ final class LspServerTest extends TestCase
             'params' => ['textDocument' => ['uri' => 'file:///tmp/Sample.php', 'version' => 1]],
         ]);
 
-        self::assertSame('Rector fix', $responses[0]['params']['diagnostics'][0]['message']);
+        self::assertSame('Rector fix', Json::at($responses, 0, 'params', 'diagnostics', 0, 'message'));
 
         $codeActionResponses = $server->handle([
             'jsonrpc' => '2.0',
@@ -815,7 +856,7 @@ final class LspServerTest extends TestCase
             ],
         ]);
 
-        self::assertSame('Apply Rector: Rector fix', $codeActionResponses[0]['result'][0]['title']);
+        self::assertSame('Apply Rector: Rector fix', Json::at($codeActionResponses, 0, 'result', 0, 'title'));
     }
 
     public function testDidSaveOnAnUnchangedFilePublishesEmptyDiagnostics(): void
@@ -833,7 +874,7 @@ final class LspServerTest extends TestCase
         ]);
 
         self::assertCount(1, $responses);
-        self::assertSame([], $responses[0]['params']['diagnostics']);
+        self::assertSame([], Json::at($responses, 0, 'params', 'diagnostics'));
     }
 
     public function testWatchedConfigChangeReDiagnosesTheMostRecentlyActiveDocumentFirst(): void
@@ -875,7 +916,7 @@ final class LspServerTest extends TestCase
 
         self::assertSame(['/tmp/C.php', '/tmp/B.php', '/tmp/A.php'], $source->order);
         self::assertCount(3, $responses);
-        $uris = array_map(static fn(array $r): string => $r['params']['uri'], $responses);
+        $uris = array_map(static fn(array $r): string => Json::string($r, 'params', 'uri'), $responses);
         self::assertSame(['file:///tmp/C.php', 'file:///tmp/B.php', 'file:///tmp/A.php'], $uris);
     }
 
@@ -1042,7 +1083,7 @@ final class LspServerTest extends TestCase
         ]);
 
         self::assertSame('textDocument/publishDiagnostics', $responses[0]['method']);
-        self::assertSame([], $responses[0]['params']['diagnostics']);
+        self::assertSame([], Json::at($responses, 0, 'params', 'diagnostics'));
     }
 
     public function testCodeActionBuildsAWorkspaceEditFromTheMatchingFixPlusAWholeFileAction(): void
@@ -1066,13 +1107,13 @@ final class LspServerTest extends TestCase
             ],
         ]);
 
-        $actions = $responses[0]['result'];
+        $actions = Json::array($responses, 0, 'result');
         self::assertCount(2, $actions);
-        self::assertSame('Apply Rector: SimplifyIfReturnBoolRector', $actions[0]['title']);
-        $edit = $actions[0]['edit']['changes']['file:///tmp/Sample.php'][0];
-        self::assertSame($fixes[0]['range'], $edit['range']);
+        self::assertSame('Apply Rector: SimplifyIfReturnBoolRector', Json::at($actions, 0, 'title'));
+        $edit = Json::array($actions, 0, 'edit', 'changes', 'file:///tmp/Sample.php', 0);
+        self::assertSame(Json::at($fixes, 0, 'range'), $edit['range']);
         self::assertSame('fixed' . "\n", $edit['newText']);
-        self::assertSame('Apply all Rector fixes', $actions[1]['title']);
+        self::assertSame('Apply all Rector fixes', Json::at($actions, 1, 'title'));
     }
 
     /**
@@ -1139,9 +1180,9 @@ final class LspServerTest extends TestCase
             ],
         ]);
 
-        $actions = $responses[0]['result'];
+        $actions = Json::array($responses, 0, 'result');
         self::assertCount(2, $actions);
-        $edit = $actions[0]['edit']['changes']['file:///tmp/Sample.php'][0];
+        $edit = Json::array($actions, 0, 'edit', 'changes', 'file:///tmp/Sample.php', 0);
         self::assertSame('fresh' . "\n", $edit['newText'], 'the stale cached fix text must never reach the edit');
     }
 
@@ -1172,9 +1213,9 @@ final class LspServerTest extends TestCase
             ],
         ]);
 
-        $actions = $responses[0]['result'];
+        $actions = Json::array($responses, 0, 'result');
         self::assertCount(2, $actions);
-        self::assertSame('Apply Rector: SimplifyIfReturnBoolRector', $actions[0]['title']);
+        self::assertSame('Apply Rector: SimplifyIfReturnBoolRector', Json::at($actions, 0, 'title'));
     }
 
     public function testCodeActionOutsideTheFixRangeIsNotOffered(): void
@@ -1201,9 +1242,9 @@ final class LspServerTest extends TestCase
             ],
         ]);
 
-        $actions = $responses[0]['result'];
+        $actions = Json::array($responses, 0, 'result');
         self::assertCount(1, $actions);
-        self::assertSame('Apply all Rector fixes', $actions[0]['title']);
+        self::assertSame('Apply all Rector fixes', Json::at($actions, 0, 'title'));
     }
 
     public function testCodeActionAtAnInsertOnlyHunksOwnZeroWidthRangeOffersItsQuickfix(): void
@@ -1234,9 +1275,9 @@ final class LspServerTest extends TestCase
             ],
         ]);
 
-        $actions = $responses[0]['result'];
+        $actions = Json::array($responses, 0, 'result');
         self::assertCount(2, $actions);
-        self::assertSame('Apply Rector: NewlineAfterStatementRector', $actions[0]['title']);
+        self::assertSame('Apply Rector: NewlineAfterStatementRector', Json::at($actions, 0, 'title'));
     }
 
     public function testCodeActionOnAnUnrelatedLineNearAnInsertOnlyHunkIsNotOffered(): void
@@ -1263,9 +1304,9 @@ final class LspServerTest extends TestCase
             ],
         ]);
 
-        $actions = $responses[0]['result'];
+        $actions = Json::array($responses, 0, 'result');
         self::assertCount(1, $actions);
-        self::assertSame('Apply all Rector fixes', $actions[0]['title']);
+        self::assertSame('Apply all Rector fixes', Json::at($actions, 0, 'title'));
     }
 
     public function testAStaleResultIsDiscardedWhenTheVersionChangedMidCall(): void
@@ -1332,23 +1373,23 @@ final class LspServerTest extends TestCase
             'params' => ['textDocument' => ['uri' => 'file:///tmp/Sample.php', 'version' => 1]],
         ]);
 
-        $methods = array_map(static fn(array $frame): ?string => $frame['method'] ?? null, $responses);
+        $methods = array_map(static fn(array $frame): ?string => Json::optionalString($frame, 'method'), $responses);
 
         self::assertSame(
             ['window/workDoneProgress/create', '$/progress', '$/progress', 'textDocument/publishDiagnostics'],
             $methods,
         );
 
-        $token = $responses[0]['params']['token'];
-        self::assertSame($token, $responses[1]['params']['token']);
-        self::assertSame($token, $responses[2]['params']['token']);
+        $token = Json::at($responses, 0, 'params', 'token');
+        self::assertSame($token, Json::at($responses, 1, 'params', 'token'));
+        self::assertSame($token, Json::at($responses, 2, 'params', 'token'));
 
-        $begin = $responses[1]['params']['value'];
+        $begin = Json::array($responses, 1, 'params', 'value');
         self::assertSame('begin', $begin['kind']);
         self::assertSame('Rector: warming up', $begin['title']);
         self::assertSame('Rector: analysing Sample.php', $begin['message']);
 
-        $end = $responses[2]['params']['value'];
+        $end = Json::array($responses, 2, 'params', 'value');
         self::assertSame('end', $end['kind']);
     }
 
@@ -1379,7 +1420,7 @@ final class LspServerTest extends TestCase
             'params' => ['textDocument' => ['uri' => 'file://myserver/share/Sample.php', 'version' => 1]],
         ]);
 
-        self::assertSame('Rector: analysing Sample.php', $responses[1]['params']['value']['message']);
+        self::assertSame('Rector: analysing Sample.php', Json::at($responses, 1, 'params', 'value', 'message'));
     }
 
     /**
@@ -1469,7 +1510,7 @@ final class LspServerTest extends TestCase
 
         self::assertCount(1, $responses);
         self::assertArrayHasKey('error', $responses[0]);
-        self::assertSame(-32800, $responses[0]['error']['code']);
+        self::assertSame(-32800, Json::at($responses, 0, 'error', 'code'));
     }
 
     /**
@@ -1595,7 +1636,7 @@ final class LspServerTest extends TestCase
             'params' => ['textDocument' => ['uri' => 'file:///tmp/Sample.php', 'version' => 1]],
         ]);
 
-        $methods = array_map(static fn(array $frame): ?string => $frame['method'] ?? null, $responses);
+        $methods = array_map(static fn(array $frame): ?string => Json::optionalString($frame, 'method'), $responses);
 
         self::assertSame(
             ['window/workDoneProgress/create', 'textDocument/publishDiagnostics'],
@@ -1627,7 +1668,7 @@ final class LspServerTest extends TestCase
             'params' => ['textDocument' => ['uri' => 'file:///tmp/Sample.php', 'version' => 1]],
         ]);
 
-        $methods = array_map(static fn(array $frame): ?string => $frame['method'] ?? null, $responses);
+        $methods = array_map(static fn(array $frame): ?string => Json::optionalString($frame, 'method'), $responses);
 
         self::assertSame(
             ['window/workDoneProgress/create', '$/progress', '$/progress', 'textDocument/publishDiagnostics'],
@@ -1666,7 +1707,7 @@ final class LspServerTest extends TestCase
             'params' => ['textDocument' => ['uri' => 'file:///tmp/Sample.php', 'version' => 1]],
         ]);
 
-        $methods = array_map(static fn(array $frame): ?string => $frame['method'] ?? null, $responses);
+        $methods = array_map(static fn(array $frame): ?string => Json::optionalString($frame, 'method'), $responses);
 
         self::assertSame(
             ['window/workDoneProgress/create', 'textDocument/publishDiagnostics'],
@@ -1724,7 +1765,7 @@ final class LspServerTest extends TestCase
             'params' => ['textDocument' => ['uri' => 'file:///tmp/Sample.php', 'version' => 1]],
         ]);
 
-        $methods = array_map(static fn(array $frame): ?string => $frame['method'] ?? null, $responses);
+        $methods = array_map(static fn(array $frame): ?string => Json::optionalString($frame, 'method'), $responses);
 
         self::assertSame(
             ['window/workDoneProgress/create', 'textDocument/publishDiagnostics'],
@@ -1779,7 +1820,7 @@ final class LspServerTest extends TestCase
             'params' => ['textDocument' => ['uri' => 'file:///tmp/Sample.php', 'version' => 1]],
         ]);
 
-        $methods = array_map(static fn(array $frame): ?string => $frame['method'] ?? null, $responses);
+        $methods = array_map(static fn(array $frame): ?string => Json::optionalString($frame, 'method'), $responses);
 
         self::assertSame(
             ['window/workDoneProgress/create', '$/progress', '$/progress', 'textDocument/publishDiagnostics'],
@@ -1848,7 +1889,7 @@ final class LspServerTest extends TestCase
             'params' => ['textDocument' => ['uri' => 'file:///tmp/Sample.php', 'version' => 1]],
         ]);
 
-        $methods = array_map(static fn(array $frame): ?string => $frame['method'] ?? null, $responses);
+        $methods = array_map(static fn(array $frame): ?string => Json::optionalString($frame, 'method'), $responses);
 
         self::assertSame(
             ['window/workDoneProgress/create', 'textDocument/publishDiagnostics'],
@@ -1897,7 +1938,7 @@ final class LspServerTest extends TestCase
             'params' => ['textDocument' => ['uri' => 'file:///tmp/Sample.php', 'version' => 1]],
         ]);
 
-        $methods = array_map(static fn(array $frame): ?string => $frame['method'] ?? null, $responses);
+        $methods = array_map(static fn(array $frame): ?string => Json::optionalString($frame, 'method'), $responses);
 
         self::assertSame(
             ['window/workDoneProgress/create', '$/progress', '$/progress', 'textDocument/publishDiagnostics'],
@@ -2017,7 +2058,7 @@ final class LspServerTest extends TestCase
         self::assertArrayNotHasKey('error', $result);
 
         $uris = array_column(
-            array_column($applyEdit['params']['edit']['documentChanges'], 'textDocument'),
+            array_column(Json::array($applyEdit, 'params', 'edit', 'documentChanges'), 'textDocument'),
             'uri',
         );
         sort($uris);
@@ -2052,8 +2093,8 @@ final class LspServerTest extends TestCase
         }
 
         self::assertNotNull($applyEdit);
-        self::assertArrayHasKey('file:///proj/A.php', $applyEdit['params']['edit']['changes']);
-        self::assertArrayNotHasKey('documentChanges', $applyEdit['params']['edit']);
+        self::assertArrayHasKey('file:///proj/A.php', Json::array($applyEdit, 'params', 'edit', 'changes'));
+        self::assertArrayNotHasKey('documentChanges', Json::array($applyEdit, 'params', 'edit'));
     }
 
     /**
@@ -2074,7 +2115,7 @@ final class LspServerTest extends TestCase
             'params' => ['command' => 'rector-warm.fixWorkspace'],
         ]);
 
-        $methods = array_map(static fn(array $frame): ?string => $frame['method'] ?? null, $responses);
+        $methods = array_map(static fn(array $frame): ?string => Json::optionalString($frame, 'method'), $responses);
         self::assertNotContains('workspace/applyEdit', $methods);
         $lastKey = array_key_last($responses);
         if ($lastKey === null) {
@@ -2115,7 +2156,7 @@ final class LspServerTest extends TestCase
         self::assertArrayHasKey('error', $responses[0]);
         self::assertStringContainsString(
             'outside the configured working directory',
-            $responses[0]['error']['message'],
+            Json::string($responses, 0, 'error', 'message'),
         );
     }
 
@@ -2159,13 +2200,13 @@ final class LspServerTest extends TestCase
         self::assertNotNull($applyEdit, 'the other file must still be fixed, not refused wholesale');
         self::assertSame(
             ['file:///proj/A.php'],
-            array_column(array_column($applyEdit['params']['edit']['documentChanges'], 'textDocument'), 'uri'),
+            array_column(array_column(Json::array($applyEdit, 'params', 'edit', 'documentChanges'), 'textDocument'), 'uri'),
         );
 
         self::assertNotNull($showMessage, 'the failing file must be named in a window/showMessage warning');
-        self::assertSame(2, $showMessage['params']['type'], 'window/showMessage type 2 is Warning');
-        self::assertStringContainsString('/proj/Bad.php', $showMessage['params']['message']);
-        self::assertStringContainsString('Syntax error, unexpected token', $showMessage['params']['message']);
+        self::assertSame(2, Json::at($showMessage, 'params', 'type'), 'window/showMessage type 2 is Warning');
+        self::assertStringContainsString('/proj/Bad.php', Json::string($showMessage, 'params', 'message'));
+        self::assertStringContainsString('Syntax error, unexpected token', Json::string($showMessage, 'params', 'message'));
     }
 
     /**
@@ -2187,7 +2228,7 @@ final class LspServerTest extends TestCase
             'params' => ['command' => 'rector-warm.fixWorkspace'],
         ]);
 
-        $methods = array_map(static fn(array $frame): ?string => $frame['method'] ?? null, $responses);
+        $methods = array_map(static fn(array $frame): ?string => Json::optionalString($frame, 'method'), $responses);
         self::assertNotContains('window/showMessage', $methods);
     }
 
@@ -2217,7 +2258,7 @@ final class LspServerTest extends TestCase
         $tokens = [];
         foreach ($responses as $frame) {
             if (($frame['method'] ?? null) === '$/progress' || ($frame['method'] ?? null) === 'window/workDoneProgress/create') {
-                $tokens[] = $frame['params']['token'];
+                $tokens[] = Json::at($frame, 'params', 'token');
             }
         }
 
@@ -2246,7 +2287,7 @@ final class LspServerTest extends TestCase
             'params' => ['command' => 'rector-warm.fixWorkspace'],
         ]);
 
-        $methods = array_map(static fn(array $frame): ?string => $frame['method'] ?? null, $responses);
+        $methods = array_map(static fn(array $frame): ?string => Json::optionalString($frame, 'method'), $responses);
         self::assertNotContains('$/progress', $methods);
         self::assertNotContains('window/workDoneProgress/create', $methods);
     }
@@ -2354,7 +2395,7 @@ final class LspServerTest extends TestCase
         self::assertNotNull($applyEdit, 'a file that is open but not dirty is not at risk and must still be fixed');
         self::assertSame(
             ['file:///proj/A.php'],
-            array_column(array_column($applyEdit['params']['edit']['documentChanges'], 'textDocument'), 'uri'),
+            array_column(array_column(Json::array($applyEdit, 'params', 'edit', 'documentChanges'), 'textDocument'), 'uri'),
         );
         self::assertNotNull($result);
         self::assertNull($result['result']);
@@ -2410,7 +2451,7 @@ final class LspServerTest extends TestCase
         self::assertNotNull($applyEdit);
         self::assertSame(
             ['file:///proj/B.php'],
-            array_column(array_column($applyEdit['params']['edit']['documentChanges'], 'textDocument'), 'uri'),
+            array_column(array_column(Json::array($applyEdit, 'params', 'edit', 'documentChanges'), 'textDocument'), 'uri'),
         );
         self::assertNotNull($result);
         self::assertSame(['skippedDirtyBuffers' => ['file:///proj/A.php']], $result['result']);
@@ -2579,7 +2620,7 @@ final class LspServerTest extends TestCase
             . 'only a distinct, differently-cased file does',
         );
         $uris = array_column(
-            array_column($applyEdit['params']['edit']['documentChanges'], 'textDocument'),
+            array_column(Json::array($applyEdit, 'params', 'edit', 'documentChanges'), 'textDocument'),
             'uri',
         );
         self::assertSame(['file://' . $upper], $uris);
@@ -2766,7 +2807,7 @@ final class LspServerTest extends TestCase
 
         self::assertNotNull($applyEdit, 'the file has no dirty buffer -- its fix must still be sent');
         $uris = array_column(
-            array_column($applyEdit['params']['edit']['documentChanges'], 'textDocument'),
+            array_column(Json::array($applyEdit, 'params', 'edit', 'documentChanges'), 'textDocument'),
             'uri',
         );
         self::assertSame([self::filePathToTestUri($target)], $uris);
@@ -2899,7 +2940,7 @@ final class LspServerTest extends TestCase
 
         self::assertNotNull($applyEdit, 'the file has no dirty buffer -- its fix must still be sent');
         $uris = array_column(
-            array_column($applyEdit['params']['edit']['documentChanges'], 'textDocument'),
+            array_column(Json::array($applyEdit, 'params', 'edit', 'documentChanges'), 'textDocument'),
             'uri',
         );
         self::assertSame([self::filePathToTestUri($dir) . '/has%20space.php'], $uris);
@@ -3005,7 +3046,7 @@ final class LspServerTest extends TestCase
             'params' => ['processId' => null, 'rootUri' => null],
         ]);
 
-        self::assertArrayNotHasKey('executeCommandProvider', $responses[0]['result']['capabilities']);
+        self::assertArrayNotHasKey('executeCommandProvider', Json::array($responses, 0, 'result', 'capabilities'));
 
         // Positive control: workspace.applyEdit declared explicitly still
         // works normally, proving the no-capabilities case above is really
@@ -3020,7 +3061,7 @@ final class LspServerTest extends TestCase
             'method' => 'initialize',
             'params' => ['capabilities' => self::APPLY_EDIT_ONLY],
         ]);
-        self::assertArrayHasKey('executeCommandProvider', $withResponses[0]['result']['capabilities']);
+        self::assertArrayHasKey('executeCommandProvider', Json::array($withResponses, 0, 'result', 'capabilities'));
     }
 
     /**
@@ -3083,7 +3124,7 @@ final class LspServerTest extends TestCase
             'params' => ['textDocument' => ['uri' => 'file:///tmp/Sample.php', 'version' => 1]],
         ]);
 
-        $methods = array_map(static fn(array $frame): ?string => $frame['method'] ?? null, $responses);
+        $methods = array_map(static fn(array $frame): ?string => Json::optionalString($frame, 'method'), $responses);
 
         self::assertSame(
             ['window/workDoneProgress/create', 'textDocument/publishDiagnostics'],
@@ -3201,8 +3242,8 @@ final class LspServerTest extends TestCase
         self::assertCount(1, $responses);
         self::assertSame(12, $responses[0]['id']);
         self::assertArrayHasKey('error', $responses[0]);
-        self::assertSame(-32803, $responses[0]['error']['code']);
-        self::assertStringContainsString('no workspace-fix source configured', $responses[0]['error']['message']);
+        self::assertSame(-32803, Json::at($responses, 0, 'error', 'code'));
+        self::assertStringContainsString('no workspace-fix source configured', Json::string($responses, 0, 'error', 'message'));
     }
 
     /**
@@ -3234,8 +3275,8 @@ final class LspServerTest extends TestCase
             ],
         ]);
 
-        $actions = $responses[0]['result'];
+        $actions = Json::array($responses, 0, 'result');
         self::assertCount(2, $actions);
-        self::assertSame('Apply Rector: SimplifyIfReturnBoolRector', $actions[0]['title']);
+        self::assertSame('Apply Rector: SimplifyIfReturnBoolRector', Json::at($actions, 0, 'title'));
     }
 }

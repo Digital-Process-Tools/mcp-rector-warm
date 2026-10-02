@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Dpt\McpRectorWarm\Tests\Unit\Lsp;
 
+use Dpt\McpRectorWarm\Tests\Support\Json;
 use Dpt\McpRectorWarm\Lsp\BufferDiagnosticsSource;
 use Dpt\McpRectorWarm\Lsp\LspLoop;
 use Dpt\McpRectorWarm\Lsp\LspServer;
@@ -78,7 +79,7 @@ final class LspLoopTest extends TestCase
 
     /**
      * @param resource $stream
-     * @return list<array<string, mixed>>
+     * @return list<array<mixed>>
      */
     private static function framesIn($stream): array
     {
@@ -87,7 +88,9 @@ final class LspLoopTest extends TestCase
         $frames = [];
         while (preg_match('/^Content-Length: (\d+)\r\n\r\n/', $raw, $m) === 1) {
             $start = strlen($m[0]);
-            $frames[] = json_decode(substr($raw, $start, (int) $m[1]), true);
+            $frame = json_decode(substr($raw, $start, (int) $m[1]), true);
+            self::assertIsArray($frame);
+            $frames[] = $frame;
             $raw = substr($raw, $start + (int) $m[1]);
         }
 
@@ -120,7 +123,7 @@ final class LspLoopTest extends TestCase
         self::assertTrue($transport->waitForInput(0.0));
         $second = $transport->read();
         self::assertNotNull($second, 'the second already-buffered frame must still be readable');
-        self::assertSame(2, $second['params']['textDocument']['version']);
+        self::assertSame(2, Json::at($second, 'params', 'textDocument', 'version'));
         self::assertFalse($transport->waitForInput(0.0));
         fclose($client);
     }
@@ -187,8 +190,8 @@ final class LspLoopTest extends TestCase
             static fn(array $f): bool => ($f['method'] ?? null) === 'textDocument/publishDiagnostics',
         ));
         self::assertCount(1, $published);
-        self::assertSame(2, $published[0]['params']['version']);
-        self::assertSame([], $published[0]['params']['diagnostics']);
+        self::assertSame(2, Json::at($published, 0, 'params', 'version'));
+        self::assertSame([], Json::at($published, 0, 'params', 'diagnostics'));
     }
 
     public function testAnUninterruptedChangeIsPublishedByTheLoop(): void
@@ -223,8 +226,8 @@ final class LspLoopTest extends TestCase
 
         $frames = self::framesIn($out);
         self::assertCount(1, $frames);
-        self::assertSame(1, $frames[0]['params']['version']);
-        self::assertCount(1, $frames[0]['params']['diagnostics']);
+        self::assertSame(1, Json::at($frames, 0, 'params', 'version'));
+        self::assertCount(1, Json::array($frames, 0, 'params', 'diagnostics'));
     }
 
     public function testShutdownThenExitStillExitsZero(): void

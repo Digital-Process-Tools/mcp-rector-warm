@@ -73,6 +73,61 @@ final class RectorDiagnosticsSourceTest extends TestCase
         self::assertSame([], ($result['errors'] ?? []));
     }
 
+    /**
+     * #213: a `file_diffs` entry whose fields have the wrong type used to
+     * reach RectorDiffParser::buildFixes() as-is -- a TypeError for a
+     * non-string `diff`, which ended the LSP loop. It is now reported as an
+     * error diagnostic. The positive control is
+     * testExtractsAReportWithTrailingNoiseAfterIt (a well-formed entry still
+     * yields its fix).
+     */
+    public function testAMalformedFileDiffsEntryBecomesAnErrorInsteadOfACrash(): void
+    {
+        $output = '{"totals":{"changed_files":1,"errors":0},"file_diffs":[{"file":"Sample.php","diff":42,"applied_rectors":[],"changes":[]}]}';
+
+        $result = $this->fakeSource($output)->diagnose($this->workDir . '/Sample.php');
+
+        self::assertSame([], $result['fixes']);
+        self::assertSame(
+            [['message' => 'rector_process produced a malformed report: "diff" is int, expected a string', 'line' => 0]],
+            $result['errors'] ?? null,
+        );
+    }
+
+    public function testAMalformedChangesLineBecomesAnErrorInsteadOfAMisattributedFix(): void
+    {
+        $output = '{"totals":{"changed_files":1,"errors":0},"file_diffs":[{"file":"Sample.php",'
+            . '"diff":"--- Original\n+++ New\n@@ -1,1 +1,1 @@\n-old\n+new\n",'
+            . '"applied_rectors":["RectorA"],"changes":[{"rector":"RectorA","line":"1"}]}]}';
+
+        $result = $this->fakeSource($output)->diagnose($this->workDir . '/Sample.php');
+
+        self::assertSame([], $result['fixes']);
+        self::assertSame(
+            [['message' => 'rector_process produced a malformed report: "changes[].line" is string, expected an int', 'line' => 0]],
+            $result['errors'] ?? null,
+        );
+    }
+
+    public function testDiagnoseWorkspaceReportsAMalformedEntryAndKeepsTheWellFormedOne(): void
+    {
+        $output = '{"totals":{"changed_files":2,"errors":0},"file_diffs":['
+            . '{"file":"A.php","diff":"--- Original\n+++ New\n@@ -1,1 +1,1 @@\n-old\n+new\n",'
+            . '"applied_rectors":["RectorA"],"changes":[]},'
+            . '{"file":"B.php","diff":"--- Original\n+++ New\n@@ -1,1 +1,1 @@\n-old\n+new\n",'
+            . '"applied_rectors":"RectorB","changes":[]}'
+            . ']}';
+
+        $result = $this->fakeSource($output)->diagnoseWorkspace($this->workDir);
+
+        self::assertSame([$this->workDir . DIRECTORY_SEPARATOR . 'A.php'], array_keys($result['files']));
+        self::assertSame([[
+            'message' => 'rector_process produced a malformed report: "applied_rectors" is string, expected a list',
+            'line' => 0,
+            'file' => $this->workDir . DIRECTORY_SEPARATOR . 'B.php',
+        ]], $result['errors']);
+    }
+
     public function testASyntaxErrorProducesAnErrorDiagnosticInsteadOfSilentlyClearing(): void
     {
         // #90 must-fire: paired with testExtractsAReportWithTrailingNoiseAfterIt

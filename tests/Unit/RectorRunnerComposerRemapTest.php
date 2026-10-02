@@ -132,6 +132,7 @@ final class RectorRunnerComposerRemapTest extends TestCase
         foreach (ClassLoader::getRegisteredLoaders() as $loader) {
             $property = new \ReflectionProperty($loader, 'classMap');
             $map = $property->getValue($loader);
+            self::assertIsArray($map);
             if (isset($map[$class])) {
                 unset($map[$class]);
                 $property->setValue($loader, $map);

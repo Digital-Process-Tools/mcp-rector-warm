@@ -24,8 +24,8 @@ final class RectorRunnerBootstrapRaceTest extends TestCase
 {
     private ?string $tmp = null;
     private string|false $previousCwd = false;
-    /** @var list<string> */
-    private array $previousArgv = [];
+    /** $_SERVER['argv'] exactly as found, restored verbatim in tearDown() */
+    private mixed $previousArgv = null;
     private string|false $previousMode = false;
 
     protected function setUp(): void
@@ -153,6 +153,7 @@ final class RectorRunnerBootstrapRaceTest extends TestCase
             \RecursiveIteratorIterator::CHILD_FIRST,
         );
         foreach ($items as $item) {
+            self::assertInstanceOf(\SplFileInfo::class, $item);
             $item->isDir() ? @rmdir($item->getPathname()) : @unlink($item->getPathname());
         }
         @rmdir($dir);

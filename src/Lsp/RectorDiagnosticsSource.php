@@ -84,7 +84,7 @@ final readonly class RectorDiagnosticsSource implements BufferDiagnosticsSource,
             return ['files' => [], 'errors' => [['message' => $message, 'line' => 0]]];
         }
 
-        $report = self::extractReport($result['output'] ?? '');
+        $report = self::extractReport(self::output($result));
         if ($report === null) {
             return ['files' => [], 'errors' => [[
                 'message' => 'rector_process succeeded but produced no parseable report.',
@@ -94,6 +94,11 @@ final readonly class RectorDiagnosticsSource implements BufferDiagnosticsSource,
 
         $errors = self::buildErrors($report['errors'] ?? []);
         $fileDiffs = $report['file_diffs'] ?? [];
+        if (!is_array($fileDiffs)) {
+            $errors[] = self::malformedReport(new \UnexpectedValueException('"file_diffs" is not a list'));
+
+            return ['files' => [], 'errors' => $errors];
+        }
 
         $files = [];
         foreach ($fileDiffs as $entry) {
@@ -106,11 +111,13 @@ final readonly class RectorDiagnosticsSource implements BufferDiagnosticsSource,
                 continue;
             }
 
-            $fixes = RectorDiffParser::buildFixes(
-                $entry['diff'] ?? '',
-                $entry['applied_rectors'] ?? [],
-                $entry['changes'] ?? [],
-            );
+            try {
+                $fixes = self::fixesFor($entry);
+            } catch (\UnexpectedValueException $e) {
+                $errors[] = self::malformedReport($e) + ['file' => self::resolveAbsolutePath($file, $rootPath)];
+
+                continue;
+            }
             if ($fixes !== []) {
                 $files[self::resolveAbsolutePath($file, $rootPath)] = $fixes;
             }
@@ -174,7 +181,7 @@ final readonly class RectorDiagnosticsSource implements BufferDiagnosticsSource,
             return ['fixes' => [], 'errors' => [['message' => $message, 'line' => 0]]];
         }
 
-        $report = self::extractReport($result['output'] ?? '');
+        $report = self::extractReport(self::output($result));
         if ($report === null) {
             // Self-review finding on #90 (independent auditor pass): a
             // successful call (no CallToolResult refusal) whose output never
@@ -195,16 +202,107 @@ final readonly class RectorDiagnosticsSource implements BufferDiagnosticsSource,
             return ['fixes' => [], 'errors' => $errors];
         }
 
-        $entry = $fileDiffs[0];
+        try {
+            $entry = is_array($fileDiffs) ? ($fileDiffs[0] ?? null) : null;
+            if (!is_array($entry)) {
+                throw new \UnexpectedValueException('"file_diffs" has no entry 0 that is an object');
+            }
 
-        return [
-            'fixes' => RectorDiffParser::buildFixes(
-                $entry['diff'] ?? '',
-                $entry['applied_rectors'] ?? [],
-                $entry['changes'] ?? [],
-            ),
-            'errors' => $errors,
-        ];
+            return ['fixes' => self::fixesFor($entry), 'errors' => $errors];
+        } catch (\UnexpectedValueException $e) {
+            // #213: a report whose shape is not Rector's own is reported, not
+            // guessed at -- the same #90 rule as a missing report above.
+            $errors[] = self::malformedReport($e);
+
+            return ['fixes' => [], 'errors' => $errors];
+        }
+    }
+
+    /**
+     * The tool result's `output` text; a non-string one is treated like no
+     * output at all, which extractReport() turns into the #90 "no parseable
+     * report" error rather than a silent clean result.
+     *
+     * @param array<string, mixed> $result
+     */
+    private static function output(array $result): string
+    {
+        $output = $result['output'] ?? '';
+
+        return is_string($output) ? $output : '';
+    }
+
+    /** @return array{message: string, line: int} */
+    private static function malformedReport(\UnexpectedValueException $e): array
+    {
+        return ['message' => 'rector_process produced a malformed report: ' . $e->getMessage(), 'line' => 0];
+    }
+
+    /**
+     * One `file_diffs` entry's fixes, its three fields narrowed to what
+     * RectorDiffParser::buildFixes() takes. Absent fields read as empty,
+     * exactly as before (#213); a field of the wrong type throws instead of
+     * reaching buildFixes(), where it would have been a TypeError (diff,
+     * applied_rectors) or silently mis-attributed (a changes entry).
+     *
+     * @param array<mixed> $entry
+     * @return list<array{range: array{start: array{line:int,character:int}, end: array{line:int,character:int}}, newText: string, rectors: list<string>}>
+     * @throws \UnexpectedValueException
+     */
+    private static function fixesFor(array $entry): array
+    {
+        $diff = $entry['diff'] ?? '';
+        if (!is_string($diff)) {
+            throw new \UnexpectedValueException(sprintf('"diff" is %s, expected a string', get_debug_type($diff)));
+        }
+
+        $appliedRectors = [];
+        foreach (self::listField($entry, 'applied_rectors') as $rector) {
+            if (!is_string($rector)) {
+                throw new \UnexpectedValueException(sprintf('"applied_rectors" holds %s, expected strings', get_debug_type($rector)));
+            }
+            $appliedRectors[] = $rector;
+        }
+
+        $changes = [];
+        foreach (self::listField($entry, 'changes') as $raw) {
+            if (!is_array($raw)) {
+                throw new \UnexpectedValueException(sprintf('"changes" holds %s, expected objects', get_debug_type($raw)));
+            }
+            $change = [];
+            $rector = $raw['rector'] ?? null;
+            if ($rector !== null) {
+                if (!is_string($rector)) {
+                    throw new \UnexpectedValueException(sprintf('"changes[].rector" is %s, expected a string', get_debug_type($rector)));
+                }
+                $change['rector'] = $rector;
+            }
+            $line = $raw['line'] ?? null;
+            if ($line !== null) {
+                if (!is_int($line)) {
+                    throw new \UnexpectedValueException(sprintf('"changes[].line" is %s, expected an int', get_debug_type($line)));
+                }
+                $change['line'] = $line;
+            }
+            $changes[] = $change;
+        }
+
+        return RectorDiffParser::buildFixes($diff, $appliedRectors, $changes);
+    }
+
+    /**
+     * @param array<mixed> $entry
+     * @return list<mixed>
+     * @throws \UnexpectedValueException
+     */
+    private static function listField(array $entry, string $key): array
+    {
+        $value = $entry[$key] ?? [];
+        if (!is_array($value)) {
+            throw new \UnexpectedValueException(sprintf('"%s" is %s, expected a list', $key, get_debug_type($value)));
+        }
+
+        return array_values($value);
     }
 
     /**

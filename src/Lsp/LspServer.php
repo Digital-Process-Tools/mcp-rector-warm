@@ -19,6 +19,10 @@ namespace Dpt\McpRectorWarm\Lsp;
  * still the document's latest. didOpen and didSave still diagnose from
  * disk; didSave and didClose drop the buffer.
  */
+/**
+ * @phpstan-type Fix array{range: array{start: array{line:int,character:int}, end: array{line:int,character:int}}, newText: string, rectors: list<string>}
+ * @phpstan-type DiagnosticsResult array{fixes: list<Fix>, errors?: list<array{message: string, line: int}>}
+ */
 final class LspServer
 {
     private bool $shuttingDown = false;
@@ -67,7 +71,7 @@ final class LspServer
     private array $pendingDeadlines = [];
 
     /**
-     * @var array<string, array{version: int|null, result: array<string, mixed>}>
+     * @var array<string, array{version: int|null, result: DiagnosticsResult}>
      *   #106: URI -> a computed buffer diagnosis not yet published
      */
     private array $readyResults = [];
@@ -250,7 +254,7 @@ final class LspServer
         }
 
         if ($method === 'textDocument/didOpen') {
-            return $this->diagnoseDocument(is_array($params) ? ($params['textDocument'] ?? []) : []);
+            return $this->diagnoseDocument(self::objectParam($params, 'textDocument'));
         }
 
         if ($method === 'textDocument/didChange') {
@@ -258,11 +262,11 @@ final class LspServer
         }
 
         if ($method === 'textDocument/didSave') {
-            return $this->diagnoseDocument(is_array($params) ? ($params['textDocument'] ?? []) : []);
+            return $this->diagnoseDocument(self::objectParam($params, 'textDocument'));
         }
 
         if ($method === 'textDocument/didClose') {
-            return $this->clearDocument(is_array($params) ? ($params['textDocument'] ?? []) : []);
+            return $this->clearDocument(self::objectParam($params, 'textDocument'));
         }
 
         if ($method === 'textDocument/codeAction') {
@@ -291,7 +295,7 @@ final class LspServer
         }
 
         if ($method === 'workspace/didChangeWatchedFiles') {
-            return $this->watchedFilesChanged(is_array($params) ? ($params['changes'] ?? []) : []);
+            return $this->watchedFilesChanged(self::objectParam($params, 'changes'));
         }
 
         if ($method === 'workspace/executeCommand') {
@@ -313,7 +317,7 @@ final class LspServer
         }
 
         if ($isRequest) {
-            return [$this->error($id, -32601, sprintf('Method not found: %s', (string) $method))];
+            return [$this->error($id, -32601, sprintf('Method not found: %s', self::describe($method)))];
         }
 
         return [];
@@ -512,7 +516,32 @@ final class LspServer
     /** #111: a stable string key for a JSON-RPC id, which may be an int or a string. */
     private static function idKey(mixed $id): string
     {
-        return (string) $id;
+        return self::describe($id);
+    }
+
+    /**
+     * A client-sent value as text: a scalar or null exactly as `(string)`
+     * casts it, anything else (an array/object a non-conforming client sent
+     * where the spec allows only a scalar) as its type name -- never a throw,
+     * since an exception out of handle() would end the whole server loop.
+     */
+    private static function describe(mixed $value): string
+    {
+        return \is_scalar($value) || $value === null ? (string) $value : \get_debug_type($value);
+    }
+
+    /**
+     * `$params[$key]` when $params is an object and that member is one too,
+     * [] otherwise -- the same "ignore what the spec does not allow" every
+     * other params read in handle() already does.
+     *
+     * @return array<mixed>
+     */
+    private static function objectParam(mixed $params, string $key): array
+    {
+        $value = \is_array($params) ? ($params[$key] ?? null) : null;
+
+        return \is_array($value) ? $value : [];
     }
 
     /**
@@ -557,14 +586,14 @@ final class LspServer
      * this (see LspServerTest's negative control), only the config files
      * registerConfigFileWatcher() asked to be told about.
      *
-     * @param list<array<string, mixed>> $changes
+     * @param array<mixed> $changes
      * @return list<array<string, mixed>>
      */
     private function watchedFilesChanged(array $changes): array
     {
         $isConfigChange = false;
         foreach ($changes as $change) {
-            $uri = $change['uri'] ?? null;
+            $uri = \is_array($change) ? ($change['uri'] ?? null) : null;
             if (is_string($uri) && self::isWatchedConfigFile($uri)) {
                 $isConfigChange = true;
                 break;
@@ -681,7 +710,10 @@ final class LspServer
             return [];
         }
 
-        $version = $textDocument['version'] ?? ($this->documentVersions[$uri] ?? 0);
+        // A non-int version breaks the spec; treat it as absent, the same
+        // way changeDocument() already does, rather than storing it.
+        $version = $textDocument['version'] ?? null;
+        $version = \is_int($version) ? $version : ($this->documentVersions[$uri] ?? 0);
         $this->documentVersions[$uri] = $version;
         if ($touchActivity) {
             $this->touchActivity($uri);
@@ -758,12 +790,12 @@ final class LspServer
      * remembers its fixes -- with the version they were computed for (#106),
      * so codeAction never offers them against a newer buffer.
      *
-     * @param array<string, mixed> $result
+     * @param DiagnosticsResult $result
      * @return array<string, mixed>
      */
     private function publishResult(string $uri, array $result, mixed $version, bool $withVersion): array
     {
-        $fixes = $result['fixes'] ?? [];
+        $fixes = $result['fixes'];
         $this->fixesByUri[$uri] = $fixes;
         $this->fixesVersions[$uri] = is_int($version) ? $version : null;
 
@@ -783,7 +815,7 @@ final class LspServer
         // still reach the editor as a diagnostic, at Error severity, rather
         // than being dropped on the floor the way it was before this fix.
         foreach (($result['errors'] ?? []) as $error) {
-            $line = max(0, (int) ($error['line'] ?? 0) - 1);
+            $line = max(0, $error['line'] - 1);
             $diagnostics[] = [
                 'range' => [
                     'start' => ['line' => $line, 'character' => 0],
@@ -791,7 +823,7 @@ final class LspServer
                 ],
                 'severity' => 1,
                 'source' => 'rector',
-                'message' => (string) ($error['message'] ?? 'Rector reported an error.'),
+                'message' => $error['message'],
             ];
         }
 

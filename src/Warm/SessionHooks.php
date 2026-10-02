@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Dpt\McpRectorWarm\Warm;
 
+use Dpt\McpRectorWarm\Support\Scalar;
 use PhpParser\Node;
 use PHPStan\BetterReflection\Identifier\Identifier;
 use PHPStan\BetterReflection\Identifier\IdentifierType;
@@ -231,7 +232,7 @@ final class SessionHooks implements SymbolResolver
         $caches = [
             SimpleParameterProvider::provideStringParameter(Option::CACHE_DIR, ''),
             SimpleParameterProvider::provideStringParameter(Option::CONTAINER_CACHE_DIRECTORY, ''),
-            (string) ($this->phpstan->hasParameter('tmpDir') ? $this->phpstan->getParameter('tmpDir') : ''),
+            $this->phpstanTmpDir(),
         ];
         $excluded = $vendors;
         foreach (self::existing($caches) as $cache) {
@@ -256,7 +257,7 @@ final class SessionHooks implements SymbolResolver
      */
     public function cacheDirectories(): array
     {
-        $tmpDir = (string) ($this->phpstan->hasParameter('tmpDir') ? $this->phpstan->getParameter('tmpDir') : '');
+        $tmpDir = $this->phpstanTmpDir();
 
         return self::existing([
             $tmpDir === '' ? '' : $tmpDir . '/cache/PHPStan',
@@ -265,13 +266,19 @@ final class SessionHooks implements SymbolResolver
         ]);
     }
 
+    /** PHPStan's tmpDir parameter, '' when the container does not define one. */
+    private function phpstanTmpDir(): string
+    {
+        return Scalar::toString($this->phpstan->hasParameter('tmpDir') ? $this->phpstan->getParameter('tmpDir') : '', 'PHPStan parameter "tmpDir"');
+    }
+
     /**
      * @return list<string>
      */
     public function fileExtensions(): array
     {
         $extensions = [...$this->arrayParameter('fileExtensions'), ...self::rectorArrayParameter(Option::FILE_EXTENSIONS)];
-        $extensions = \array_map(static fn(mixed $extension): string => \strtolower(\ltrim((string) $extension, '.')), $extensions);
+        $extensions = \array_map(static fn(mixed $extension): string => \strtolower(\ltrim(Scalar::toString($extension, 'file extension parameter entry'), '.')), $extensions);
 
         return \array_values(\array_unique(['php', ...$extensions]));
     }
@@ -313,8 +320,13 @@ final class SessionHooks implements SymbolResolver
 
     private function locate(SourceLocator $locator, string $kind, string $name): ?string
     {
-        $this->reflector ??= $this->phpstan->getService('betterReflectionReflector');
-        \assert($this->reflector !== null);
+        if ($this->reflector === null) {
+            $reflector = $this->phpstan->getService('betterReflectionReflector');
+            if (!$reflector instanceof Reflector) {
+                throw new \LogicException(\sprintf('PHPStan service "betterReflectionReflector" is %s, expected %s', \get_debug_type($reflector), Reflector::class));
+            }
+            $this->reflector = $reflector;
+        }
         $type = match ($kind) {
             self::FUNCTION => IdentifierType::IDENTIFIER_FUNCTION,
             self::CONSTANT => IdentifierType::IDENTIFIER_CONSTANT,

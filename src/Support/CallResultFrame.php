@@ -54,13 +54,14 @@ final readonly class CallResultFrame
 
     /**
      * Matches `isset($decoded['error']) ? (string) $decoded['error'] : null`
-     * exactly: a present-but-non-string error value is still cast to string,
-     * never rejected, and a present-but-null value reads as absent (isset()
+     * exactly: a present-but-non-string scalar error value is still cast to
+     * string, never rejected (an array/object one now throws -- see Scalar,
+     * #213 level 9), and a present-but-null value reads as absent (isset()
      * is false for null), same as every original call site.
      */
     public function error(): ?string
     {
-        return isset($this->fields['error']) ? (string) $this->fields['error'] : null;
+        return isset($this->fields['error']) ? Scalar::toString($this->fields['error'], 'call result frame "error"') : null;
     }
 
     /**

@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Dpt\McpRectorWarm\Tests\Unit;
 
+use Dpt\McpRectorWarm\Tests\Support\Json;
 use Dpt\McpRectorWarm\RectorTool;
 use Mcp\Schema\Result\CallToolResult;
 use PHPUnit\Framework\TestCase;
@@ -54,7 +55,7 @@ final class RectorToolContainmentTest extends TestCase
 
         self::assertSame(-1, $details['exit_code']);
         self::assertSame('SecurityError', $details['error_class'] ?? null);
-        self::assertStringContainsString('outside', $details['error'] ?? '');
+        self::assertStringContainsString('outside', Json::string($details, 'error'));
         // Crucial: ensure rector was NOT booted (would dirty the daemon).
         self::assertFalse($details['warm_boot']);
     }
