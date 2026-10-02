@@ -117,7 +117,8 @@ while (true) {
         // watchdog as a descendant of its own target and SIGSTOP it mid-kill,
         // deadlocking before it ever reaches the final SIGKILL (self-review
         // finding, reproduced empirically).
-        ProcessTree::killTree($workerPid, [\getmypid()]);
+        $selfPid = \getmypid();
+        ProcessTree::killTree($workerPid, $selfPid !== false ? [$selfPid] : []);
         exit(0);
     }
     sleep($pollSeconds);

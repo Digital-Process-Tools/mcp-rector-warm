@@ -54,14 +54,14 @@ final class LspServerTest extends TestCase
      * `initialize` advertises executeCommandProvider and
      * `workspace/executeCommand` has somewhere to go.
      *
-     * @param array<string, list<array<string, mixed>>> $files absolute path -> fixes
+     * @param array<string, list<array{range: array{start: array{line:int,character:int}, end: array{line:int,character:int}}, newText: string, rectors: list<string>}>> $files absolute path -> fixes
      * @param list<array{message: string, line: int, file?: string}> $errors
      */
     private static function fakeWorkspaceSource(array $files, array $errors = []): DiagnosticsSource
     {
         return new class ($files, $errors) implements DiagnosticsSource, WorkspaceDiagnosticsSource {
             /**
-             * @param array<string, list<array<string, mixed>>> $files
+             * @param array<string, list<array{range: array{start: array{line:int,character:int}, end: array{line:int,character:int}}, newText: string, rectors: list<string>}>> $files
              * @param list<array{message: string, line: int, file?: string}> $errors
              */
             public function __construct(private readonly array $files, private readonly array $errors) {}
@@ -86,12 +86,12 @@ final class LspServerTest extends TestCase
      * implements that interface. Without it, fixWorkspace's dirty-buffer
      * skip would have nothing to observe.
      *
-     * @param array<string, list<array<string, mixed>>> $files absolute path -> fixes
+     * @param array<string, list<array{range: array{start: array{line:int,character:int}, end: array{line:int,character:int}}, newText: string, rectors: list<string>}>> $files absolute path -> fixes
      */
     private static function fakeWorkspaceAndBufferSource(array $files): DiagnosticsSource
     {
         return new class ($files) implements DiagnosticsSource, WorkspaceDiagnosticsSource, BufferDiagnosticsSource {
-            /** @param array<string, list<array<string, mixed>>> $files */
+            /** @param array<string, list<array{range: array{start: array{line:int,character:int}, end: array{line:int,character:int}}, newText: string, rectors: list<string>}>> $files */
             public function __construct(private readonly array $files) {}
 
             public function diagnose(string $absolutePath): array
@@ -1283,13 +1283,14 @@ final class LspServerTest extends TestCase
         $racy = new class ($holder) implements DiagnosticsSource {
             private bool $raced = false;
 
+            /** @param object{server: ?LspServer} $holder */
             public function __construct(private readonly object $holder) {}
 
             public function diagnose(string $absolutePath): array
             {
                 if (!$this->raced) {
                     $this->raced = true;
-                    $this->holder->server->handle([
+                    $this->holder->server?->handle([
                         'jsonrpc' => '2.0',
                         'method' => 'textDocument/didSave',
                         'params' => ['textDocument' => ['uri' => 'file:///tmp/Sample.php', 'version' => 2]],
@@ -1518,24 +1519,26 @@ final class LspServerTest extends TestCase
      */
     public function testProgressCreateAndBeginAreWrittenToTheTransportBeforeDiagnoseRuns(): void
     {
-        $log = new class {
-            /** @var list<string> */
-            public array $entries = [];
+        /** @var list<string> */
+        $entries = [];
+        $addEntry = function (string $entry) use (&$entries): void {
+            $entries[] = $entry;
         };
 
-        $diagnostics = new class ($log) implements DiagnosticsSource {
-            public function __construct(private readonly object $log) {}
+        $diagnostics = new class ($addEntry) implements DiagnosticsSource {
+            /** @param \Closure(string): void $addEntry */
+            public function __construct(private readonly \Closure $addEntry) {}
 
             public function diagnose(string $absolutePath): array
             {
-                $this->log->entries[] = 'diagnose-called';
+                ($this->addEntry)('diagnose-called');
 
                 return ['fixes' => []];
             }
         };
 
-        $frameWriter = function (array $frame) use ($log): void {
-            $log->entries[] = 'wrote:' . ($frame['method'] ?? '?');
+        $frameWriter = function (array $frame) use ($addEntry): void {
+            $addEntry('wrote:' . ($frame['method'] ?? '?'));
         };
 
         $server = new LspServer('1.0.0', $diagnostics, frameWriter: $frameWriter);
@@ -1559,7 +1562,7 @@ final class LspServerTest extends TestCase
             'diagnose-called',
             'wrote:$/progress',
             'wrote:textDocument/publishDiagnostics',
-        ], $log->entries);
+        ], $entries);
     }
 
     /**
@@ -2073,8 +2076,13 @@ final class LspServerTest extends TestCase
 
         $methods = array_map(static fn(array $frame): ?string => $frame['method'] ?? null, $responses);
         self::assertNotContains('workspace/applyEdit', $methods);
-        self::assertSame(9, $responses[array_key_last($responses)]['id']);
-        self::assertArrayNotHasKey('error', $responses[array_key_last($responses)]);
+        $lastKey = array_key_last($responses);
+        if ($lastKey === null) {
+            self::fail('expected at least one response frame');
+        }
+        $lastResponse = $responses[$lastKey];
+        self::assertSame(9, $lastResponse['id']);
+        self::assertArrayNotHasKey('error', $lastResponse);
     }
 
     /**

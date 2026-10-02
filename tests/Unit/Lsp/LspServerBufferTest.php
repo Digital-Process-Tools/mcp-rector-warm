@@ -484,13 +484,15 @@ final class LspServerBufferTest extends TestCase
      */
     public function testRunDueDiagnosticsReportsColdBootProgressWithNoPrecedingDidOpen(): void
     {
-        $log = new class {
-            /** @var list<string> */
-            public array $entries = [];
+        /** @var list<string> */
+        $entries = [];
+        $addEntry = function (string $entry) use (&$entries): void {
+            $entries[] = $entry;
         };
 
-        $source = new class ($log) implements BufferDiagnosticsSource {
-            public function __construct(private readonly object $log) {}
+        $source = new class ($addEntry) implements BufferDiagnosticsSource {
+            /** @param \Closure(string): void $addEntry */
+            public function __construct(private readonly \Closure $addEntry) {}
 
             public function diagnose(string $absolutePath): array
             {
@@ -499,14 +501,14 @@ final class LspServerBufferTest extends TestCase
 
             public function diagnoseBuffer(string $absolutePath, string $content): array
             {
-                $this->log->entries[] = 'diagnose-called';
+                ($this->addEntry)('diagnose-called');
 
                 return ['fixes' => []];
             }
         };
 
-        $frameWriter = function (array $frame) use ($log): void {
-            $log->entries[] = 'wrote:' . ($frame['method'] ?? '?');
+        $frameWriter = function (array $frame) use ($addEntry): void {
+            $addEntry('wrote:' . ($frame['method'] ?? '?'));
         };
 
         $server = new LspServer('1.0.0', $source, frameWriter: $frameWriter);
@@ -529,6 +531,6 @@ final class LspServerBufferTest extends TestCase
             'wrote:$/progress',
             'diagnose-called',
             'wrote:$/progress',
-        ], $log->entries);
+        ], $entries);
     }
 }

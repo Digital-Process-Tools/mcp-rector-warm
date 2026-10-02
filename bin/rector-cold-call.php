@@ -73,7 +73,10 @@ if (isset($request['cwd']) && is_string($request['cwd']) && is_dir($request['cwd
     chdir($request['cwd']);
 }
 
-$callArgv = isset($request['call_argv']) && is_array($request['call_argv']) ? $request['call_argv'] : [];
+/** @var list<string> $callArgv */
+$callArgv = isset($request['call_argv']) && is_array($request['call_argv'])
+    ? array_values(array_filter($request['call_argv'], is_string(...)))
+    : [];
 
 $runner = new RectorRunner();
 try {

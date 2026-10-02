@@ -444,8 +444,12 @@ class RectorRunner implements RunnerInterface
      */
     private function callDeadlineNs(int $graceSeconds = 0): ?int
     {
+        // PHPStan infers float|int here because int arithmetic can overflow
+        // to float -- true only past ~292 years of nanoseconds, which no
+        // real --call-timeout value approaches; (int) narrows back without
+        // widening this method's own ?int contract.
         return $this->callTimeoutSeconds > 0
-            ? \hrtime(true) + ($this->callTimeoutSeconds + $graceSeconds) * 1_000_000_000
+            ? (int) (\hrtime(true) + ($this->callTimeoutSeconds + $graceSeconds) * 1_000_000_000)
             : null;
     }
 
@@ -687,7 +691,8 @@ class RectorRunner implements RunnerInterface
                     break;
                 }
                 $request = \json_decode($frame, true);
-                $argv = \is_array($request) && \is_array($request['argv'] ?? null) ? $request['argv'] : [];
+                /** @var list<string> $argv */
+                $argv = \is_array($request) && \is_array($request['argv'] ?? null) ? \array_values(\array_filter($request['argv'], \is_string(...))) : [];
                 $warmBoot = \is_array($request) && ($request['warm_boot'] ?? false) === true;
                 // Default true (analysis, deadline applies) when the field is
                 // somehow missing -- the safer of the two readings for an
@@ -1468,7 +1473,8 @@ class RectorRunner implements RunnerInterface
                     break;
                 }
                 $request = \json_decode($frame, true);
-                $argv = \is_array($request) && \is_array($request['argv'] ?? null) ? $request['argv'] : [];
+                /** @var list<string> $argv */
+                $argv = \is_array($request) && \is_array($request['argv'] ?? null) ? \array_values(\array_filter($request['argv'], \is_string(...))) : [];
                 $path = \is_array($request) ? (string) ($request['path'] ?? '') : '';
                 $warmBoot = \is_array($request) && ($request['warm_boot'] ?? false) === true;
                 $bufferCopy = \is_array($request) && ($request['buffer_copy'] ?? false) === true;
@@ -2231,7 +2237,10 @@ class RectorRunner implements RunnerInterface
                 // the call's own deadline.
                 \stream_set_timeout($connection, 1);
                 $expected = \pack('N', 32) . $this->procWorker['token'];
-                $helloDeadline = \hrtime(true) + 5_000_000_000;
+                // (int): same overflow-safety cast as callDeadlineNs() above --
+                // never reached in practice, kept so this stays int|null for
+                // readExactly()'s own contract.
+                $helloDeadline = (int) (\hrtime(true) + 5_000_000_000);
                 if ($deadlineNs !== null) {
                     $helloDeadline = \min($helloDeadline, $deadlineNs);
                 }
@@ -2241,6 +2250,10 @@ class RectorRunner implements RunnerInterface
                     $hello = null;
                 }
                 if ($hello !== null && \hash_equals($expected, $hello)) {
+                    // Re-asserted right at the write: an offset-write re-checks
+                    // against the property's full declared (nullable) type, so
+                    // the method-entry assert above does not carry forward.
+                    \assert($this->procWorker !== null);
                     $this->procWorker['socket'] = $connection;
                     \fclose($server);
                     $this->procWorker['server'] = null;
@@ -2273,6 +2286,7 @@ class RectorRunner implements RunnerInterface
             );
         }
 
+        \assert($this->procWorker !== null);
         $this->procWorker['ready'] = true;
         $this->configFile = \is_string($decoded['config_file'] ?? null) ? $decoded['config_file'] : null;
         $this->configFileHash = \is_string($decoded['config_file_hash'] ?? null) ? $decoded['config_file_hash'] : null;
@@ -2440,15 +2454,17 @@ class RectorRunner implements RunnerInterface
 
     private function reapRetiredProcWorkers(): void
     {
-        foreach ($this->retiredProcWorkers as $i => $retired) {
+        $remaining = [];
+        foreach ($this->retiredProcWorkers as $retired) {
             $status = \proc_get_status($retired['proc']);
             if (!$status['running']) {
                 \proc_close($retired['proc']);
                 @\unlink($retired['stderr']);
-                unset($this->retiredProcWorkers[$i]);
+                continue;
             }
+            $remaining[] = $retired;
         }
-        $this->retiredProcWorkers = \array_values($this->retiredProcWorkers);
+        $this->retiredProcWorkers = $remaining;
     }
 
     /**
@@ -2580,7 +2596,8 @@ class RectorRunner implements RunnerInterface
             return 0;
         }
         $request = \json_decode($frame, true);
-        $argv = \is_array($request) && \is_array($request['argv'] ?? null) ? $request['argv'] : [];
+        /** @var list<string> $argv */
+        $argv = \is_array($request) && \is_array($request['argv'] ?? null) ? \array_values(\array_filter($request['argv'], \is_string(...))) : [];
         $warmBoot = \is_array($request) && ($request['warm_boot'] ?? false) === true;
         // #134: execute() below runs the real analysis synchronously, in this
         // process, with no fork and no tick point to hang a daemon-liveness poll
@@ -2780,7 +2797,11 @@ class RectorRunner implements RunnerInterface
     {
         $buffer = '';
         while (\strlen($buffer) < $length) {
-            $chunk = \fread($socket, $length - \strlen($buffer));
+            $remaining = $length - \strlen($buffer);
+            if ($remaining < 1) {
+                break;
+            }
+            $chunk = \fread($socket, $remaining);
             if ($chunk === false || $chunk === '') {
                 // Same distinction as forkAndExecute()'s wait loop (#32): a read
                 // timeout is not EOF. This channel is the persistent worker<->daemon
@@ -2849,7 +2870,7 @@ class RectorRunner implements RunnerInterface
         // the identical ConfigInitializer service would hit the same failure
         // a few lines further in, also uncaught.
         if (\class_exists(\Rector\Configuration\ConfigInitializer::class)) {
-            $configInitializer = $this->container->get(\Rector\Configuration\ConfigInitializer::class);
+            $configInitializer = self::callDynamic($this->container, 'get', [\Rector\Configuration\ConfigInitializer::class]);
             if (
                 \is_object($configInitializer)
                 && \method_exists($configInitializer, 'areSomeRectorsLoaded')
@@ -2903,7 +2924,7 @@ class RectorRunner implements RunnerInterface
         // leaking into our MCP stdio transport.
         ob_start();
         try {
-            $exit = $this->application->run($input, $output);
+            $exit = self::callDynamic($this->application, 'run', [$input, $output]);
         } finally {
             $echoed = ob_get_clean();
             if ($origArgv0 !== null) {
@@ -2916,7 +2937,7 @@ class RectorRunner implements RunnerInterface
             }
         }
 
-        $combined = $output->fetch();
+        $combined = (string) self::callDynamic($output, 'fetch');
         if (is_string($echoed) && $echoed !== '') {
             $combined = $combined === '' ? $echoed : $combined . "\n" . $echoed;
         }
@@ -2975,18 +2996,21 @@ class RectorRunner implements RunnerInterface
         \assert($this->container !== null);
 
         try {
-            $skipper = $this->container->get(\Rector\Skipper\Skipper\Skipper::class);
+            $skipper = self::callDynamic($this->container, 'get', [\Rector\Skipper\Skipper\Skipper::class]);
+            \assert(\is_object($skipper));
             $copyPaths = \array_values(\array_unique(\array_filter([$copyPath, \realpath($copyPath) ?: null])));
 
-            if ($skipper->shouldSkipFilePath($originalPath)) {
-                $pathsResolver = $this->container->get(\Rector\Skipper\SkipCriteriaResolver\SkippedPathsResolver::class);
-                self::overwriteResolved($pathsResolver, 'skippedPaths', \array_merge($pathsResolver->resolve(), $copyPaths));
+            if (self::callDynamic($skipper, 'shouldSkipFilePath', [$originalPath])) {
+                $pathsResolver = self::callDynamic($this->container, 'get', [\Rector\Skipper\SkipCriteriaResolver\SkippedPathsResolver::class]);
+                \assert(\is_object($pathsResolver));
+                self::overwriteResolved($pathsResolver, 'skippedPaths', \array_merge(self::callDynamic($pathsResolver, 'resolve'), $copyPaths));
 
                 return;
             }
 
-            $classResolver = $this->container->get(\Rector\Skipper\SkipCriteriaResolver\SkippedClassResolver::class);
-            $classes = $classResolver->resolve();
+            $classResolver = self::callDynamic($this->container, 'get', [\Rector\Skipper\SkipCriteriaResolver\SkippedClassResolver::class]);
+            \assert(\is_object($classResolver));
+            $classes = self::callDynamic($classResolver, 'resolve');
             $changed = false;
             foreach ($classes as $class => $files) {
                 if ($files === null) {
@@ -3179,7 +3203,32 @@ class RectorRunner implements RunnerInterface
             return $skipper->matchSkip($class, $path) !== null;
         }
 
-        return $skipper->shouldSkipElementAndFilePath($class, $path);
+        if (\method_exists($skipper, 'shouldSkipElementAndFilePath')) {
+            return $skipper->shouldSkipElementAndFilePath($class, $path);
+        }
+
+        throw new \RuntimeException(\sprintf(
+            '%s has neither matchSkip() nor shouldSkipElementAndFilePath() -- unsupported Skipper version.',
+            $skipper::class,
+        ));
+    }
+
+    /**
+     * Calls a method on an object PHPStan can only see as `object` -- one
+     * resolved from Rector's own container (whose service classes are not
+     * all statically known here) or instantiated via a dynamically
+     * resolved class-string ($appClass/$inputClass/$outputClass, possibly
+     * PHP-Scoper-prefixed in a packaged build). A direct `$x->method()`
+     * is correctly flagged method.notFound for a plain `object` type; a
+     * variable method-call is the honest way to tell PHPStan this call's
+     * real target is resolved at runtime, not a typo -- it does not
+     * suppress checking of any OTHER call in this file.
+     *
+     * @param array<mixed> $arguments
+     */
+    private static function callDynamic(object $object, string $method, array $arguments = []): mixed
+    {
+        return $object->$method(...$arguments);
     }
 
     /** @param list<string>|array<string, list<string>|null> $value */
@@ -3407,7 +3456,13 @@ class RectorRunner implements RunnerInterface
             return;
         }
         // file = .../rector/rector/src/Bootstrap/RectorConfigsResolver.php → 3 levels up = package root
-        $rectorPkgDir = dirname((new \ReflectionClass(RectorConfigsResolver::class))->getFileName(), 3);
+        $rectorConfigsResolverFile = (new \ReflectionClass(RectorConfigsResolver::class))->getFileName();
+        if ($rectorConfigsResolverFile === false) {
+            // Only possible for a built-in/internal class, which Rector's own
+            // RectorConfigsResolver (loaded from a real file on disk) never is.
+            throw new \RuntimeException(RectorConfigsResolver::class . ' has no source file -- cannot locate the Rector package directory.');
+        }
+        $rectorPkgDir = dirname($rectorConfigsResolverFile, 3);
         $this->preloadLikeCold($rectorPkgDir);
         $scoperAutoload = $rectorPkgDir . '/vendor/scoper-autoload.php';
         if (!is_file($scoperAutoload)) {

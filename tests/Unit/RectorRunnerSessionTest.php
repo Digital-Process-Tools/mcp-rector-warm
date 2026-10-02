@@ -52,7 +52,7 @@ final class RectorRunnerSessionTest extends TestCase
     /** @return list<string> */
     private function argv(string ...$tail): array
     {
-        return ['rector', 'process', '--output-format=json', '--debug', '--no-progress-bar', '--dry-run', ...$tail];
+        return array_values(['rector', 'process', '--output-format=json', '--debug', '--no-progress-bar', '--dry-run', ...$tail]);
     }
 
     public function testADryRunOnOneFileGoesToTheSession(): void

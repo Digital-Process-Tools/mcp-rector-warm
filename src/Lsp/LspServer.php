@@ -1047,7 +1047,7 @@ final class LspServer
     {
         $textDocument = is_array($params['textDocument'] ?? null) ? $params['textDocument'] : [];
         $uri = $textDocument['uri'] ?? null;
-        $range = is_array($params['range'] ?? null) ? $params['range'] : null;
+        $range = self::parseRange($params['range'] ?? null);
 
         if (!is_string($uri)) {
             return $this->result($id, []);
@@ -1369,6 +1369,33 @@ final class LspServer
     private static function fixLabel(array $rectors): string
     {
         return $rectors !== [] ? implode(', ', $rectors) : 'Rector fix';
+    }
+
+    /**
+     * Validates an LSP-client-supplied `range` param into the exact shape
+     * rangesOverlap() needs, or null when it is missing or malformed --
+     * client input, never trusted as already well-formed.
+     *
+     * @return array{start: array{line:int,character:int}, end: array{line:int,character:int}}|null
+     */
+    private static function parseRange(mixed $value): ?array
+    {
+        if (!is_array($value)) {
+            return null;
+        }
+        $start = $value['start'] ?? null;
+        $end = $value['end'] ?? null;
+        if (
+            !is_array($start) || !is_int($start['line'] ?? null) || !is_int($start['character'] ?? null)
+            || !is_array($end) || !is_int($end['line'] ?? null) || !is_int($end['character'] ?? null)
+        ) {
+            return null;
+        }
+
+        return [
+            'start' => ['line' => $start['line'], 'character' => $start['character']],
+            'end' => ['line' => $end['line'], 'character' => $end['character']],
+        ];
     }
 
     /**

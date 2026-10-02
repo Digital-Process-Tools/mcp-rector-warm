@@ -92,6 +92,7 @@ final class RectorRunnerNoSessionFrameTest extends TestCase
         $this->requirePcntl();
         [$tmp, $argv] = $this->zeroRuleProject();
         $previousCwd = \getcwd();
+        self::assertNotFalse($previousCwd);
         $previousArgv = $_SERVER['argv'] ?? ['rector'];
         $previousSessionEnv = \getenv(RectorRunner::SESSION_ENV);
         \putenv(RectorRunner::SESSION_ENV . '=1');
@@ -129,6 +130,7 @@ final class RectorRunnerNoSessionFrameTest extends TestCase
         $this->requirePcntl();
         [$tmp, $argv] = $this->zeroRuleProject();
         $previousCwd = \getcwd();
+        self::assertNotFalse($previousCwd);
         $previousArgv = $_SERVER['argv'] ?? ['rector'];
         $previousSessionEnv = \getenv(RectorRunner::SESSION_ENV);
         \putenv(RectorRunner::SESSION_ENV . '=1');
@@ -225,6 +227,7 @@ final class RectorRunnerNoSessionFrameTest extends TestCase
         $argv = ['rector', 'process', '--output-format=json', '--debug', '--no-progress-bar', '--dry-run', '--', $tmp . '/src/Sample.php'];
 
         $previousCwd = \getcwd();
+        self::assertNotFalse($previousCwd);
         $previousArgv = $_SERVER['argv'] ?? ['rector'];
         $previousSessionEnv = \getenv(RectorRunner::SESSION_ENV);
         \putenv(RectorRunner::SESSION_ENV . '=1');

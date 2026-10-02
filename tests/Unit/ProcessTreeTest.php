@@ -18,6 +18,14 @@ use PHPUnit\Framework\TestCase;
  */
 final class ProcessTreeTest extends TestCase
 {
+    private static function currentPid(): int
+    {
+        $pid = \getmypid();
+        self::assertNotFalse($pid, 'getmypid() unexpectedly failed');
+
+        return $pid;
+    }
+
     /**
      * Positive control for the test below: with `ps` fully available, a pid
      * this unlikely to exist must read as "no parent" AND the probe itself
@@ -58,7 +66,7 @@ final class ProcessTreeTest extends TestCase
 
         try {
             \putenv('PATH=' . \sys_get_temp_dir() . '/nonexistent-path-for-159-test');
-            $result = ProcessTree::parentOf(\getmypid());
+            $result = ProcessTree::parentOf(self::currentPid());
         } finally {
             \putenv($previousPath === false ? 'PATH' : 'PATH=' . $previousPath);
         }
@@ -105,7 +113,7 @@ final class ProcessTreeTest extends TestCase
      */
     public function testIsAliveIsTrueForTheCurrentProcess(): void
     {
-        self::assertTrue(ProcessTree::isAlive(\getmypid()));
+        self::assertTrue(ProcessTree::isAlive(self::currentPid()));
     }
 
     /**
@@ -149,7 +157,7 @@ final class ProcessTreeTest extends TestCase
             $status = \proc_get_status($child);
             $childPid = $status['pid'];
 
-            $descendants = ProcessTree::descendantsOf(\getmypid());
+            $descendants = ProcessTree::descendantsOf(self::currentPid());
 
             self::assertContains(
                 $childPid,

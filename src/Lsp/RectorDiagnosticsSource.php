@@ -154,7 +154,7 @@ final readonly class RectorDiagnosticsSource implements BufferDiagnosticsSource,
 
     /**
      * @param array<string, mixed>|CallToolResult $result
-     * @return array{fixes: list<array<string, mixed>>, errors: list<array{message: string, line: int}>}
+     * @return array{fixes: list<array{range: array{start: array{line:int,character:int}, end: array{line:int,character:int}}, newText: string, rectors: list<string>}>, errors: list<array{message: string, line: int}>}
      */
     private function interpret(array|CallToolResult $result, string $absolutePath): array
     {
