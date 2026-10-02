@@ -533,4 +533,31 @@ final class LspServerBufferTest extends TestCase
             'wrote:$/progress',
         ], $entries);
     }
+
+    /**
+     * #245 coverage: runDueDiagnostics() guards its whole body on the
+     * configured source actually being buffer-capable, clearing
+     * $pendingDeadlines (rather than leaving stale entries behind) and
+     * returning before touching anything else. A non-buffer source can
+     * never legitimately accumulate a pending deadline through the public
+     * surface (changeDocument() itself refuses to schedule one without a
+     * BufferDiagnosticsSource -- see LspServerTest::
+     * testDidChangeIsANoOpWithoutABufferCapableSource), so this test seeds
+     * the private state directly to pin the guard's own clearing effect
+     * rather than merely executing it as a no-op.
+     */
+    public function testRunDueDiagnosticsClearsPendingDeadlinesWhenTheSourceCannotDiagnoseBuffers(): void
+    {
+        $server = new LspServer('1.0.0');
+
+        $property = new \ReflectionProperty(LspServer::class, 'pendingDeadlines');
+        $property->setValue($server, [self::URI => 0.0]);
+
+        self::assertNotNull($server->nextDiagnosticsDeadline());
+
+        $server->runDueDiagnostics(microtime(true));
+
+        self::assertNull($server->nextDiagnosticsDeadline());
+        self::assertSame([], $server->takeReadyDiagnostics());
+    }
 }
