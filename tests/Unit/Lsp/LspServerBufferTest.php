@@ -551,7 +551,6 @@ final class LspServerBufferTest extends TestCase
         $server = new LspServer('1.0.0');
 
         $property = new \ReflectionProperty(LspServer::class, 'pendingDeadlines');
-        $property->setAccessible(true);
         $property->setValue($server, [self::URI => 0.0]);
 
         self::assertNotNull($server->nextDiagnosticsDeadline());
