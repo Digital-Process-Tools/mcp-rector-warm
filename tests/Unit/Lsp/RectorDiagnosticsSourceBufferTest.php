@@ -763,6 +763,7 @@ final class RectorDiagnosticsSourceBufferTest extends TestCase
         $tempDirectory = null;
         $failed = $this->source(
             fn(): string => '{"totals":{"changed_files":0,"errors":0}}',
+            /** @param resource $handle */
             function ($handle) use (&$tempDirectory): bool {
                 $meta = stream_get_meta_data($handle);
                 self::assertIsString($meta['uri'] ?? null);

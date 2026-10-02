@@ -2065,7 +2065,7 @@ class RectorRunner implements RunnerInterface
      * @param array<mixed>|false $iniAll
      * @return list<string>
      */
-    private static function collectIniOverrideArgsFrom($iniAll): array
+    private static function collectIniOverrideArgsFrom(array|false $iniAll): array
     {
         if ($iniAll === false) {
             // Fail open (still forward nothing): a worker that boots with no

@@ -1,3 +1,6 @@
+includes:
+    - vendor/tomasvotruba/type-coverage/config/extension.neon
+
 parameters:
     level: 10
     paths:
@@ -13,6 +16,11 @@ parameters:
         - tests/Fixtures/*
     # Quoted so the file also parses as YAML: the README badge reads `level` from it.
     tmpDir: '%currentWorkingDirectory%/.phpstan-cache'
+    type_coverage:
+        property: 100
+        param: 100
+        return: 100
+        declare: 100
     ignoreErrors:
         # #185: SessionHooks deliberately reaches into PHPStan's (and
         # BetterReflection's) internal, non-BC-covered API to reuse the exact
@@ -41,3 +49,54 @@ parameters:
         -
             identifier: phpstanApi.interface
             path: tests/Unit/Warm/SessionHooksTest.php
+        # #286: PHP has no native `resource` type, so a parameter or return value that
+        # carries a stream, socket, process or lock handle cannot be typed natively.
+        # Each one below carries a precise `@param resource` / `@return resource`
+        # (or `resource|null`) PHPDoc instead. The type-coverage extension skips a
+        # PHPDoc `resource` only on properties, not on params or returns, and has no
+        # per-type exception, so these are listed by identifier, by file and by exact
+        # count: one more untyped param or return in any of these files fails the run.
+        -
+            identifier: typeCoverage.paramTypeCoverage
+            path: src/Lsp/RectorDiagnosticsSource.php
+            count: 1
+        -
+            identifier: typeCoverage.paramTypeCoverage
+            path: src/Lsp/StdioLspTransport.php
+            count: 2
+        -
+            identifier: typeCoverage.paramTypeCoverage
+            path: src/RectorRunner.php
+            count: 10
+        -
+            identifier: typeCoverage.returnTypeCoverage
+            path: src/RectorRunner.php
+            count: 1
+        -
+            identifier: typeCoverage.returnTypeCoverage
+            path: src/Support/ProtocolStdoutIsolator.php
+            count: 1
+        -
+            identifier: typeCoverage.paramTypeCoverage
+            path: tests/Integration/LspServerStdioTest.php
+            count: 2
+        -
+            identifier: typeCoverage.paramTypeCoverage
+            path: tests/Integration/ServerStdioTest.php
+            count: 2
+        -
+            identifier: typeCoverage.paramTypeCoverage
+            path: tests/Unit/Lsp/LspLoopTest.php
+            count: 4
+        -
+            identifier: typeCoverage.returnTypeCoverage
+            path: tests/Unit/Lsp/LspLoopTest.php
+            count: 1
+        -
+            identifier: typeCoverage.paramTypeCoverage
+            path: tests/Unit/Lsp/RectorDiagnosticsSourceBufferTest.php
+            count: 1
+        -
+            identifier: typeCoverage.returnTypeCoverage
+            path: tests/Unit/StdioLspTransportTest.php
+            count: 2

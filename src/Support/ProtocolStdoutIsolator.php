@@ -214,8 +214,9 @@ final class ProtocolStdoutIsolator
     /**
      * The stream this process should write protocol bytes to: fd 3 if this IS
      * the re-exec'd isolated child, otherwise the real STDOUT unchanged.
+     *
+     * @return resource
      */
-    /** @return resource */
     public static function protocolStream()
     {
         if (self::isAlreadyIsolatedChild()) {

@@ -31,6 +31,7 @@
         "friendsofphp/php-cs-fixer": "^3.95",
         "phpstan/phpstan": "^2.2",
         "phpunit/phpcov": "^9.0",
-        "phpunit/phpunit": "^10"
+        "phpunit/phpunit": "^10",
+        "tomasvotruba/type-coverage": "^2.2"
     }
 }
