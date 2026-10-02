@@ -1,3 +1,7 @@
+tests/	assertion-failed-error-extends-runtimeexception.md
+tests/coverage/	coverage-data-is-arrays-not-ints.md
 src/RectorRunner.php	deadline-grace-gap.md
+(src/Support/ProcessTree\.php|tests/Unit/ProcessTreeTest\.php|tests/Unit/RectorRunnerProcessTreeKillTest\.php)	killtree-never-target-self-or-ancestor.md
+(src/RectorRunner\.php|bin/rector-cold-call\.php|bin/rector-warm-orphan-watchdog\.php)	phpstan-narrowing-fail-loudly.md
 src/RectorRunner.php	stdout-fd-surgery.md
 (\.github/workflows/tests\.yml|vendor/rector/rector)	verify-pr-claims-against-artifact.md
