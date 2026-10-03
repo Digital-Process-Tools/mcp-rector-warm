@@ -205,10 +205,23 @@ When the client declares `window.workDoneProgress`:
 
 </details>
 
+## Multi-root workspaces (#107)
+
+A client that sends `initialize`'s `workspaceFolders` (VS Code multi-root,
+Sublime Text, Zed -- every editor below except plain `--working-dir` usage)
+gets each document diagnosed against the nearest `rector.php`/`composer.json`
+ancestor of ITS OWN folder, not just the first folder the editor opened --
+the #94 bug this closes. `workspace/didChangeWorkspaceFolders` (adding or
+removing a folder after start) is handled too. **`--working-dir`, when
+passed on the command line, stays an unconditional override**: every
+document resolves to it regardless of `workspaceFolders`, so an editor
+config that hardcodes `--working-dir` (several below do, for a server that
+previously had no other way to learn its root) needs that flag dropped to
+actually get multi-root behaviour -- see the Sublime Text section.
+
 ## Out of scope
 
-`workspace/configuration` and multi-root workspaces, tracked in
-[#107](https://github.com/Digital-Process-Tools/mcp-rector-warm/issues/107).
+`workspace/configuration`.
 
 ## Editor setup
 
@@ -337,17 +350,22 @@ match the LSP package's documented client schema.
   "clients": {
     "rector-warm-lsp": {
       "enabled": true,
-      "command": ["rector-warm-lsp", "--working-dir=${folder}"],
+      "command": ["rector-warm-lsp"],
       "selector": "source.php"
     }
   }
 }
 ```
 
-`${folder}` is the window's *first* folder only (reasoned, from
-`window.extract_variables()`): in a multi-folder window the other folders'
-files are outside the working directory, and with no folder open the server
-gets an unusable `--working-dir`.
+No `--working-dir` here, deliberately: the LSP package sends
+`workspaceFolders` on `initialize`, and #107 (see above) resolves each
+document against its own folder from that -- the fix for the exact gap a
+`--working-dir=${folder}` command used to leave, since `${folder}` is the
+window's *first* folder only (reasoned, from `window.extract_variables()`):
+in a multi-folder window every other folder's files were outside the
+working directory and refused outright. Pin `--working-dir=/path/to/project`
+back on the command only when the server should ignore Sublime's own
+folders and always use one fixed project.
 
 ### PhpStorm / IntelliJ ([LSP4IJ](https://github.com/redhat-developer/lsp4ij) plugin)
 

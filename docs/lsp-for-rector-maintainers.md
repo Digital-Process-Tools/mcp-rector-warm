@@ -83,8 +83,27 @@ Editor setup for six clients (Neovim, Helix, Sublime Text, PhpStorm/LSP4IJ,
 plus the generic pattern) is in [Editor
 setup](lsp.md#editor-setup).
 
-Out of scope: `workspace/configuration` and multi-root workspaces (#107, one
-warm worker per `rector.php` root).
+- **Multi-root workspaces (#107).** `initialize`'s `workspaceFolders` (or the
+  `rootUri`/`rootPath` fallback an older client sends instead) and
+  `workspace/didChangeWorkspaceFolders` are both read. Each document is
+  diagnosed (`didOpen`/`didSave`/buffer diagnostics and code-action edits)
+  against the nearest ancestor directory holding a `rector.php` or
+  `composer.json` -- never the first folder the editor happened to open,
+  which is the exact #94 bug this closes (Sublime Text's `${folder}`
+  resolving only the first multi-root folder). Each resolved root gets its
+  own warm `RectorDiagnosticsSource`, started lazily and capped at
+  `RootedDiagnosticsSourcePool::DEFAULT_CAP` (4) with least-recently-used
+  eviction past that -- eviction needs no explicit shutdown of its own:
+  dropping the pool's last reference to a root's `RectorTool` is what lets
+  `RectorRunner::__destruct()` kill that root's forked worker.
+  `--working-dir`, when given, stays an unconditional override: every
+  document resolves to it regardless of any `workspaceFolders` the client
+  sends, exactly the single-root behaviour from before this. `workspace/
+  executeCommand`'s `rector-warm.fixWorkspace` is not yet root-aware --
+  still scoped to the server's single boot-time working directory --
+  tracked separately.
+
+Out of scope: `workspace/configuration`.
 
 ## How
 
