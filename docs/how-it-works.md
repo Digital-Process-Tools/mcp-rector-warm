@@ -53,6 +53,10 @@ What the session cannot see, and a cold run would: inputs that are not read thro
 
 **Declaring such inputs.** `MCP_RECTOR_WARM_SESSION_WATCH` lists files or directories, relative to the project (or absolute), separated like `PATH` (`:` on macOS/Linux). Every file under a listed directory, whatever its extension, is tracked like a parsed PHP file: a changed, created or deleted file there starts a fresh session. A listed file that does not exist yet is watched too. Example: `MCP_RECTOR_WARM_SESSION_WATCH=config:src/Events`.
 
+**Excluding directories the session never needs to see.** `MCP_RECTOR_WARM_SESSION_IGNORE` is the mirror of `MCP_RECTOR_WARM_SESSION_WATCH`: the same format (`PATH`-separated, relative to the project or absolute), but a listed directory is never walked and never listed, so a file appearing or changing there does not start a fresh session. This matters when a project writes into a directory that is inside the analysed roots but is not a PHPStan/Rector cache -- a `temp/cache` a project's own bootstrap writes to while loading classes, for example -- which would otherwise respawn the session on every call. Example: `MCP_RECTOR_WARM_SESSION_IGNORE=temp/cache`.
+
+> **An ignored directory must be one whose contents cannot change analysis results** -- a runtime-written cache, logs, uploads. Declaring a source directory would let the session serve stale answers for files under it, with no warning: `MCP_RECTOR_WARM_SESSION_WATCH` trades silence for a respawn; `MCP_RECTOR_WARM_SESSION_IGNORE` trades it for no check at all.
+
 Limits and costs:
 
 - **An edited file in the tracked set starts a new session.** Editing the file you keep re-checking, or any file under `withAutoloadPaths()`, therefore gives no speed-up on the next call, but costs no more than before.

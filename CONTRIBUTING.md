@@ -50,6 +50,17 @@ runs plain pcov without this mechanism, since `RectorRunner::canFork()` is
 always false there (#31) and there is no forked-child gap on that platform
 to close.
 
+Known gap, accepted (#227): `bin/rector-warm-lsp` shows 0% in the coverage
+report. Only the Python LSP E2E suite and the headless-nvim/helix smoke jobs
+start that script, as its own real process; none of those CI jobs sets
+`MCP_RECTOR_WARM_COVERAGE_DIR`/`PHP_INI_SCAN_DIR` the way the `coverage` job
+does, so `tests/coverage/prepend.php` never loads in them and the process
+writes no `.cov` file. The LSP's own logic is still exercised there -- a real
+stdio session, real diagnostics, real code actions -- just not counted. Wiring
+coverage into those E2E jobs, or accepting the gap, are both still open; this
+paragraph records the choice made so far (accept) rather than leaving it
+undocumented.
+
 ## Validators on every edit (#201)
 
 If you're editing this repo with [claude-supertool](https://github.com/Digital-Process-Tools/claude-supertool)

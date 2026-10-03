@@ -131,6 +131,22 @@ final class RectorRunnerSessionTest extends TestCase
         }
     }
 
+    public function testIgnorePathsAreSplitOnPathSeparatorAndResolvedAgainstTheProjectTheSameWayWatchPathsAre(): void
+    {
+        // #200: MCP_RECTOR_WARM_SESSION_IGNORE is the mirror of SESSION_WATCH --
+        // same PATH_SEPARATOR split, same blank-dropping, same relative-to-project
+        // resolution for a bare entry, same absolute passthrough.
+        $previous = \getenv(RectorRunner::SESSION_IGNORE_ENV);
+        \putenv(RectorRunner::SESSION_IGNORE_ENV . '=temp/cache' . \PATH_SEPARATOR . ' ' . \PATH_SEPARATOR . '/abs/generated/');
+        try {
+            self::assertSame(['/p/temp/cache', '/abs/generated'], RectorRunner::sessionIgnorePaths('/p'));
+            \putenv(RectorRunner::SESSION_IGNORE_ENV);
+            self::assertSame([], RectorRunner::sessionIgnorePaths('/p'));
+        } finally {
+            \putenv($previous === false ? RectorRunner::SESSION_IGNORE_ENV : RectorRunner::SESSION_IGNORE_ENV . '=' . $previous);
+        }
+    }
+
     public function testTheSessionRetiresOnItsOwnMemoryOrCallCountWhateverMemoryLimitSays(): void
     {
         $mb = 1024 * 1024;

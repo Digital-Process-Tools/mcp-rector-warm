@@ -214,12 +214,17 @@ final class SessionHooks implements SymbolResolver
      * The directory snapshot for this project, not yet refreshed: the working
      * directory and every non-vendor Composer source root as plain roots, the
      * scanned directories as full roots, declared watch directories as watch
-     * roots; vendor directories (their Composer metadata is tracked instead)
-     * and Rector's caches excluded.
+     * roots; vendor directories (their Composer metadata is tracked instead),
+     * Rector's caches and declared ignore directories excluded.
      *
      * @param list<string> $watchPaths absolute (RectorRunner::sessionWatchPaths())
+     * @param list<string> $ignorePaths absolute (RectorRunner::sessionIgnorePaths());
+     *   #200 -- never walked, never listed, so a project's own runtime-written
+     *   directory (a cache, logs, uploads) does not force a respawn. The caller
+     *   is responsible for only declaring a directory whose contents cannot
+     *   change analysis results -- this method does not verify that.
      */
-    public function directorySnapshot(string $workingDirectory, array $watchPaths = []): DirectorySnapshot
+    public function directorySnapshot(string $workingDirectory, array $watchPaths = [], array $ignorePaths = []): DirectorySnapshot
     {
         $vendors = $this->vendorDirectories();
         $roots = [$workingDirectory];
@@ -240,6 +245,14 @@ final class SessionHooks implements SymbolResolver
             // live under the system temp dir PHPStan uses as its tmpDir).
             if (!self::containsAny($cache, [...$roots, ...$fullRoots])) {
                 $excluded[] = $cache;
+            }
+        }
+        // Declared ignore directories (MCP_RECTOR_WARM_SESSION_IGNORE), the
+        // same CONTAINS-a-root guard as the cache dirs above: never exclude a
+        // directory that would also exclude a real root.
+        foreach (\array_values(\array_filter($ignorePaths, is_dir(...))) as $ignored) {
+            if (!self::containsAny($ignored, [...$roots, ...$fullRoots])) {
+                $excluded[] = $ignored;
             }
         }
 
