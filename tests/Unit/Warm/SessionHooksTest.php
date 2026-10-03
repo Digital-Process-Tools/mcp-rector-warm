@@ -331,6 +331,33 @@ final class SessionHooksTest extends TestCase
         }
     }
 
+    /**
+     * #200's CONTAINS-a-root guard: a declared ignore directory that CONTAINS
+     * a real root must be refused, the same as the pre-existing cache-dir
+     * guard just above it in directorySnapshot() -- otherwise a project
+     * misconfiguring MCP_RECTOR_WARM_SESSION_IGNORE as an ancestor of (or
+     * the same path as) a root would silently stop that root from being
+     * watched at all, with no error.
+     */
+    public function testDirectorySnapshotRefusesToIgnoreADirectoryThatContainsARoot(): void
+    {
+        $root = Path::real(\sys_get_temp_dir()) . '/session-hooks-ignore-guard-test-' . \bin2hex(\random_bytes(8));
+        \mkdir($root . '/src', 0o777, true);
+        try {
+            $hooks = $this->hooks(new FakeContainer());
+            // The ignore path IS the root itself -- containsAny() must refuse it.
+            $snapshot = $hooks->directorySnapshot($root, [], [$root]);
+            $snapshot->refresh();
+            \clearstatcache();
+            \usleep(1_100_000);
+
+            \file_put_contents($root . '/src/New.php', '<?php class New_ {}');
+            self::assertSame($root . '/src', $snapshot->firstChange(), 'a root must still be watched even when (mis)declared as its own ignore directory');
+        } finally {
+            self::remove($root);
+        }
+    }
+
     private static function remove(string $path): void
     {
         if (\is_link($path) || \is_file($path)) {
