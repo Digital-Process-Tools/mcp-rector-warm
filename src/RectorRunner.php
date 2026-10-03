@@ -1311,7 +1311,11 @@ class RectorRunner implements RunnerInterface
      * report that its hooks are in place. The directory snapshot is refreshed
      * here, in the worker, so each new session inherits an up-to-date one.
      * False when no session can run: a hook that no longer fits this Rector or
-     * PHPStan disables the session for this worker's lifetime (and says so on
+     * PHPStan, or a startup that never reported its handshake within
+     * --call-timeout (#238 -- the session child's own startup work, done
+     * before this fork's pristine caller learns anything about it, is not
+     * trusted to be faster than the budget whoever configured --call-timeout
+     * chose), disables the session for this worker's lifetime (and says so on
      * stderr); a transient failure (fork, socket) only skips this call.
      */
     private function spawnSession(?int $deadline): bool
@@ -1350,14 +1354,25 @@ class RectorRunner implements RunnerInterface
         \fclose($sessionEnd);
         \stream_set_timeout($workerEnd, 1);
         try {
-            $handshake = $this->readFrame($workerEnd, $deadline);
+            $handshake = $this->readSessionHandshake($workerEnd, $deadline);
         } catch (RectorCallTimeoutException) {
+            // #238: this used to throw past runInSession()'s caller entirely,
+            // skipping both disableSession() and the forkAndExecute()
+            // fallback every OTHER declined/lost-session route gets (#189) --
+            // blaming "the analysis", which never started, and leaving the
+            // next call to spawn a fresh session and time out identically.
+            // Mirrors the sibling branch just below (a handshake that decoded
+            // but reported !ok): kill/reap the child, disable the session for
+            // the rest of this worker's life, and let the caller fall back to
+            // forkAndExecute() with whatever's left of the same deadline.
             $this->killAndReap($pid);
             \fclose($workerEnd);
-
-            throw new \RuntimeException(
-                "rector call exceeded {$this->callTimeoutSeconds}s (--call-timeout); the analysis was killed",
+            $this->disableSession(
+                "the session child's startup did not report a handshake within "
+                . "{$this->callTimeoutSeconds}s (--call-timeout)",
             );
+
+            return false;
         }
         $frame = HandshakeFrame::decode($handshake);
         if (!$frame->ok) {
@@ -1377,6 +1392,21 @@ class RectorRunner implements RunnerInterface
         ));
 
         return true;
+    }
+
+    /**
+     * #238: the handshake read alone, as its own seam, so a test can throw
+     * RectorCallTimeoutException from here deterministically -- making the
+     * real session child's own startup (SessionHooks setup, the project's
+     * directory walk) genuinely outlast a real --call-timeout is a race no
+     * test should depend on winning. Production behaviour is exactly
+     * readFrame(); overriding this changes nothing else spawnSession() does.
+     *
+     * @param resource $socket
+     */
+    protected function readSessionHandshake($socket, ?int $deadlineNs): ?string
+    {
+        return $this->readFrame($socket, $deadlineNs);
     }
 
     /**

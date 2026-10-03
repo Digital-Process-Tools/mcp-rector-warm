@@ -184,17 +184,24 @@ final class ProtocolStdoutIsolator
         }
 
         $exitStatus = null;
+        $waitpidSucceeded = false;
         while (true) {
             \pcntl_signal_dispatch();
             $waited = \pcntl_waitpid($childPid, $exitStatus, \WNOHANG);
             if ($waited === $childPid) {
+                $waitpidSucceeded = true;
+
                 break;
             }
             if ($waited === -1) {
-                // waitpid() itself failed (e.g. ECHILD) -- $exitStatus was
-                // never filled in. Fall through to proc_close()'s own wait
-                // below rather than treating this the same as a clean exit:
-                // its return IS the real termination status PHP's own
+                // #284: waitpid() itself failed (e.g. ECHILD). PHP writes
+                // int(0) into $exitStatus on this path -- NOT "never filled
+                // in", as this comment used to claim -- and pcntl_wifexited(0)
+                // is true, so trusting $exitStatus below would silently read
+                // a clean exit 0 for a daemon that may have exited non-zero
+                // or been killed. $waitpidSucceeded stays false so
+                // resolveExitCode() below reaches for proc_close()'s own
+                // status instead: the real termination status PHP's own
                 // proc_open bookkeeping observed, independent of our own
                 // polling loop having missed it.
                 break;
@@ -203,14 +210,32 @@ final class ProtocolStdoutIsolator
         }
         $procCloseStatus = \proc_close($process);
 
-        if (\pcntl_wifexited($exitStatus)) {
-            $exitCode = \pcntl_wexitstatus($exitStatus);
-        } elseif ($procCloseStatus >= 0) {
-            $exitCode = $procCloseStatus;
-        } else {
-            $exitCode = 1;
+        exit(self::resolveExitCode($waitpidSucceeded, $exitStatus, $procCloseStatus));
+    }
+
+    /**
+     * The exit code to report for the re-exec'd child's wait loop above, as
+     * its own pure function (#284's regression pin): $exitStatus is trusted
+     * ONLY when pcntl_waitpid() itself reported success for this exact pid --
+     * never merely because pcntl_wifexited() happens to read true on it, since
+     * PHP's own int(0) default for a failed waitpid() satisfies that check
+     * too. $procCloseStatus (proc_close()'s own observed termination status)
+     * is the fallback once $exitStatus cannot be trusted, and 1 is the last
+     * resort when neither source has anything usable.
+     */
+    private static function resolveExitCode(bool $waitpidSucceeded, ?int $exitStatus, int $procCloseStatus): int
+    {
+        if ($waitpidSucceeded && $exitStatus !== null && \pcntl_wifexited($exitStatus)) {
+            $wexitstatus = \pcntl_wexitstatus($exitStatus);
+            if ($wexitstatus !== false) {
+                return $wexitstatus;
+            }
         }
-        exit($exitCode);
+        if ($procCloseStatus >= 0) {
+            return $procCloseStatus;
+        }
+
+        return 1;
     }
 
     /**

@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Dpt\McpRectorWarm\Tests\Unit;
 
+use Dpt\McpRectorWarm\RectorCallTimeoutException;
 use Dpt\McpRectorWarm\RectorRunner;
 use Dpt\McpRectorWarm\Tests\Support\TempPath;
 use PHPUnit\Framework\TestCase;
@@ -290,6 +291,95 @@ final class RectorRunnerSessionWorkerTest extends TestCase
             // already ran inside runInSession()), but the worker itself is
             // still live and must still be torn down.
             $runner->reboot();
+        }
+    }
+
+    /**
+     * #238: spawnSession()'s handshake read used to let
+     * RectorCallTimeoutException escape straight past runInSession() as a
+     * RuntimeException blaming "the analysis" (which never started), and
+     * never called disableSession() -- so the fallback #189 documents for
+     * every other declined/lost-session route never ran here, and the very
+     * next call would spawn a fresh session and could time out identically.
+     *
+     * readSessionHandshake() is overridden to throw deterministically:
+     * making the real session child's own startup genuinely outlast a real
+     * --call-timeout is a timing race no test should depend on winning (see
+     * that method's own docblock in RectorRunner.php). The bar this test
+     * pins is that the call must still SUCCEED -- forked from the pristine
+     * worker, #8's original fallback -- not throw, and the session must be
+     * disabled for the rest of this worker's life so the next call does not
+     * retry the exact same dead end.
+     */
+    public function testSpawnSessionHandshakeTimeoutDeclinesInsteadOfThrowing(): void
+    {
+        $log = $this->callLog;
+        // spawnSession()/readSessionHandshake() run inside the forked WORKER,
+        // a genuinely separate OS process from this test -- a property on
+        // $runner mutated there is a copy-on-write fork no PHPUnit assertion
+        // back here can ever see (the daemon and worker only ever talk over
+        // the socket pair). A second log file, exactly like $this->callLog
+        // above, is the only signal that actually crosses that boundary.
+        $handshakeLog = $this->tmp . '/handshakes.log';
+
+        $runner = new class ($log, $handshakeLog) extends RectorRunner {
+            public function __construct(
+                private readonly string $log,
+                private readonly string $handshakeLog,
+            ) {
+                parent::__construct(0);
+            }
+
+            protected function execute(array $argv, bool $warmBoot): array
+            {
+                \file_put_contents($this->log, \getmypid() . "\n", \FILE_APPEND);
+
+                return ['exit_code' => 0, 'output' => '', 'warm_boot' => $warmBoot];
+            }
+
+            protected function readSessionHandshake($socket, ?int $deadlineNs): ?string
+            {
+                \file_put_contents($this->handshakeLog, "attempt\n", \FILE_APPEND);
+
+                throw new RectorCallTimeoutException('simulated: the session child never reported in');
+            }
+        };
+
+        $argv = ['rector', 'process', '--', $this->target];
+
+        try {
+            $result = $runner->run($argv);
+
+            self::assertSame(
+                0,
+                $result['exit_code'],
+                'a handshake timeout must still be served by the plain fork fallback, not throw',
+            );
+            self::assertSame(
+                1,
+                \substr_count((string) \file_get_contents($handshakeLog), "attempt\n"),
+                'must fire: the override must actually have run once, or the rest of this assertion proves nothing',
+            );
+
+            // A second call must not even attempt another handshake: a
+            // handshake timeout must disable the session for the rest of
+            // this worker's life, the same as the sibling branch for a
+            // handshake that decoded but reported !ok -- otherwise the next
+            // call spawns again and can time out identically (#238). The
+            // SAME worker serving both calls (warm_boot true below) is what
+            // makes this a real test of "stuck disabled", not an artefact of
+            // a fresh worker that never tried in the first place.
+            $second = $runner->run($argv);
+            self::assertSame(0, $second['exit_code']);
+            self::assertTrue($second['warm_boot'], 'the worker is now up -- this call must reuse it, not boot fresh');
+            self::assertSame(
+                1,
+                \substr_count((string) \file_get_contents($handshakeLog), "attempt\n"),
+                'the session stayed disabled -- a second attempt would mean disableSession() did not stick',
+            );
+        } finally {
+            $runner->reboot();
+            TempPath::unlink($handshakeLog);
         }
     }
 }
