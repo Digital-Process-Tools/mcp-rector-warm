@@ -305,6 +305,16 @@ final class ProtocolStdoutIsolatorTest extends TestCase
      */
     public function testASuccessfulWaitpidIsTrustedOverProcCloseStatus(): void
     {
+        // Unlike the other two tests here, $waitpidSucceeded=true below
+        // actually reaches resolveExitCode()'s pcntl_wifexited()/
+        // pcntl_wexitstatus() calls -- pcntl does not exist on Windows at
+        // all (CLAUDE.md's own cross-platform note), so this one test, and
+        // only this one, needs the same guard every other pcntl-touching
+        // test in this repo already uses.
+        if (!\function_exists('pcntl_wifexited') || !\function_exists('pcntl_wexitstatus')) {
+            self::markTestSkipped('pcntl_wifexited/pcntl_wexitstatus unavailable in this environment');
+        }
+
         $method = new \ReflectionMethod(ProtocolStdoutIsolator::class, 'resolveExitCode');
 
         // A raw wait status encoding "exited with code 3" (WIFEXITED/WEXITSTATUS
