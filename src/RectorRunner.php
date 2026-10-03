@@ -68,6 +68,16 @@ class RectorRunner implements RunnerInterface
      */
     public const SESSION_WATCH_ENV = 'MCP_RECTOR_WARM_SESSION_WATCH';
 
+    /**
+     * #200: the mirror of SESSION_WATCH_ENV -- directories the session never
+     * walks or lists (same format: relative to the project or absolute,
+     * PATH_SEPARATOR-separated). A directory declared here must be one whose
+     * contents cannot change analysis results (a runtime-written cache, logs,
+     * uploads) -- see docs/how-it-works.md Sec1b. Declaring a source directory
+     * would let the session serve stale answers.
+     */
+    public const SESSION_IGNORE_ENV = 'MCP_RECTOR_WARM_SESSION_IGNORE';
+
     /** #185: the session child retires after a call once its own memory passes this many MB (default 1024). */
     public const SESSION_MAX_MB_ENV = 'MCP_RECTOR_WARM_SESSION_MAX_MB';
 
@@ -1139,7 +1149,31 @@ class RectorRunner implements RunnerInterface
      */
     public static function sessionWatchPaths(string $projectDirectory): array
     {
-        $value = \getenv(self::SESSION_WATCH_ENV);
+        return self::splitPathListEnv(self::SESSION_WATCH_ENV, $projectDirectory);
+    }
+
+    /**
+     * #200: MCP_RECTOR_WARM_SESSION_IGNORE, parsed the same way sessionWatchPaths()
+     * parses its own env var -- the mirror asked for in #200.
+     *
+     * @return list<string>
+     */
+    public static function sessionIgnorePaths(string $projectDirectory): array
+    {
+        return self::splitPathListEnv(self::SESSION_IGNORE_ENV, $projectDirectory);
+    }
+
+    /**
+     * Shared parser for SESSION_WATCH_ENV and SESSION_IGNORE_ENV: absolute,
+     * '/'-separated paths, split on PATH_SEPARATOR, blanks dropped, relative
+     * entries taken from $projectDirectory. Not resolved: a declared path may
+     * not exist yet.
+     *
+     * @return list<string>
+     */
+    private static function splitPathListEnv(string $envVar, string $projectDirectory): array
+    {
+        $value = \getenv($envVar);
         if (!\is_string($value) || \trim($value) === '') {
             return [];
         }
@@ -1287,6 +1321,7 @@ class RectorRunner implements RunnerInterface
             $this->sessionDirectories ??= (new SessionHooks($this->container))->directorySnapshot(
                 (string) \getcwd(),
                 self::sessionWatchPaths((string) \getcwd()),
+                self::sessionIgnorePaths((string) \getcwd()),
             );
             $this->sessionDirectories->refresh();
         } catch (\Throwable $e) {

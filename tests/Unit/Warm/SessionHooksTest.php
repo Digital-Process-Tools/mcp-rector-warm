@@ -302,6 +302,50 @@ final class SessionHooksTest extends TestCase
         self::assertSame(['php'], $hooks->fileExtensions());
     }
 
+    /**
+     * #200: a declared MCP_RECTOR_WARM_SESSION_IGNORE directory is excluded
+     * from the snapshot directorySnapshot() builds -- never walked, never
+     * listed, the mirror of the watch-root wiring just above. Paired with a
+     * must-fire case outside the ignored directory so a broken wiring that
+     * excludes everything would not pass silently.
+     */
+    public function testDirectorySnapshotExcludesADeclaredIgnoreDirectory(): void
+    {
+        $root = Path::real(\sys_get_temp_dir()) . '/session-hooks-ignore-test-' . \bin2hex(\random_bytes(8));
+        \mkdir($root . '/temp/cache', 0o777, true);
+        \mkdir($root . '/src', 0o777, true);
+        try {
+            $hooks = $this->hooks(new FakeContainer());
+            $snapshot = $hooks->directorySnapshot($root, [], [$root . '/temp/cache']);
+            $snapshot->refresh();
+            \clearstatcache();
+            \usleep(1_100_000);
+
+            \file_put_contents($root . '/temp/cache/entry.php', '<?php return [];');
+            self::assertNull($snapshot->firstChange(), 'a declared ignore directory must not force a respawn');
+
+            \file_put_contents($root . '/src/New.php', '<?php class New_ {}');
+            self::assertSame($root . '/src', $snapshot->firstChange(), 'positive control: a change OUTSIDE the ignore directory must still be seen');
+        } finally {
+            self::remove($root);
+        }
+    }
+
+    private static function remove(string $path): void
+    {
+        if (\is_link($path) || \is_file($path)) {
+            @\unlink($path);
+
+            return;
+        }
+        foreach (\scandir($path) ?: [] as $entry) {
+            if ($entry !== '.' && $entry !== '..') {
+                self::remove($path . '/' . $entry);
+            }
+        }
+        @\rmdir($path);
+    }
+
     private function hooks(Container $phpstanContainer): SessionHooks
     {
         $factoryReflection = new \ReflectionClass(PHPStanServicesFactory::class);
