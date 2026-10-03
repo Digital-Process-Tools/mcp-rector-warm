@@ -4,7 +4,11 @@ includes:
     - phar://phpstan.phar/conf/bleedingEdge.neon
 
 parameters:
-    level: 10
+    # `max` is always the strictest level the installed PHPStan has (10 in 2.x),
+    # per CLAUDE.md's code quality bar: a PHPStan upgrade that adds a level
+    # turns CI red until the new errors are fixed. The README badge shows
+    # "level max".
+    level: max
     checkImplicitMixed: true
     checkTooWideReturnTypesInProtectedAndPublicMethods: true
     checkBenevolentUnionTypes: true
