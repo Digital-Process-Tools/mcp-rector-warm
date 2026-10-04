@@ -116,18 +116,20 @@ final class WorkspaceRootResolverTest extends TestCase
     }
 
     /**
-     * #107 self-review finding (oss:auditor pass, reasoned from POSIX
-     * dirname() semantics -- no Windows runner to observe this on
-     * directly): dirname('C:') is '.', NOT 'C:' again, unlike POSIX '/'
-     * which IS its own dirname(). Pins that reaching a bare Windows drive
-     * root terminates cleanly at the drive letter itself, never falling
-     * through to a relative '.' that would read markers against this
-     * TEST RUNNER's own cwd instead of the intended root. is_file() on
-     * these paths is always false on a non-Windows runner either way --
-     * this test is about where the walk terminates, not about finding a
-     * real rector.php.
+     * #107 self-review (oss:auditor flagged dirname()'s undocumented
+     * behaviour on a bare Windows drive letter as a possible walk-up
+     * hazard; a second review pass proved, and this pins, that the
+     * owner-equality check always intercepts a drive root first -- see
+     * resolve()'s own comment on that check for the construction argument.
+     * An earlier version of this test asserted the SAME resolve() call
+     * against a version of the code carrying an extra explicit guard for
+     * that case; removed once the guard was shown to be unreachable dead
+     * code (this exact assertion passed identically with and without it,
+     * which is what "vacuous" means here) -- this is the one test that
+     * matters: that the drive root resolves correctly at all, via the path
+     * the code actually takes.
      */
-    public function testReachingAWindowsDriveRootTerminatesThereRatherThanFallingThroughToARelativePath(): void
+    public function testResolvesCleanlyAtAWindowsDriveRootWithNoMarkerAnywhereUnderIt(): void
     {
         self::assertSame('C:', WorkspaceRootResolver::resolve('C:/Project/src/Sample.php', [], 'C:'));
     }
