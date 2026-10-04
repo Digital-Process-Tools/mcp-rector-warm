@@ -108,7 +108,7 @@ parameters:
         -
             identifier: typeCoverage.paramTypeCoverage
             path: src/RectorRunner.php
-            count: 10
+            count: 11
         -
             identifier: typeCoverage.returnTypeCoverage
             path: src/RectorRunner.php

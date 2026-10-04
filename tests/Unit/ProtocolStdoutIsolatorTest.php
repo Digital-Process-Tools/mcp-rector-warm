@@ -270,6 +270,78 @@ final class ProtocolStdoutIsolatorTest extends TestCase
 
         return StderrCaptureFilter::$captured;
     }
+
+    /**
+     * #284: a failed pcntl_waitpid() (e.g. ECHILD) writes int(0) into
+     * $exitStatus, not "nothing" -- pcntl_wifexited(0) is true, so trusting
+     * $exitStatus whenever it merely LOOKS like a clean exit (the pre-fix
+     * code's own check) reads exit 0 for a daemon that may have exited
+     * non-zero or been killed. $waitpidSucceeded=false is the one signal
+     * that actually distinguishes "waitpid told us this" from "this happens
+     * to satisfy the same check by coincidence" -- the bar this pins: would
+     * this test still pass if resolveExitCode() ignored $waitpidSucceeded
+     * entirely and only ever looked at $exitStatus? No: with
+     * $waitpidSucceeded false and $exitStatus=0 (pcntl_wifexited(0) is
+     * true), the pre-fix shape returns 0; this test requires the real
+     * proc_close() status (7) instead.
+     */
+    public function testAFailedWaitpidFallsBackToProcCloseStatusInsteadOfReadingExitZero(): void
+    {
+        $method = new \ReflectionMethod(ProtocolStdoutIsolator::class, 'resolveExitCode');
+
+        self::assertSame(
+            7,
+            $method->invoke(null, false, 0, 7),
+            'waitpid failed (ECHILD): $exitStatus=0 looks exactly like a clean exit via '
+            . 'pcntl_wifexited(), but must not be trusted -- proc_close()\'s own status (7) is the real one',
+        );
+    }
+
+    /**
+     * Positive control for the test above: when waitpid DID succeed for
+     * real, $exitStatus must still be the one trusted -- proving the
+     * fallback above fires because waitpid failed, not because this method
+     * always prefers $procCloseStatus regardless.
+     */
+    public function testASuccessfulWaitpidIsTrustedOverProcCloseStatus(): void
+    {
+        // Unlike the other two tests here, $waitpidSucceeded=true below
+        // actually reaches resolveExitCode()'s pcntl_wifexited()/
+        // pcntl_wexitstatus() calls -- pcntl does not exist on Windows at
+        // all (CLAUDE.md's own cross-platform note), so this one test, and
+        // only this one, needs the same guard every other pcntl-touching
+        // test in this repo already uses.
+        if (!\function_exists('pcntl_wifexited') || !\function_exists('pcntl_wexitstatus')) {
+            self::markTestSkipped('pcntl_wifexited/pcntl_wexitstatus unavailable in this environment');
+        }
+
+        $method = new \ReflectionMethod(ProtocolStdoutIsolator::class, 'resolveExitCode');
+
+        // A raw wait status encoding "exited with code 3" (WIFEXITED/WEXITSTATUS
+        // decode the low byte this way on every POSIX platform PHP supports pcntl on).
+        $rawStatusExitedWithCode3 = 3 << 8;
+
+        self::assertSame(
+            3,
+            $method->invoke(null, true, $rawStatusExitedWithCode3, 99),
+            'must fire: waitpid succeeding must read the real exit code (3) from $exitStatus, '
+            . 'not fall through to an unrelated $procCloseStatus (99)',
+        );
+    }
+
+    /**
+     * Last resort: neither source has anything usable (waitpid failed AND
+     * proc_close() itself reports a negative/unusable status, e.g. the
+     * child was killed by a signal proc_close() cannot translate to an exit
+     * code) -- 1 is the final fallback, never 0 (which would misreport a
+     * daemon that did not exit cleanly as having succeeded).
+     */
+    public function testNeitherSourceUsableFallsBackToExitCodeOne(): void
+    {
+        $method = new \ReflectionMethod(ProtocolStdoutIsolator::class, 'resolveExitCode');
+
+        self::assertSame(1, $method->invoke(null, false, 0, -1));
+    }
 }
 
 /**
