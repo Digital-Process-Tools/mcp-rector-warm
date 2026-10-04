@@ -125,6 +125,14 @@ final class TempCopySweeperTest extends TestCase
         self::assertTrue(touch($path, time() - 700), 'could not backdate the test directory');
     }
 
+    /** lockIsFree() is private -- invoked directly so it can be tested in isolation from removeIfStale()'s own is_file() gate (#228). */
+    private static function invokeLockIsFree(string $lockPath): bool
+    {
+        $method = new \ReflectionMethod(TempCopySweeper::class, 'lockIsFree');
+
+        return (bool) $method->invoke(null, $lockPath);
+    }
+
     public function testADirectoryWhoseLockIsHeldByALiveProcessIsKept(): void
     {
         // Must-fire control, same run: a directory whose lock is free (the
@@ -172,6 +180,67 @@ final class TempCopySweeperTest extends TestCase
         TempCopySweeper::sweepDirectory($this->root . '/src');
 
         self::assertDirectoryDoesNotExist($dir);
+    }
+
+    /**
+     * #228: lockIsFree()'s fopen($lockPath, 'c') has the same
+     * unguarded-symlink shape #225 closed in reclaimStaleOwnLock() -- it
+     * follows a symlink and creates its target if missing, so an
+     * unguarded $lockPath here could be used to create and then
+     * probe/lock a file anywhere this process can write.
+     * removeIfStale()'s own is_file($lockPath) check already blocks the
+     * SIMPLE case (a symlink to a target that does not exist reads as
+     * "not a file", so removeIfStale() never even reaches lockIsFree()
+     * through it) -- but a $lockPath swapped for such a symlink in the
+     * window between that check and this method's own fopen() is a
+     * genuine TOCTOU race that cannot be pinned deterministically
+     * without disproportionate test-infra engineering (#228). Tested
+     * directly against lockIsFree() itself, the same way #225's own
+     * test exercises reclaimStaleOwnLock() directly, so the guard is
+     * proven independent of how/when a symlinked $lockPath is reached.
+     * Paired with testLockIsFreeReturnsTrueForAGenuineFreeLockFile below
+     * as the must-fire positive control this rule needs.
+     */
+    public function testLockIsFreeDoesNotFollowASymlinkedLockPath(): void
+    {
+        $externalTarget = sys_get_temp_dir() . '/mcp-rector-sweep-lock-target-' . bin2hex(random_bytes(4));
+        $lockPath = $this->root . '/symlinked.lock';
+
+        self::assertFileDoesNotExist($externalTarget, 'the external target must not exist before the call');
+        if (!@symlink($externalTarget, $lockPath)) {
+            self::markTestSkipped('could not create a symlink on this platform (needs elevated/Developer-Mode privilege on Windows).');
+        }
+
+        try {
+            self::assertFalse(
+                self::invokeLockIsFree($lockPath),
+                'a symlinked lock path must never be treated as free to take',
+            );
+            self::assertFileDoesNotExist(
+                $externalTarget,
+                'a symlinked .lock must never have its target created/touched through fopen()',
+            );
+            self::assertTrue(is_link($lockPath), 'the symlink itself must be left in place when refused');
+        } finally {
+            self::removeLink($lockPath);
+            if (file_exists($externalTarget)) {
+                unlink($externalTarget);
+            }
+        }
+    }
+
+    /**
+     * Must-fire positive control, paired with the must-not-fire test
+     * above: a genuine, non-symlinked, unheld lock file is still judged
+     * free -- proves the new guard did not just start refusing every
+     * lock path.
+     */
+    public function testLockIsFreeReturnsTrueForAGenuineFreeLockFile(): void
+    {
+        $lockPath = $this->root . '/genuine.lock';
+        touch($lockPath);
+
+        self::assertTrue(self::invokeLockIsFree($lockPath));
     }
 
     public function testADirectoryWithNoLockYetIsKeptWithinTheGracePeriodAndRemovedAfterIt(): void

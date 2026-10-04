@@ -125,6 +125,19 @@ final class TempCopySweeper
      */
     private static function lockIsFree(string $lockPath): bool
     {
+        // #228: the same unguarded-fopen shape #225 closed in
+        // reclaimStaleOwnLock() -- fopen($lockPath, 'c') follows a
+        // symlink and creates its target if missing, so a $lockPath that
+        // has been swapped for a symlink since removeIfStale()'s own
+        // is_file($lockPath) check (the "simple" case that check already
+        // blocks on its own) could otherwise be used to create and then
+        // probe/lock a file anywhere this process can write. Checked
+        // immediately before the fopen() below, the same
+        // re-checked-right-before-use shape reclaimStaleOwnLock() uses.
+        if (self::isLinkOrJunction($lockPath) || !self::isRegularFile($lockPath)) {
+            return false;
+        }
+
         $handle = @fopen($lockPath, 'c');
         if ($handle === false) {
             // Cannot even open it -- fail closed, same direction every
