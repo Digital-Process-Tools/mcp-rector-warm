@@ -2168,6 +2168,84 @@ final class LspServerTest extends TestCase
     }
 
     /**
+     * #107 self-review finding: before #107, the server's process-wide cwd
+     * never changed after boot, so executeCommand()'s own `getcwd()` read
+     * really did mean "the server's working directory". #107's
+     * RootedDiagnosticsSourcePool now chdir()s on EVERY diagnose call (by
+     * design -- RectorTool's own containment check reads getcwd() at call
+     * time) -- simulated here directly on the fake source, with no real
+     * pool involved, since the bug is in executeCommand() reading ambient
+     * getcwd() rather than anything pool-specific. Without LspServer
+     * capturing its own boot-time root once, fixWorkspace would silently
+     * fix whichever root the most recently diagnosed DOCUMENT happened to
+     * belong to, rather than the server's own root.
+     */
+    public function testFixWorkspaceRootIsStableAcrossAnInterveningDiagnoseThatMovesCwd(): void
+    {
+        $cwdBackup = getcwd() ?: '/';
+        $bootDir = sys_get_temp_dir() . '/mcp-rector-bootroot-' . bin2hex(random_bytes(4));
+        $otherDir = sys_get_temp_dir() . '/mcp-rector-otherroot-' . bin2hex(random_bytes(4));
+        mkdir($bootDir, 0o700, true);
+        mkdir($otherDir, 0o700, true);
+        chdir($bootDir);
+
+        try {
+            $seenRoot = null;
+            $source = new class ($otherDir, static function (string $root) use (&$seenRoot): void {
+                $seenRoot = $root;
+            }) implements DiagnosticsSource, WorkspaceDiagnosticsSource {
+                /** @param \Closure(string): void $onWorkspace */
+                public function __construct(private readonly string $otherDir, private readonly \Closure $onWorkspace) {}
+
+                public function diagnose(string $absolutePath): array
+                {
+                    // The exact mechanism #107's RootedDiagnosticsSourcePool
+                    // introduced: an ordinary document diagnose chdir()s the
+                    // whole process as a side effect.
+                    chdir($this->otherDir);
+
+                    return ['fixes' => []];
+                }
+
+                public function diagnoseWorkspace(string $rootPath): array
+                {
+                    ($this->onWorkspace)($rootPath);
+
+                    return ['files' => [], 'errors' => []];
+                }
+            };
+
+            // Captured at construction, before anything has moved cwd.
+            $server = new LspServer('1.0.0', $source);
+            self::initialize($server, self::APPLY_EDIT_ONLY);
+
+            $server->handle([
+                'jsonrpc' => '2.0',
+                'method' => 'textDocument/didOpen',
+                'params' => ['textDocument' => ['uri' => 'file:///proj/A.php', 'version' => 1]],
+            ]);
+            self::assertSame(realpath($otherDir), realpath((string) getcwd()), 'setup check: the diagnose call really did move cwd');
+
+            $server->handle([
+                'jsonrpc' => '2.0',
+                'id' => 40,
+                'method' => 'workspace/executeCommand',
+                'params' => ['command' => 'rector-warm.fixWorkspace'],
+            ]);
+
+            self::assertSame(
+                realpath($bootDir),
+                $seenRoot === null ? null : realpath($seenRoot),
+                'fixWorkspace must use the server\'s own boot-time root, never a cwd an unrelated document diagnose moved in between',
+            );
+        } finally {
+            chdir($cwdBackup);
+            @rmdir($bootDir);
+            @rmdir($otherDir);
+        }
+    }
+
+    /**
      * #102 "refuse with a visible error, never a silent no-op": a client
      * that never declared workspace.applyEdit gets a JSON-RPC error, not a
      * quietly-empty result -- there would be nowhere to send the fix.

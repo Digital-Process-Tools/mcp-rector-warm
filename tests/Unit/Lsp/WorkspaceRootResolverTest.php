@@ -115,6 +115,23 @@ final class WorkspaceRootResolverTest extends TestCase
         self::assertSame($folder, WorkspaceRootResolver::resolve($file, [$folder], $this->base));
     }
 
+    /**
+     * #107 self-review finding (oss:auditor pass, reasoned from POSIX
+     * dirname() semantics -- no Windows runner to observe this on
+     * directly): dirname('C:') is '.', NOT 'C:' again, unlike POSIX '/'
+     * which IS its own dirname(). Pins that reaching a bare Windows drive
+     * root terminates cleanly at the drive letter itself, never falling
+     * through to a relative '.' that would read markers against this
+     * TEST RUNNER's own cwd instead of the intended root. is_file() on
+     * these paths is always false on a non-Windows runner either way --
+     * this test is about where the walk terminates, not about finding a
+     * real rector.php.
+     */
+    public function testReachingAWindowsDriveRootTerminatesThereRatherThanFallingThroughToARelativePath(): void
+    {
+        self::assertSame('C:', WorkspaceRootResolver::resolve('C:/Project/src/Sample.php', [], 'C:'));
+    }
+
     private static function removeTree(string $dir): void
     {
         if (!is_dir($dir)) {

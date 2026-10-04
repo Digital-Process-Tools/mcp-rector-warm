@@ -36,6 +36,14 @@ final class LspServer
     /** #102: set from `initialize`'s client capabilities (workspace.applyEdit) */
     private bool $canApplyWorkspaceEdit = false;
 
+    /**
+     * #107 self-review finding: captured ONCE, in the constructor, before
+     * any diagnose call can run -- see the constructor's own docblock for
+     * why executeCommand()'s fixWorkspace must read THIS rather than an
+     * ambient getcwd() call made later.
+     */
+    private readonly string|false $bootRoot;
+
     /** #102: the one `workspace/executeCommand` this server advertises/handles. */
     private const FIX_WORKSPACE_COMMAND = 'rector-warm.fixWorkspace';
 
@@ -153,7 +161,21 @@ final class LspServer
          * @var (\Closure(array<string, mixed>): void)|null
          */
         private readonly ?\Closure $pushBackMessage = null,
-    ) {}
+    ) {
+        // #107 self-review finding (Explore review pass): before #107, the
+        // server's process-wide cwd never changed after boot, so reading
+        // getcwd() inside executeCommand() (below) really did mean "the
+        // server's single working directory". #107's own
+        // RootedDiagnosticsSourcePool now chdir()s on EVERY diagnose call
+        // (by design, for RectorTool's own cwd-dependent containment
+        // check) -- so an ambient getcwd() read later, inside
+        // executeCommand(), would silently answer "whichever root was last
+        // diagnosed" instead of the server's own root. Captured once, here,
+        // before any diagnose call can run, fixWorkspace keeps exactly its
+        // pre-#107 meaning: the server's own boot-time root, never a side
+        // effect of unrelated document traffic.
+        $this->bootRoot = \getcwd();
+    }
 
     /**
      * Write $frame immediately via $frameWriter when one is wired (the
@@ -1256,7 +1278,7 @@ final class LspServer
             )];
         }
 
-        $root = getcwd();
+        $root = $this->bootRoot;
         if ($root === false) {
             return [$this->error(
                 $id,

@@ -47,6 +47,25 @@ final class WorkspaceRootResolver
                 return $owner;
             }
 
+            if (self::isFilesystemRoot($dir)) {
+                // #107 self-review finding (oss:auditor pass): dirname() on
+                // a bare Windows drive letter ('C:', after normalize() has
+                // stripped its trailing slash) is not documented to be a
+                // fixed point the way POSIX '/' is -- reasoned, not
+                // observed on a real Windows runner. In every scenario
+                // actually reachable through this loop the $dir === $owner
+                // check two lines above already intercepts a drive root
+                // before dirname() is ever called on it (confirmed by
+                // construction: dir can only equal a bare drive root once
+                // it has walked down to be no deeper than $owner, and
+                // isDescendant() above means $owner is always something
+                // dir passes through exactly on the way). Checked
+                // explicitly anyway, before dirname(), so the termination
+                // condition holds without depending on what dirname() does
+                // with an input this class controls the production of.
+                return $owner;
+            }
+
             $parent = \dirname($dir);
             if ($parent === $dir) {
                 // Filesystem root reached with no marker found anywhere
@@ -56,6 +75,12 @@ final class WorkspaceRootResolver
 
             $dir = $parent;
         }
+    }
+
+    /** A POSIX root, or a bare Windows drive letter root ('C:', 'D:', ...) after normalize() has stripped any trailing slash. */
+    private static function isFilesystemRoot(string $dir): bool
+    {
+        return $dir === '/' || \preg_match('#^[A-Za-z]:$#', $dir) === 1;
     }
 
     private static function hasRootMarker(string $dir): bool

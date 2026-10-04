@@ -218,6 +218,13 @@ document resolves to it regardless of `workspaceFolders`, so an editor
 config that hardcodes `--working-dir` (several below do, for a server that
 previously had no other way to learn its root) needs that flag dropped to
 actually get multi-root behaviour -- see the Sublime Text section.
+**`workspace/executeCommand`'s `rector-warm.fixWorkspace` is not yet
+root-aware**: it still dry-runs and applies fixes over the server's single
+boot-time working directory (the `--working-dir` override, or wherever the
+process started if none was given), never per-folder -- in a true
+multi-root setup with no `--working-dir`, that is simply wherever the
+editor happened to launch the server, independent of any folder a document
+you were just looking at belongs to.
 
 ## Out of scope
 
