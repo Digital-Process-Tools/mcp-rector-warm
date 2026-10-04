@@ -65,7 +65,7 @@ $transport = new StdioLspTransport(STDIN, $lspStdout);
 // resolves to it, exactly the single-root behaviour this had before.
 $diagnostics = new MultiRootDiagnosticsSource(
     new RootedDiagnosticsSourcePool(
-        static fn (string $root): RectorDiagnosticsSource => new RectorDiagnosticsSource(new RectorTool()),
+        static fn(string $root): RectorDiagnosticsSource => new RectorDiagnosticsSource(new RectorTool()),
     ),
     workingDirOverride: $workingDir,
     fallbackRoot: (string) getcwd(),

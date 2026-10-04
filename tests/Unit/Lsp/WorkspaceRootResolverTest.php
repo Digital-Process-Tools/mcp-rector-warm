@@ -19,7 +19,15 @@ final class WorkspaceRootResolverTest extends TestCase
 
     protected function setUp(): void
     {
-        $this->base = sys_get_temp_dir() . '/mcp-rector-root-resolver-' . bin2hex(random_bytes(4));
+        // CI finding (Windows legs, php-cs-fixer-fixed PR #293): sys_get_temp_dir()
+        // returns a backslash-separated path on Windows (e.g.
+        // 'C:\Users\RUNNER~1\AppData\Local\Temp'), while every path this class
+        // builds from here on uses '/' -- and WorkspaceRootResolver::resolve()
+        // always normalizes its OWN return value to forward slashes (see its own
+        // normalize()). Normalizing the base here too keeps every expected value
+        // in this file in the same form resolve() actually returns, instead of a
+        // mixed backslash-then-forward-slash string resolve() never produces.
+        $this->base = str_replace('\\', '/', sys_get_temp_dir()) . '/mcp-rector-root-resolver-' . bin2hex(random_bytes(4));
         mkdir($this->base, 0o700, true);
     }
 

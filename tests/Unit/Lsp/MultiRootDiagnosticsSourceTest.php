@@ -26,7 +26,13 @@ final class MultiRootDiagnosticsSourceTest extends TestCase
     protected function setUp(): void
     {
         $this->cwdBackup = getcwd() ?: '/';
-        $this->base = sys_get_temp_dir() . '/mcp-rector-multiroot-' . bin2hex(random_bytes(4));
+        // CI finding (Windows legs, PR #293): sys_get_temp_dir() is
+        // backslash-separated on Windows, while WorkspaceRootResolver::resolve()
+        // (which every non-override assertion below goes through) always
+        // normalizes its own return value to forward slashes -- see
+        // WorkspaceRootResolverTest's own setUp() for the same fix and its
+        // fuller explanation.
+        $this->base = str_replace('\\', '/', sys_get_temp_dir()) . '/mcp-rector-multiroot-' . bin2hex(random_bytes(4));
         mkdir($this->base, 0o700, true);
     }
 
