@@ -10,6 +10,7 @@ use Dpt\McpRectorWarm\Lsp\DiagnosticsSource;
 use Dpt\McpRectorWarm\Lsp\EditDiagnosticsSource;
 use Dpt\McpRectorWarm\Lsp\LspServer;
 use Dpt\McpRectorWarm\Support\Scalar;
+use Dpt\McpRectorWarm\Lsp\WorkspaceAwareDiagnosticsSource;
 use Dpt\McpRectorWarm\Lsp\WorkspaceDiagnosticsSource;
 use PHPUnit\Framework\TestCase;
 
@@ -480,6 +481,165 @@ final class LspServerTest extends TestCase
         $server = new LspServer('0.1.0-prototype');
 
         self::assertSame([], $server->handle(['jsonrpc' => '2.0', 'method' => '$/some-unknown-notification']));
+    }
+
+    /**
+     * #107: a fake recording every setWorkspaceFolders()/
+     * changeWorkspaceFolders() call it receives, so a test can assert what
+     * LspServer actually told it without any real root resolution involved.
+     *
+     * @return DiagnosticsSource&WorkspaceAwareDiagnosticsSource&object{folders: list<string>, setCalls: int, changeCalls: int}
+     */
+    private static function fakeWorkspaceAwareSource(): object
+    {
+        return new class implements DiagnosticsSource, WorkspaceAwareDiagnosticsSource {
+            /** @var list<string> */
+            public array $folders = [];
+            public int $setCalls = 0;
+            public int $changeCalls = 0;
+
+            public function diagnose(string $absolutePath): array
+            {
+                return ['fixes' => []];
+            }
+
+            public function setWorkspaceFolders(array $folderPaths): void
+            {
+                $this->setCalls++;
+                $this->folders = $folderPaths;
+            }
+
+            public function changeWorkspaceFolders(array $added, array $removed): void
+            {
+                $this->changeCalls++;
+                $removedSet = array_fill_keys($removed, true);
+                $this->folders = array_values(array_filter(
+                    $this->folders,
+                    static fn(string $folder): bool => !isset($removedSet[$folder]),
+                ));
+                foreach ($added as $folder) {
+                    if (!in_array($folder, $this->folders, true)) {
+                        $this->folders[] = $folder;
+                    }
+                }
+            }
+        };
+    }
+
+    public function testInitializeWithWorkspaceFoldersPassesThemToAWorkspaceAwareSource(): void
+    {
+        $source = self::fakeWorkspaceAwareSource();
+        $server = new LspServer('0.1.0-prototype', $source);
+
+        $server->handle([
+            'jsonrpc' => '2.0',
+            'id' => 1,
+            'method' => 'initialize',
+            'params' => [
+                'capabilities' => [],
+                'workspaceFolders' => [
+                    ['uri' => 'file:///tmp/one', 'name' => 'one'],
+                    ['uri' => 'file:///tmp/two', 'name' => 'two'],
+                ],
+            ],
+        ]);
+
+        self::assertSame(1, $source->setCalls);
+        self::assertSame(['/tmp/one', '/tmp/two'], $source->folders);
+    }
+
+    public function testInitializeFallsBackToRootUriWhenNoWorkspaceFoldersGiven(): void
+    {
+        // #107: an older client that never sends workspaceFolders at all
+        // still gets its single root recorded -- the LSP spec's own
+        // fallback order (workspaceFolders, then rootUri, then rootPath).
+        $source = self::fakeWorkspaceAwareSource();
+        $server = new LspServer('0.1.0-prototype', $source);
+
+        $server->handle([
+            'jsonrpc' => '2.0',
+            'id' => 1,
+            'method' => 'initialize',
+            'params' => ['capabilities' => [], 'rootUri' => 'file:///tmp/only'],
+        ]);
+
+        self::assertSame(['/tmp/only'], $source->folders);
+    }
+
+    public function testInitializeWithNeitherWorkspaceFoldersNorRootUriRecordsNoFolders(): void
+    {
+        // Negative control for the two tests above: nothing sent at all
+        // yields [], not a crash and not a stale guess.
+        $source = self::fakeWorkspaceAwareSource();
+        $server = new LspServer('0.1.0-prototype', $source);
+
+        $server->handle([
+            'jsonrpc' => '2.0',
+            'id' => 1,
+            'method' => 'initialize',
+            'params' => ['capabilities' => []],
+        ]);
+
+        self::assertSame(1, $source->setCalls);
+        self::assertSame([], $source->folders);
+    }
+
+    public function testInitializeOnASourceThatIsNotWorkspaceAwareNeverCallsIt(): void
+    {
+        // Negative control: a plain DiagnosticsSource (every existing
+        // fake in this file, and a single-root RectorDiagnosticsSource
+        // used directly) must not be asked for workspace folders at all --
+        // instanceof is the only gate, and this proves it actually gates.
+        $server = new LspServer('0.1.0-prototype', self::fakeSource([]));
+
+        $responses = $server->handle([
+            'jsonrpc' => '2.0',
+            'id' => 1,
+            'method' => 'initialize',
+            'params' => ['capabilities' => [], 'workspaceFolders' => [['uri' => 'file:///tmp/one', 'name' => 'one']]],
+        ]);
+
+        self::assertSame(1, $responses[0]['id']);
+    }
+
+    public function testDidChangeWorkspaceFoldersAddsAndRemovesFolders(): void
+    {
+        $source = self::fakeWorkspaceAwareSource();
+        $server = new LspServer('0.1.0-prototype', $source);
+        $server->handle([
+            'jsonrpc' => '2.0',
+            'id' => 1,
+            'method' => 'initialize',
+            'params' => ['capabilities' => [], 'workspaceFolders' => [['uri' => 'file:///tmp/one', 'name' => 'one']]],
+        ]);
+
+        $responses = $server->handle([
+            'jsonrpc' => '2.0',
+            'method' => 'workspace/didChangeWorkspaceFolders',
+            'params' => [
+                'event' => [
+                    'added' => [['uri' => 'file:///tmp/two', 'name' => 'two']],
+                    'removed' => [['uri' => 'file:///tmp/one', 'name' => 'one']],
+                ],
+            ],
+        ]);
+
+        self::assertSame([], $responses);
+        self::assertSame(1, $source->changeCalls);
+        self::assertSame(['/tmp/two'], $source->folders);
+    }
+
+    public function testDidChangeWorkspaceFoldersOnASourceThatIsNotWorkspaceAwareNeverCallsItAndRepliesWithNothing(): void
+    {
+        $server = new LspServer('0.1.0-prototype', self::fakeSource([]));
+
+        $responses = $server->handle([
+            'jsonrpc' => '2.0',
+            'method' => 'workspace/didChangeWorkspaceFolders',
+            'params' => ['event' => ['added' => [['uri' => 'file:///tmp/two', 'name' => 'two']], 'removed' => []]],
+        ]);
+
+        self::assertSame([], $responses);
     }
 
     public function testShutdownRepliesWithNullResultAndFlagsShuttingDown(): void
@@ -2005,6 +2165,84 @@ final class LspServerTest extends TestCase
         self::assertSame(5, $responses[0]['id']);
         self::assertArrayHasKey('error', $responses[0]);
         self::assertArrayNotHasKey('result', $responses[0]);
+    }
+
+    /**
+     * #107 self-review finding: before #107, the server's process-wide cwd
+     * never changed after boot, so executeCommand()'s own `getcwd()` read
+     * really did mean "the server's working directory". #107's
+     * RootedDiagnosticsSourcePool now chdir()s on EVERY diagnose call (by
+     * design -- RectorTool's own containment check reads getcwd() at call
+     * time) -- simulated here directly on the fake source, with no real
+     * pool involved, since the bug is in executeCommand() reading ambient
+     * getcwd() rather than anything pool-specific. Without LspServer
+     * capturing its own boot-time root once, fixWorkspace would silently
+     * fix whichever root the most recently diagnosed DOCUMENT happened to
+     * belong to, rather than the server's own root.
+     */
+    public function testFixWorkspaceRootIsStableAcrossAnInterveningDiagnoseThatMovesCwd(): void
+    {
+        $cwdBackup = getcwd() ?: '/';
+        $bootDir = sys_get_temp_dir() . '/mcp-rector-bootroot-' . bin2hex(random_bytes(4));
+        $otherDir = sys_get_temp_dir() . '/mcp-rector-otherroot-' . bin2hex(random_bytes(4));
+        mkdir($bootDir, 0o700, true);
+        mkdir($otherDir, 0o700, true);
+        chdir($bootDir);
+
+        try {
+            $seenRoot = null;
+            $source = new class ($otherDir, static function (string $root) use (&$seenRoot): void {
+                $seenRoot = $root;
+            }) implements DiagnosticsSource, WorkspaceDiagnosticsSource {
+                /** @param \Closure(string): void $onWorkspace */
+                public function __construct(private readonly string $otherDir, private readonly \Closure $onWorkspace) {}
+
+                public function diagnose(string $absolutePath): array
+                {
+                    // The exact mechanism #107's RootedDiagnosticsSourcePool
+                    // introduced: an ordinary document diagnose chdir()s the
+                    // whole process as a side effect.
+                    chdir($this->otherDir);
+
+                    return ['fixes' => []];
+                }
+
+                public function diagnoseWorkspace(string $rootPath): array
+                {
+                    ($this->onWorkspace)($rootPath);
+
+                    return ['files' => [], 'errors' => []];
+                }
+            };
+
+            // Captured at construction, before anything has moved cwd.
+            $server = new LspServer('1.0.0', $source);
+            self::initialize($server, self::APPLY_EDIT_ONLY);
+
+            $server->handle([
+                'jsonrpc' => '2.0',
+                'method' => 'textDocument/didOpen',
+                'params' => ['textDocument' => ['uri' => 'file:///proj/A.php', 'version' => 1]],
+            ]);
+            self::assertSame(realpath($otherDir), realpath((string) getcwd()), 'setup check: the diagnose call really did move cwd');
+
+            $server->handle([
+                'jsonrpc' => '2.0',
+                'id' => 40,
+                'method' => 'workspace/executeCommand',
+                'params' => ['command' => 'rector-warm.fixWorkspace'],
+            ]);
+
+            self::assertSame(
+                realpath($bootDir),
+                $seenRoot === null ? null : realpath($seenRoot),
+                'fixWorkspace must use the server\'s own boot-time root, never a cwd an unrelated document diagnose moved in between',
+            );
+        } finally {
+            chdir($cwdBackup);
+            @rmdir($bootDir);
+            @rmdir($otherDir);
+        }
     }
 
     /**

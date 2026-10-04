@@ -36,6 +36,14 @@ final class LspServer
     /** #102: set from `initialize`'s client capabilities (workspace.applyEdit) */
     private bool $canApplyWorkspaceEdit = false;
 
+    /**
+     * #107 self-review finding: captured ONCE, in the constructor, before
+     * any diagnose call can run -- see the constructor's own docblock for
+     * why executeCommand()'s fixWorkspace must read THIS rather than an
+     * ambient getcwd() call made later.
+     */
+    private readonly string|false $bootRoot;
+
     /** #102: the one `workspace/executeCommand` this server advertises/handles. */
     private const FIX_WORKSPACE_COMMAND = 'rector-warm.fixWorkspace';
 
@@ -153,7 +161,21 @@ final class LspServer
          * @var (\Closure(array<string, mixed>): void)|null
          */
         private readonly ?\Closure $pushBackMessage = null,
-    ) {}
+    ) {
+        // #107 self-review finding (Explore review pass): before #107, the
+        // server's process-wide cwd never changed after boot, so reading
+        // getcwd() inside executeCommand() (below) really did mean "the
+        // server's single working directory". #107's own
+        // RootedDiagnosticsSourcePool now chdir()s on EVERY diagnose call
+        // (by design, for RectorTool's own cwd-dependent containment
+        // check) -- so an ambient getcwd() read later, inside
+        // executeCommand(), would silently answer "whichever root was last
+        // diagnosed" instead of the server's own root. Captured once, here,
+        // before any diagnose call can run, fixWorkspace keeps exactly its
+        // pre-#107 meaning: the server's own boot-time root, never a side
+        // effect of unrelated document traffic.
+        $this->bootRoot = \getcwd();
+    }
 
     /**
      * Write $frame immediately via $frameWriter when one is wired (the
@@ -205,6 +227,17 @@ final class LspServer
             $this->canReportProgress = self::clientSupportsWorkDoneProgress($capabilities);
             $this->canUseDocumentChanges = self::clientSupportsDocumentChanges($capabilities);
             $this->canApplyWorkspaceEdit = self::clientSupportsApplyEdit($capabilities);
+
+            // #107: multi-root workspaces -- a source that opts in by
+            // implementing WorkspaceAwareDiagnosticsSource learns the
+            // client's workspaceFolders (or the rootUri/rootPath fallback
+            // an older client sends instead) right here, before any
+            // document is diagnosed.
+            if ($this->diagnostics instanceof WorkspaceAwareDiagnosticsSource) {
+                $this->diagnostics->setWorkspaceFolders(
+                    self::initialWorkspaceFolderPaths(is_array($params) ? $params : []),
+                );
+            }
 
             return [$this->result($id, [
                 'capabilities' => [
@@ -300,6 +333,25 @@ final class LspServer
 
         if ($method === 'workspace/didChangeWatchedFiles') {
             return $this->watchedFilesChanged(self::objectParam($params, 'changes'));
+        }
+
+        // #107: multi-root workspaces -- a client that adds or removes a
+        // folder after `initialize` (VS Code multi-root, Sublime project
+        // switching) sends this instead of a fresh initialize. Only a
+        // WorkspaceAwareDiagnosticsSource cares; every other source (every
+        // existing fake, and a single-root RectorDiagnosticsSource used
+        // directly) simply never sees it.
+        if ($method === 'workspace/didChangeWorkspaceFolders') {
+            if ($this->diagnostics instanceof WorkspaceAwareDiagnosticsSource) {
+                $event = is_array($params) ? ($params['event'] ?? null) : null;
+                $event = is_array($event) ? $event : [];
+                $this->diagnostics->changeWorkspaceFolders(
+                    self::workspaceFolderListPaths(is_array($event['added'] ?? null) ? $event['added'] : []),
+                    self::workspaceFolderListPaths(is_array($event['removed'] ?? null) ? $event['removed'] : []),
+                );
+            }
+
+            return [];
         }
 
         if ($method === 'workspace/executeCommand') {
@@ -1226,7 +1278,7 @@ final class LspServer
             )];
         }
 
-        $root = getcwd();
+        $root = $this->bootRoot;
         if ($root === false) {
             return [$this->error(
                 $id,
@@ -1484,6 +1536,65 @@ final class LspServer
      * than `localhost` (RFC 8089's spelling for an empty authority) is
      * folded back in as a `\\\\host\\share` UNC prefix.
      */
+    /**
+     * #107: the workspace folders a conforming `initialize` params carries
+     * (`workspaceFolders`), with the two older single-root fallbacks the
+     * LSP spec still allows a client to send instead (`rootUri`, then
+     * `rootPath`) -- in that preference order, exactly as the spec lists
+     * them. A client sending none of the three yields [], exactly today's
+     * behaviour for a diagnostics source that does not implement
+     * WorkspaceAwareDiagnosticsSource in the first place: no folders known,
+     * every document resolves via that source's own fallback root instead.
+     *
+     * @param array<mixed> $params
+     * @return list<string>
+     */
+    private static function initialWorkspaceFolderPaths(array $params): array
+    {
+        $raw = $params['workspaceFolders'] ?? null;
+        if (is_array($raw) && $raw !== []) {
+            $paths = self::workspaceFolderListPaths($raw);
+            if ($paths !== []) {
+                return $paths;
+            }
+        }
+
+        $rootUri = $params['rootUri'] ?? null;
+        if (is_string($rootUri) && $rootUri !== '') {
+            return [self::uriToPath($rootUri)];
+        }
+
+        $rootPath = $params['rootPath'] ?? null;
+        if (is_string($rootPath) && $rootPath !== '') {
+            return [$rootPath];
+        }
+
+        return [];
+    }
+
+    /**
+     * One `WorkspaceFolder[]` list (`initialize.params.workspaceFolders`, or
+     * `didChangeWorkspaceFolders`'s own `event.added`/`event.removed`) turned
+     * into filesystem paths. An entry missing a string `uri` is skipped
+     * rather than failing the whole list -- the same "a malformed entry
+     * reports, never crashes" posture as every other LSP params reader here.
+     *
+     * @param array<mixed> $folders
+     * @return list<string>
+     */
+    private static function workspaceFolderListPaths(array $folders): array
+    {
+        $paths = [];
+        foreach ($folders as $folder) {
+            $uri = is_array($folder) ? ($folder['uri'] ?? null) : null;
+            if (is_string($uri) && $uri !== '') {
+                $paths[] = self::uriToPath($uri);
+            }
+        }
+
+        return $paths;
+    }
+
     private static function uriToPath(string $uri): string
     {
         $path = parse_url($uri, PHP_URL_PATH);

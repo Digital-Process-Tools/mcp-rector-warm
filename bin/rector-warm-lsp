@@ -22,7 +22,9 @@ foreach ([
 
 use Dpt\McpRectorWarm\Lsp\LspLoop;
 use Dpt\McpRectorWarm\Lsp\LspServer;
+use Dpt\McpRectorWarm\Lsp\MultiRootDiagnosticsSource;
 use Dpt\McpRectorWarm\Lsp\RectorDiagnosticsSource;
+use Dpt\McpRectorWarm\Lsp\RootedDiagnosticsSourcePool;
 use Dpt\McpRectorWarm\Lsp\StdioLspTransport;
 use Dpt\McpRectorWarm\RectorTool;
 use Dpt\McpRectorWarm\Support\ProtocolStdoutIsolator;
@@ -53,7 +55,21 @@ if ($workingDir !== null) {
 }
 
 $transport = new StdioLspTransport(STDIN, $lspStdout);
-$diagnostics = new RectorDiagnosticsSource(new RectorTool());
+
+// #107 (multi-root workspaces): one warm RectorDiagnosticsSource per
+// resolved workspace root -- the nearest rector.php/composer.json ancestor
+// of the document being diagnosed, among whatever folders `initialize`'s
+// workspaceFolders (or workspace/didChangeWorkspaceFolders afterwards)
+// names -- started lazily and capped by RootedDiagnosticsSourcePool.
+// $workingDir, when given, stays an unconditional override: every path
+// resolves to it, exactly the single-root behaviour this had before.
+$diagnostics = new MultiRootDiagnosticsSource(
+    new RootedDiagnosticsSourcePool(
+        static fn(string $root): RectorDiagnosticsSource => new RectorDiagnosticsSource(new RectorTool()),
+    ),
+    workingDirOverride: $workingDir,
+    fallbackRoot: (string) getcwd(),
+);
 
 $server = new LspServer(
     ServerVersion::resolve(),
