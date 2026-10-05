@@ -601,7 +601,7 @@ jobs:
         # still in the job summary either way. `files` is the merged
         # (post-#218) report -- coverage-before.xml is informational only,
         # in the job summary, never uploaded.
-        uses: codecov/codecov-action@v5
+        uses: codecov/codecov-action@v7
         with:
           files: coverage.xml
           flags: ${{ matrix.flag }}
@@ -698,7 +698,7 @@ jobs:
           path: junit.xml
 
       - name: Upload coverage to Codecov
-        uses: codecov/codecov-action@v5
+        uses: codecov/codecov-action@v7
         with:
           files: coverage.xml
           flags: windows
