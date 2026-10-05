@@ -177,6 +177,33 @@ final class WorkspaceRootResolverTest extends TestCase
         self::assertSame($workspace, WorkspaceRootResolver::resolve($file, [$workspace], $workspace));
     }
 
+    public function testFindsANearerMarkerUnderANotYetCreatedDocumentDirectory(): void
+    {
+        // #298 follow-up (review finding): canonicalize() used to fall
+        // straight to a purely lexical collapse the moment realpath()
+        // failed on the FULL path, which mixed two different
+        // canonicalisation strategies across the two sides of
+        // isDescendant()'s comparison whenever only one side existed on
+        // disk yet. A document's own directory not existing yet (an
+        // unsaved/new file) is ordinary, not adversarial -- it must not,
+        // by itself, make resolve() silently settle for a shallower root
+        // than the one that genuinely owns the document, purely because
+        // $this->base sits under a path the OS may resolve through a
+        // symlink (e.g. macOS's /tmp -> /private/tmp) while the
+        // not-yet-created directory does not resolve at all.
+        $workspace = $this->base . '/ws';
+        mkdir($workspace, 0700, true);
+        touch($workspace . '/composer.json');
+
+        $pkg = $workspace . '/pkg';
+        mkdir($pkg, 0700, true);
+        touch($pkg . '/rector.php');
+
+        $file = $pkg . '/not_yet_created_subdir/File.php';
+
+        self::assertSame($pkg, WorkspaceRootResolver::resolve($file, [$workspace], $workspace));
+    }
+
     public function testNeverWalksAboveTheOwningFolderEvenWhenAnAncestorHasAMarker(): void
     {
         // A rector.php sitting ABOVE the workspace folder (e.g. a monorepo
@@ -209,6 +236,22 @@ final class WorkspaceRootResolverTest extends TestCase
     public function testResolvesCleanlyAtAWindowsDriveRootWithNoMarkerAnywhereUnderIt(): void
     {
         self::assertSame('C:', WorkspaceRootResolver::resolve('C:/Project/src/Sample.php', [], 'C:'));
+    }
+
+    public function testCollapsesDotDotPastAWindowsDriveRootWithoutDroppingTheDrive(): void
+    {
+        // #298 follow-up (review finding): collapseDotSegments() used to
+        // decide "is this path absolute" solely by a leading "/", so a
+        // Windows-style drive-letter path ("C:/...") was treated as
+        // RELATIVE -- a leading ".." could then pop the drive letter
+        // itself off the stack like any ordinary segment, and once the
+        // stack went empty the next ".." was pushed back on, turning an
+        // absolute Windows path into a bogus relative one. The drive
+        // letter must be protected the same way a POSIX leading "/" is.
+        $method = new \ReflectionMethod(WorkspaceRootResolver::class, 'collapseDotSegments');
+
+        self::assertSame('C:/x', $method->invoke(null, 'C:/../x'));
+        self::assertSame('C:/x', $method->invoke(null, 'C:/../../x'));
     }
 
     private static function removeTree(string $dir): void

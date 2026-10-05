@@ -136,23 +136,82 @@ final class WorkspaceRootResolver
         // about to create, a synthetic path a unit test builds without
         // ever touching the filesystem, or a Windows-style drive-letter
         // path exercised on a non-Windows runner that can never resolve.
-        // In every one of those cases there is nothing on disk to canonicalise
-        // against, so fall back to a purely lexical collapse of "." and
-        // ".." segments -- that still closes the ".." escape (it cannot
-        // close a symlink escape, since there is no filesystem to follow
-        // the symlink through, but a path realpath() cannot see is also a
-        // path with no symlink to follow).
         $resolved = \realpath($path);
+        if ($resolved !== false) {
+            return self::normalize($resolved);
+        }
 
-        return $resolved !== false ? self::normalize($resolved) : self::collapseDotSegments($path);
+        // #298 follow-up (review finding): falling straight to a purely
+        // lexical collapse of the WHOLE path the moment realpath() fails
+        // on it mixed two different canonicalisation strategies across
+        // the two sides of isDescendant()'s comparison whenever only one
+        // side happened to exist on disk yet -- the workspace root
+        // (which almost always exists, and is routinely itself behind a
+        // symlink: macOS resolves sys_get_temp_dir() under /tmp, itself
+        // a symlink to /private/tmp) got realpath()'d through the
+        // symlink, while a brand-new/unsaved document's own directory
+        // (which often does not exist yet) did not -- so the two no
+        // longer shared a prefix even though one was genuinely inside
+        // the other, and resolve() silently fell back to the wrong, too
+        // shallow root. Resolving the longest EXISTING ancestor through
+        // realpath() first, and only running the lexical collapse over
+        // the non-existent tail, keeps both sides on the same symlink
+        // resolution the moment any shared ancestor exists on disk.
+        return self::collapseDotSegments(self::resolveExistingAncestor(self::normalize($path)));
+    }
+
+    private static function resolveExistingAncestor(string $normalized): string
+    {
+        $isAbsolute = \str_starts_with($normalized, '/');
+        $segments = \explode('/', $normalized);
+        $keep = \count($segments);
+        $floor = $isAbsolute ? 1 : 0;
+
+        while ($keep > $floor) {
+            $keep--;
+            $prefix = $isAbsolute && $keep === 1 ? '/' : \implode('/', \array_slice($segments, 0, $keep));
+
+            if ($prefix === '') {
+                continue;
+            }
+
+            $resolved = \realpath($prefix);
+            if ($resolved === false) {
+                continue;
+            }
+
+            $tail = \implode('/', \array_slice($segments, $keep));
+
+            return $tail === '' ? self::normalize($resolved) : self::normalize($resolved) . '/' . $tail;
+        }
+
+        // No ancestor of this path exists on disk at all (every segment
+        // was synthetic, or the path is a Windows-style drive-letter
+        // path on a non-Windows runner, which can never resolve) --
+        // nothing left to canonicalise against the filesystem.
+        return $normalized;
     }
 
     private static function collapseDotSegments(string $path): string
     {
-        $isAbsolute = \str_starts_with($path, '/');
+        // A Windows-style drive-letter path ("C:/...", "C:") has no
+        // leading "/", so it would otherwise be treated as relative and
+        // its drive segment popped by a leading ".." like any ordinary
+        // path component. Split it off first and protect it exactly the
+        // way a POSIX leading "/" is already protected below, then
+        // re-attach it to the result.
+        $drive = '';
+        $rest = $path;
+        if (\preg_match('/^([A-Za-z]:)(\/.*)?$/', $path, $m) === 1) {
+            $drive = $m[1];
+            $rest = $m[2] ?? '';
+            $rest = $rest === '' ? '/' : $rest;
+        }
+
+        $isAbsolute = $drive !== '' || \str_starts_with($rest, '/');
         $stack = [];
 
-        foreach (\explode('/', $path) as $segment) {
+        foreach (\explode('/', $rest) as $segment) {
             if ($segment === '' || $segment === '.') {
                 continue;
             }
@@ -163,8 +222,9 @@ final class WorkspaceRootResolver
                 } elseif (!$isAbsolute) {
                     $stack[] = '..';
                 }
-                // ".." above an absolute root has nowhere left to go --
-                // drop it rather than let the stack go negative.
+                // ".." above an absolute root (POSIX "/" or a drive
+                // letter) has nowhere left to go -- drop it rather than
+                // let the stack go negative or pop the drive itself.
                 continue;
             }
 
@@ -172,8 +232,13 @@ final class WorkspaceRootResolver
         }
 
         $result = ($isAbsolute ? '/' : '') . \implode('/', $stack);
+        $result = $result === '' ? '/' : $result;
 
-        return $result === '' ? '/' : $result;
+        if ($drive === '') {
+            return $result;
+        }
+
+        return $result === '/' ? $drive : $drive . $result;
     }
 
     private static function normalize(string $path): string
