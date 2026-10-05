@@ -6,6 +6,36 @@ This project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.13.0] - 2026-10-05
+
+### Added
+
+- **Multi-root LSP workspaces** (#107): `rector-warm-lsp` now reads `initialize`'s `workspaceFolders` (and the `rootUri`/`rootPath` fallback an older client sends instead) plus `workspace/didChangeWorkspaceFolders`, and diagnoses every document against the nearest `rector.php`/`composer.json` ancestor of its own folder -- not just the first folder the editor happened to open, which is the #94 bug this closes (Sublime Text's `${folder}` resolving only the first multi-root folder). Each resolved root gets its own warm worker, started lazily and capped with least-recently-used eviction. `--working-dir`, when given, stays an unconditional override exactly as before. `workspace/executeCommand`'s `rector-warm.fixWorkspace` is not yet root-aware.
+
+- `MCP_RECTOR_WARM_SESSION_IGNORE` (#200): an opt-in, `PATH`-separated list of directories the warm session never walks or lists -- the mirror of `MCP_RECTOR_WARM_SESSION_WATCH`. Declare a project's own runtime-written directory (a cache, logs, uploads) here so it does not force a session respawn on every call. See docs/how-it-works.md for the format and the correctness caveat (never declare a source directory).
+
+### Changed
+
+- Direct unit coverage for `TrackingParser::parseFile()`/`parseString()`/`inner()` (#227), closing the half of this file Codecov's session-child report had not exercised, and the `bin/rector-warm-lsp` 0%-coverage gap is now a documented, accepted limit in CONTRIBUTING.md rather than an open question. No change to what the LSP or MCP server reports or writes.
+
+- PHPStan now runs at `level: max`, always the strictest level the installed PHPStan has (#286).
+
+- Stricter static analysis on this repo's own code (#286): 100% native type coverage enforced by PHPStan's type-coverage extension, PHPStan bleedingEdge with the deprecation and PHPUnit rules and the opt-in strict parameters, and Rector's deadCode, typeDeclarations, privatization and PHPUnit attribute sets. No change to what the LSP or MCP server reports or writes.
+
+### Fixed
+
+- A session child that did not report its startup handshake within `--call-timeout` (#238) used to blame "the analysis" with a `RuntimeException` and never fall back, so the very next call could spawn a fresh session and time out identically. It now declines and falls back to the plain fork, the same as every other session route that cannot be trusted, and disables the session for the rest of that worker's life.
+
+- Fixed `ProtocolStdoutIsolator`'s fd-3 re-exec wrapper reading exit code 0 for a daemon that may have exited non-zero or been killed, on the rare path where `pcntl_waitpid()` itself fails (#284, e.g. `ECHILD`): PHP writes `0` into the wait status on that path, which looked exactly like a clean exit, instead of falling back to the real status `proc_close()` observed.
+
+- A document opened outside every declared workspace folder (#296) used to resolve to its own containing directory whenever that directory held a `rector.php` or `composer.json`, bypassing workspace containment entirely -- the LSP would `chdir()` there and run that project's own autoload and config. `WorkspaceRootResolver::resolve()` now only accepts a root marker inside the owning workspace folder (or the fallback), and otherwise refuses the same way it did before multi-root workspaces (#293) were added.
+
+- `WorkspaceRootResolver::isDescendant()` (#298, the direct sequel to #296) used to be a plain string-prefix test over unresolved paths, so a document path containing `..` (e.g. a URI like `file:///<workspace>/../elsewhere/proj/x.php`), or one reached through a symlink pointing outside the workspace, could still resolve to a marker directory outside the owning workspace folder -- the same containment bypass #296 fixed, reachable through a different path spelling, including with no `workspaceFolders` declared at all. Both sides of the containment comparison are now canonicalised (`realpath()`, falling back to a purely lexical `.`/`..` collapse when the path does not yet exist on disk) before the comparison runs, closing both the `..` case and the symlink case at the same chokepoint. Self-review on the fix found and closed two further gaps before merge: a document whose own directory does not exist yet (an unsaved/new file) was compared asymmetrically against a workspace root that does exist and is itself often behind a symlink (e.g. macOS resolving `/tmp` to `/private/tmp`), which could make `resolve()` settle for the wrong, too-shallow root even for an entirely ordinary document -- fixed by resolving the longest existing ancestor through `realpath()` first and only running the lexical collapse over the non-existent tail; and the lexical fallback mishandled a Windows-style drive-letter path (`C:/...`) once it contained `..`, treating the drive letter as an ordinary, poppable path segment instead of a protected root. A second review pass on that fix found one more, lower-severity gap: resolving the longest existing ancestor through `realpath()` has no natural floor for a genuinely relative path, so an ordinary segment name coinciding with a real directory relative to the server's own process cwd could get silently canonicalised against that unrelated directory -- not reachable from a real document path (always absolute, from a `file://` URI), but closed anyway by only probing the filesystem for a path this process can recognise as rooted (a POSIX leading `/` or a Windows drive letter).
+
+### Security
+
+- `TempCopySweeper::lockIsFree()` now refuses before opening a swept directory's `.lock` entry when that entry is a symlink or junction, or not a regular file, the same guard `reclaimStaleOwnLock()` gained in #225. Previously, `removeIfStale()`'s own `is_file($lockPath)` check already blocked the simple case, but a `.lock` entry swapped for a symlink in the narrow window between that check and `lockIsFree()`'s own `fopen($lockPath, 'c')` could still have made the sweeper create and probe/lock a file anywhere this process can write (#228).
+
 ## [0.12.0] - 2026-10-02
 
 ### Changed
@@ -674,7 +704,8 @@ MCP `output` field now contains `file_diffs[].applied_rectors` + `diff` so consu
 - PHPUnit unit + integration tests covering boot, tool listing, warm reuse (`warm_boot: true` on second call).
 - Standalone CLI: `--working-dir`, `--config` flags pinned at server start.
 
-[Unreleased]: https://github.com/Digital-Process-Tools/mcp-rector-warm/compare/v0.12.0...HEAD
+[Unreleased]: https://github.com/Digital-Process-Tools/mcp-rector-warm/compare/v0.13.0...HEAD
+[0.13.0]: https://github.com/Digital-Process-Tools/mcp-rector-warm/releases/tag/v0.13.0
 [0.12.0]: https://github.com/Digital-Process-Tools/mcp-rector-warm/releases/tag/v0.12.0
 [0.11.0]: https://github.com/Digital-Process-Tools/mcp-rector-warm/releases/tag/v0.11.0
 [0.10.0]: https://github.com/Digital-Process-Tools/mcp-rector-warm/releases/tag/v0.10.0
