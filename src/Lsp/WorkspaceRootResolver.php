@@ -157,14 +157,37 @@ final class WorkspaceRootResolver
         // realpath() first, and only running the lexical collapse over
         // the non-existent tail, keeps both sides on the same symlink
         // resolution the moment any shared ancestor exists on disk.
-        return self::collapseDotSegments(self::resolveExistingAncestor(self::normalize($path)));
+        //
+        // Only probed for a path this process can recognise as rooted
+        // (a POSIX leading "/" or a Windows drive letter) -- a second
+        // review pass found that probing shorter prefixes of a genuinely
+        // RELATIVE path has no natural floor to stop at, so an ordinary
+        // segment name ("src", "tests", ...) that happens to coincide
+        // with a real directory relative to this process's own cwd would
+        // get realpath()'d against that unrelated directory. Production
+        // document paths are always absolute (from a file:// URI); a
+        // relative path only reaches here from a synthetic caller (a
+        // unit test), where the old, purely lexical fallback is the
+        // correct, filesystem-untouched answer.
+        $normalized = self::normalize($path);
+        if (!\str_starts_with($normalized, '/') && \preg_match('/^[A-Za-z]:(\/|$)/', $normalized) !== 1) {
+            return self::collapseDotSegments($normalized);
+        }
+
+        return self::collapseDotSegments(self::resolveExistingAncestor($normalized));
     }
 
     private static function resolveExistingAncestor(string $normalized): string
     {
-        $isAbsolute = \str_starts_with($normalized, '/');
+        $isDrive = \preg_match('/^[A-Za-z]:(\/|$)/', $normalized) === 1;
+        $isAbsolute = $isDrive || \str_starts_with($normalized, '/');
         $segments = \explode('/', $normalized);
         $keep = \count($segments);
+        // A POSIX root ("" before the first "/") and a drive letter
+        // ("C:") are both protected the same way: never probe a prefix
+        // shorter than the one segment that names the root itself, so a
+        // coincidental filesystem match can only ever occur at the root
+        // segment itself, never at an arbitrary ordinary path component.
         $floor = $isAbsolute ? 1 : 0;
 
         while ($keep > $floor) {

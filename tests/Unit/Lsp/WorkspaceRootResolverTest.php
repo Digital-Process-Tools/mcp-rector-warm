@@ -254,6 +254,33 @@ final class WorkspaceRootResolverTest extends TestCase
         self::assertSame('C:/x', $method->invoke(null, 'C:/../../x'));
     }
 
+    public function testNeverProbesTheFilesystemForARelativePathsOwnCwd(): void
+    {
+        // #298 follow-up (second review pass): resolveExistingAncestor()
+        // walks shorter prefixes of a path through realpath() looking for
+        // the longest one that exists on disk -- correct and safe for an
+        // absolute path (a POSIX "/" or a Windows drive letter floors the
+        // walk), but a genuinely RELATIVE path has no such floor, so an
+        // ordinary segment name that happens to coincide with a real
+        // directory relative to THIS PROCESS's own cwd (not the
+        // workspace being resolved) would get silently canonicalised
+        // against that unrelated directory. canonicalize() must refuse
+        // to probe the filesystem at all for a relative path and fall
+        // straight to the purely lexical collapse instead.
+        $cwd = getcwd();
+        self::assertNotFalse($cwd, 'this test needs a real process cwd to pick a coincidentally-real segment name from');
+
+        $entries = array_values(array_filter(scandir($cwd) ?: [], static fn(string $e): bool => $e !== '.' && $e !== '..' && is_dir($cwd . '/' . $e)));
+        if ($entries === []) {
+            self::markTestSkipped('no real subdirectory of the process cwd to use as a coincidental-match probe');
+        }
+
+        $relative = $entries[0] . '/this-does-not-exist-anywhere/Sample.php';
+
+        $method = new \ReflectionMethod(WorkspaceRootResolver::class, 'canonicalize');
+        self::assertSame($relative, $method->invoke(null, $relative));
+    }
+
     private static function removeTree(string $dir): void
     {
         if (!is_dir($dir)) {
