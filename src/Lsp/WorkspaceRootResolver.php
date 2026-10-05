@@ -114,7 +114,66 @@ final class WorkspaceRootResolver
 
     private static function isDescendant(string $path, string $ancestor): bool
     {
+        // #298: a plain string-prefix test over normalize()'d paths is
+        // fooled by a ".." segment that textually re-creates the
+        // ancestor's own prefix (e.g. "$owner/../elsewhere" lexically
+        // starts with "$owner/") and by a symlink whose literal path sits
+        // under the ancestor while its real target does not -- both let a
+        // document outside the owning workspace folder resolve as if it
+        // were inside it. Canonicalise both sides first so the comparison
+        // is against where the path actually is, not how it is spelled.
+        $path = self::canonicalize($path);
+        $ancestor = self::canonicalize($ancestor);
+
         return $path === $ancestor || \str_starts_with($path, $ancestor . '/');
+    }
+
+    private static function canonicalize(string $path): string
+    {
+        // realpath() resolves "..", ".", and symlinks against the real
+        // filesystem -- but it returns false for a path that does not
+        // (yet) exist on disk: a directory this walk-up loop is still
+        // about to create, a synthetic path a unit test builds without
+        // ever touching the filesystem, or a Windows-style drive-letter
+        // path exercised on a non-Windows runner that can never resolve.
+        // In every one of those cases there is nothing on disk to canonicalise
+        // against, so fall back to a purely lexical collapse of "." and
+        // ".." segments -- that still closes the ".." escape (it cannot
+        // close a symlink escape, since there is no filesystem to follow
+        // the symlink through, but a path realpath() cannot see is also a
+        // path with no symlink to follow).
+        $resolved = \realpath($path);
+
+        return $resolved !== false ? self::normalize($resolved) : self::collapseDotSegments($path);
+    }
+
+    private static function collapseDotSegments(string $path): string
+    {
+        $isAbsolute = \str_starts_with($path, '/');
+        $stack = [];
+
+        foreach (\explode('/', $path) as $segment) {
+            if ($segment === '' || $segment === '.') {
+                continue;
+            }
+
+            if ($segment === '..') {
+                if ($stack !== [] && \end($stack) !== '..') {
+                    \array_pop($stack);
+                } elseif (!$isAbsolute) {
+                    $stack[] = '..';
+                }
+                // ".." above an absolute root has nowhere left to go --
+                // drop it rather than let the stack go negative.
+                continue;
+            }
+
+            $stack[] = $segment;
+        }
+
+        $result = ($isAbsolute ? '/' : '') . \implode('/', $stack);
+
+        return $result === '' ? '/' : $result;
     }
 
     private static function normalize(string $path): string

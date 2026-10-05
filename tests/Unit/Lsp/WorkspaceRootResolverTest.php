@@ -131,6 +131,52 @@ final class WorkspaceRootResolverTest extends TestCase
         self::assertSame($workspace, WorkspaceRootResolver::resolve($file, [$workspace], $workspace));
     }
 
+    public function testIgnoresAMarkerReachedThroughADotDotSegmentThatTextuallyStartsWithTheWorkspacePrefix(): void
+    {
+        // #298: isDescendant() used to be a plain string-prefix test, so a
+        // document path containing ".." that textually starts with the
+        // workspace's own prefix (e.g. "$workspace/../elsewhere/...") was
+        // treated as "inside" the workspace even though it lexically
+        // escapes it -- the same containment bypass #296 fixed, reached
+        // through a different path spelling. Pairs with
+        // testIgnoresAMarkerInAnUnrelatedDirectoryOutsideEveryWorkspaceFolder()
+        // above, which covers the plain (no "..") escape.
+        $workspace = $this->base . '/ws';
+        mkdir($workspace, 0o700, true);
+
+        $elsewhere = $this->base . '/elsewhere/proj';
+        mkdir($elsewhere, 0o700, true);
+        touch($elsewhere . '/rector.php');
+        $file = $workspace . '/../elsewhere/proj/x.php';
+        touch($file);
+
+        self::assertSame($workspace, WorkspaceRootResolver::resolve($file, [$workspace], $workspace));
+    }
+
+    public function testIgnoresAMarkerReachedThroughASymlinkThatLexicallySitsInsideTheWorkspace(): void
+    {
+        // #298: a symlink inside the workspace whose real target is
+        // outside it is the same containment bypass as the ".." case
+        // above, reached a different way -- the literal path is nominally
+        // under the workspace, but following it lands somewhere a
+        // workspace folder never authorised.
+        $workspace = $this->base . '/ws';
+        mkdir($workspace, 0o700, true);
+
+        $outside = $this->base . '/outside';
+        mkdir($outside, 0o700, true);
+        touch($outside . '/rector.php');
+
+        if (!@symlink($outside, $workspace . '/link')) {
+            self::markTestSkipped('symlink() is not available in this test environment');
+        }
+
+        $file = $workspace . '/link/x.php';
+        touch($file);
+
+        self::assertSame($workspace, WorkspaceRootResolver::resolve($file, [$workspace], $workspace));
+    }
+
     public function testNeverWalksAboveTheOwningFolderEvenWhenAnAncestorHasAMarker(): void
     {
         // A rector.php sitting ABOVE the workspace folder (e.g. a monorepo
