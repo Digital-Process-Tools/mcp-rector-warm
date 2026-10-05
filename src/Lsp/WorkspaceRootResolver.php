@@ -29,7 +29,7 @@ final class WorkspaceRootResolver
         $dir = self::normalize(self::directoryOf($documentPath));
 
         while (true) {
-            if (self::hasRootMarker($dir)) {
+            if (self::hasRootMarker($dir) && self::isDescendant($dir, $owner)) {
                 return $dir;
             }
 
