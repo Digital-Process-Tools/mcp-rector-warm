@@ -58,9 +58,14 @@ final class WorkspaceRootResolver
                 // $documentPath was never under $owner to begin with (no
                 // matching folder, and the fallback is unrelated) -- stop
                 // rather than walk somewhere the owner boundary never
-                // authorised. RectorTool's own containment check is what
-                // actually refuses the call; this just never looks further
-                // than it has to.
+                // authorised. #296: this check (and the identical one now
+                // guarding the hasRootMarker() branch above) is what
+                // actually refuses the call -- RectorTool's own cwd-based
+                // containment check cannot be trusted to catch a wrong
+                // value from here, because RootedDiagnosticsSourcePool
+                // chdir()s into whatever resolve() returns before that
+                // check ever runs, which makes it compare against the very
+                // path it was meant to be checking.
                 return $owner;
             }
 
