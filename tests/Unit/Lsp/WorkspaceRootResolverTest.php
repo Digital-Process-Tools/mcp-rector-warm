@@ -108,6 +108,29 @@ final class WorkspaceRootResolverTest extends TestCase
         self::assertSame($this->base, WorkspaceRootResolver::resolve($file, [$unrelatedFolder], $this->base));
     }
 
+    public function testIgnoresAMarkerInAnUnrelatedDirectoryOutsideEveryWorkspaceFolder(): void
+    {
+        // #296: a document outside every known workspace folder must not
+        // resolve to its own containing directory just because that
+        // directory happens to hold a rector.php or composer.json -- that
+        // directory was never authorised by any workspace folder or the
+        // fallback, and RootedDiagnosticsSourcePool chdir()s into whatever
+        // this returns. Before #293 the pre-existing containment guards
+        // refused this outright; this pins resolve() itself refusing it
+        // too, rather than relying on a cwd-dependent check that by then
+        // has already been fooled by the chdir.
+        $elsewhere = $this->base . '/elsewhere/proj';
+        mkdir($elsewhere, 0o700, true);
+        touch($elsewhere . '/rector.php');
+        $file = $elsewhere . '/x.php';
+        touch($file);
+
+        $workspace = $this->base . '/ws';
+        mkdir($workspace, 0o700, true);
+
+        self::assertSame($workspace, WorkspaceRootResolver::resolve($file, [$workspace], $workspace));
+    }
+
     public function testNeverWalksAboveTheOwningFolderEvenWhenAnAncestorHasAMarker(): void
     {
         // A rector.php sitting ABOVE the workspace folder (e.g. a monorepo
