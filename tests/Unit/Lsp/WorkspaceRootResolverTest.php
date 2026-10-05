@@ -131,6 +131,79 @@ final class WorkspaceRootResolverTest extends TestCase
         self::assertSame($workspace, WorkspaceRootResolver::resolve($file, [$workspace], $workspace));
     }
 
+    public function testIgnoresAMarkerReachedThroughADotDotSegmentThatTextuallyStartsWithTheWorkspacePrefix(): void
+    {
+        // #298: isDescendant() used to be a plain string-prefix test, so a
+        // document path containing ".." that textually starts with the
+        // workspace's own prefix (e.g. "$workspace/../elsewhere/...") was
+        // treated as "inside" the workspace even though it lexically
+        // escapes it -- the same containment bypass #296 fixed, reached
+        // through a different path spelling. Pairs with
+        // testIgnoresAMarkerInAnUnrelatedDirectoryOutsideEveryWorkspaceFolder()
+        // above, which covers the plain (no "..") escape.
+        $workspace = $this->base . '/ws';
+        mkdir($workspace, 0o700, true);
+
+        $elsewhere = $this->base . '/elsewhere/proj';
+        mkdir($elsewhere, 0o700, true);
+        touch($elsewhere . '/rector.php');
+        $file = $workspace . '/../elsewhere/proj/x.php';
+        touch($file);
+
+        self::assertSame($workspace, WorkspaceRootResolver::resolve($file, [$workspace], $workspace));
+    }
+
+    public function testIgnoresAMarkerReachedThroughASymlinkThatLexicallySitsInsideTheWorkspace(): void
+    {
+        // #298: a symlink inside the workspace whose real target is
+        // outside it is the same containment bypass as the ".." case
+        // above, reached a different way -- the literal path is nominally
+        // under the workspace, but following it lands somewhere a
+        // workspace folder never authorised.
+        $workspace = $this->base . '/ws';
+        mkdir($workspace, 0o700, true);
+
+        $outside = $this->base . '/outside';
+        mkdir($outside, 0o700, true);
+        touch($outside . '/rector.php');
+
+        if (!@symlink($outside, $workspace . '/link')) {
+            self::markTestSkipped('symlink() is not available in this test environment');
+        }
+
+        $file = $workspace . '/link/x.php';
+        touch($file);
+
+        self::assertSame($workspace, WorkspaceRootResolver::resolve($file, [$workspace], $workspace));
+    }
+
+    public function testFindsANearerMarkerUnderANotYetCreatedDocumentDirectory(): void
+    {
+        // #298 follow-up (review finding): canonicalize() used to fall
+        // straight to a purely lexical collapse the moment realpath()
+        // failed on the FULL path, which mixed two different
+        // canonicalisation strategies across the two sides of
+        // isDescendant()'s comparison whenever only one side existed on
+        // disk yet. A document's own directory not existing yet (an
+        // unsaved/new file) is ordinary, not adversarial -- it must not,
+        // by itself, make resolve() silently settle for a shallower root
+        // than the one that genuinely owns the document, purely because
+        // $this->base sits under a path the OS may resolve through a
+        // symlink (e.g. macOS's /tmp -> /private/tmp) while the
+        // not-yet-created directory does not resolve at all.
+        $workspace = $this->base . '/ws';
+        mkdir($workspace, 0700, true);
+        touch($workspace . '/composer.json');
+
+        $pkg = $workspace . '/pkg';
+        mkdir($pkg, 0700, true);
+        touch($pkg . '/rector.php');
+
+        $file = $pkg . '/not_yet_created_subdir/File.php';
+
+        self::assertSame($pkg, WorkspaceRootResolver::resolve($file, [$workspace], $workspace));
+    }
+
     public function testNeverWalksAboveTheOwningFolderEvenWhenAnAncestorHasAMarker(): void
     {
         // A rector.php sitting ABOVE the workspace folder (e.g. a monorepo
@@ -163,6 +236,49 @@ final class WorkspaceRootResolverTest extends TestCase
     public function testResolvesCleanlyAtAWindowsDriveRootWithNoMarkerAnywhereUnderIt(): void
     {
         self::assertSame('C:', WorkspaceRootResolver::resolve('C:/Project/src/Sample.php', [], 'C:'));
+    }
+
+    public function testCollapsesDotDotPastAWindowsDriveRootWithoutDroppingTheDrive(): void
+    {
+        // #298 follow-up (review finding): collapseDotSegments() used to
+        // decide "is this path absolute" solely by a leading "/", so a
+        // Windows-style drive-letter path ("C:/...") was treated as
+        // RELATIVE -- a leading ".." could then pop the drive letter
+        // itself off the stack like any ordinary segment, and once the
+        // stack went empty the next ".." was pushed back on, turning an
+        // absolute Windows path into a bogus relative one. The drive
+        // letter must be protected the same way a POSIX leading "/" is.
+        $method = new \ReflectionMethod(WorkspaceRootResolver::class, 'collapseDotSegments');
+
+        self::assertSame('C:/x', $method->invoke(null, 'C:/../x'));
+        self::assertSame('C:/x', $method->invoke(null, 'C:/../../x'));
+    }
+
+    public function testNeverProbesTheFilesystemForARelativePathsOwnCwd(): void
+    {
+        // #298 follow-up (second review pass): resolveExistingAncestor()
+        // walks shorter prefixes of a path through realpath() looking for
+        // the longest one that exists on disk -- correct and safe for an
+        // absolute path (a POSIX "/" or a Windows drive letter floors the
+        // walk), but a genuinely RELATIVE path has no such floor, so an
+        // ordinary segment name that happens to coincide with a real
+        // directory relative to THIS PROCESS's own cwd (not the
+        // workspace being resolved) would get silently canonicalised
+        // against that unrelated directory. canonicalize() must refuse
+        // to probe the filesystem at all for a relative path and fall
+        // straight to the purely lexical collapse instead.
+        $cwd = getcwd();
+        self::assertNotFalse($cwd, 'this test needs a real process cwd to pick a coincidentally-real segment name from');
+
+        $entries = array_values(array_filter(scandir($cwd) ?: [], static fn(string $e): bool => $e !== '.' && $e !== '..' && is_dir($cwd . '/' . $e)));
+        if ($entries === []) {
+            self::markTestSkipped('no real subdirectory of the process cwd to use as a coincidental-match probe');
+        }
+
+        $relative = $entries[0] . '/this-does-not-exist-anywhere/Sample.php';
+
+        $method = new \ReflectionMethod(WorkspaceRootResolver::class, 'canonicalize');
+        self::assertSame($relative, $method->invoke(null, $relative));
     }
 
     private static function removeTree(string $dir): void
